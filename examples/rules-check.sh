@@ -80,9 +80,13 @@ expect "no anti-CSRF header is refused" 403 "$code"
 
 say "Edits survive a Traefik restart"
 if docker compose restart traefik >/dev/null 2>&1; then
-  for _ in $(seq 1 20); do
-    sleep 1
+  # Give the old container time to actually go away first. Polling immediately can
+  # succeed against a Traefik that is still shutting down, which would make this
+  # check pass while measuring nothing.
+  sleep 3
+  for _ in $(seq 1 30); do
     curl -sf --max-time 3 -H "X-Scanguard-Token: $TOKEN" "$CONSOLE/api/health" >/dev/null 2>&1 && break
+    sleep 1
   done
   expect "the console rules were restored" '["detectors"]' \
     "$(get_rules | jqp 'print(json.dumps(d["overridden"]))')"

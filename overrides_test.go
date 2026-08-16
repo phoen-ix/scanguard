@@ -370,3 +370,73 @@ func TestUnusableSavedRulesAreIgnoredNotFatal(t *testing.T) {
 		t.Error("unusable overrides were adopted anyway")
 	}
 }
+
+// Traefik builds middleware in map-iteration order, so on any given startup the
+// console instance may be constructed BEFORE the detector. That order used to
+// lose every saved rule edit: restoring one requires re-validating it against the
+// file configuration, which only the detector supplies, and nothing retried once
+// it arrived. It failed on roughly half of all restarts, and only CI's version
+// matrix — three runners, three coin flips — made it visible.
+func TestSavedRulesRestoreWhenConsoleIsBuiltFirst(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	instance := t.Name()
+
+	detectorCfg := func() *Config {
+		c := CreateConfig()
+		c.InstanceName = instance
+		c.Store.Backend = "file"
+		c.Store.Path = path
+		return c
+	}
+	consoleCfg := func() *Config {
+		c := CreateConfig()
+		c.InstanceName = instance
+		c.UIMode = true
+		c.Admin.Enabled = true
+		c.Admin.Token = ruleToken
+		c.Store.Backend = "file"
+		c.Store.Path = path
+		return c
+	}
+
+	// Save a rule edit the ordinary way.
+	h, err := New(context.Background(), okBackend(), detectorCfg(), "detector@test")
+	if err != nil {
+		t.Fatalf("New detector: %v", err)
+	}
+	if _, err = New(context.Background(), okBackend(), consoleCfg(), "console@test"); err != nil {
+		t.Fatalf("New console: %v", err)
+	}
+	rules := fetchRules(t, h)
+	edit := editableOf(t, rules, "effective")
+	edit.Detectors.Honeypots.Enabled = true
+	edit.Detectors.Honeypots.Paths = []string{"/order-trap"}
+	if rec := ruleRequest(t, h, http.MethodPut, edit); rec.Code != http.StatusOK {
+		t.Fatalf("PUT returned %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Restart, and this time let Traefik build the CONSOLE first.
+	resetRuntime(instance)
+	if _, err = New(context.Background(), okBackend(), consoleCfg(), "console@test"); err != nil {
+		t.Fatalf("New console after restart: %v", err)
+	}
+	h2, err := New(context.Background(), okBackend(), detectorCfg(), "detector@test")
+	if err != nil {
+		t.Fatalf("New detector after restart: %v", err)
+	}
+
+	registryMu.Lock()
+	rt := registry[instance]
+	registryMu.Unlock()
+
+	if rt.overrides.empty() {
+		t.Fatal("saved rule edits were lost because the console was constructed first")
+	}
+	if _, ok := rt.settings().honeyPaths["/order-trap"]; !ok {
+		t.Fatal("the restored honeypot is not in the effective settings")
+	}
+	if got := send(h2, "GET", "/order-trap", "203.0.113.90:1", nil).Code; got != 403 {
+		t.Fatalf("the restored honeypot does not block, got %d", got)
+	}
+}

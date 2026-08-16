@@ -65,6 +65,10 @@ type runtime struct {
 	// settings in place.
 	baseConfig *Config
 	overrides  *Overrides
+	// overridesLoaded records that persisted rule edits have been read from the
+	// store. It is separate from `overrides` being non-nil, because "there were
+	// none saved" and "we have not looked yet" must not be confused.
+	overridesLoaded bool
 
 	janitorOnce sync.Once
 	// tarpitSem caps concurrent tarpitted requests. Without it a scanner holding a
@@ -204,6 +208,10 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 		base.normalizeDefaults()
 		rt.baseConfig = base
 	}
+	// baseConfig may have only just become available — if Traefik built the console
+	// instance before this one, the startup restore could not run yet.
+	rt.loadStoredOverridesLocked()
+
 	ov := rt.overrides
 	if !ov.empty() {
 		if relayered, rerr := rt.rebuildLocked(ov); rerr == nil {
@@ -272,26 +280,54 @@ func (rt *runtime) rebuildLocked(ov *Overrides) (*settings, error) {
 }
 
 // restoreOverrides applies rule edits persisted by a previous run.
-//
-// A failure here must never be fatal. Persisted state that a newer version of the
-// plugin rejects would otherwise take the whole Traefik configuration down at
-// startup, and the operator would have no console to fix it from — so the edits
-// are dropped, loudly, and the file configuration runs.
 func (rt *runtime) restoreOverrides(fallback *settings) *settings {
-	stored := rt.store.loadOverrides()
-	if stored.empty() {
-		return fallback
-	}
-
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+
+	if s := rt.loadStoredOverridesLocked(); s != nil {
+		return s
+	}
+	return fallback
+}
+
+// loadStoredOverridesLocked applies persisted rule edits, once, as soon as it is
+// possible to do so. It returns the new settings, or nil if nothing was applied.
+// The caller holds rt.mu.
+//
+// The "as soon as possible" part is the whole point, and it is subtle. Restoring
+// an override means re-validating it against the file configuration, which only
+// the DETECTION middleware supplies — a uiMode instance has no baseConfig. Traefik
+// builds middleware in map-iteration order, so on any given startup the console
+// instance may well be constructed first. When it is, this cannot run yet.
+//
+// Attempting it once at runtime creation is therefore not enough: it silently
+// loses every saved rule edit on roughly half of all restarts, depending on which
+// middleware Traefik happened to build first. So the attempt is deferred until
+// baseConfig exists, and both construction paths call this.
+//
+// A failure to apply is never fatal. Persisted state that a newer build of the
+// plugin rejects would otherwise take the whole Traefik configuration down at
+// startup, leaving the operator no console to fix it from — so the edits are
+// dropped, loudly, and the file configuration runs.
+func (rt *runtime) loadStoredOverridesLocked() *settings {
+	if rt.overridesLoaded || rt.baseConfig == nil {
+		// No baseConfig yet means the detection middleware has not been built. Leave
+		// the flag alone so the attempt happens when it is.
+		return nil
+	}
+	rt.overridesLoaded = true
+
+	stored := rt.store.loadOverrides()
+	if stored.empty() {
+		return nil
+	}
 
 	s, err := rt.rebuildLocked(stored)
 	if err != nil {
 		logWarn(rt.name, "saved console rule changes could not be applied and have been ignored; "+
 			"the file configuration is in force",
 			map[string]interface{}{"error": err.Error(), "savedAt": stored.Updated})
-		return fallback
+		return nil
 	}
 	rt.overrides = stored
 	rt.applySettings(s)
