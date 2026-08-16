@@ -1,0 +1,14 @@
+# Development state produced by the example harness.
+examples/state/
+*.tmp
+
+# Go build and test artefacts.
+*.test
+*.out
+coverage.*
+
+# The smoke harness resolves its dependencies at run time; its lock file is
+# committed, but the module cache is not.
+tools/yaegi-smoke/vendor/
+
+.DS_Store

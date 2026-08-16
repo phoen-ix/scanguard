@@ -1,0 +1,66 @@
+# Traefik static configuration for the scanguard development harness.
+#
+# Pinned to a specific Traefik patch version in docker-compose.yml on purpose:
+# Yaegi plugins have broken on Traefik patch releases before, silently — the
+# comparable fail2ban plugin has an open issue where routes using it simply began
+# returning 404 after a 3.6.13 to 3.6.15 upgrade, visible only in the dashboard.
+
+log:
+  level: INFO
+
+accessLog: {}
+
+api:
+  dashboard: true
+  insecure: true # harness only. Never do this on a public host.
+
+entryPoints:
+  web:
+    address: ":80"
+    # This is the half of the client-IP configuration that lives on Traefik's
+    # side, and forgetting it is the most common way to end up with a scanguard
+    # that silently bans nobody: without trustedIPs, Traefik DELETES every
+    # X-Forwarded-* and X-Real-Ip header before any middleware runs.
+    #
+    # Here it trusts the Docker bridge so the harness can simulate many different
+    # source addresses from one host. In production this is your CDN or load
+    # balancer, and it must match clientIP.trustedProxies in dynamic/scanguard.yml.
+    forwardedHeaders:
+      trustedIPs:
+        - 127.0.0.1/32
+        - 172.16.0.0/12
+        # - 173.245.48.0/20   # Cloudflare, see https://www.cloudflare.com/ips-v4
+    #
+    # If the fronting proxy speaks PROXY protocol, prefer that: it is the only
+    # mechanism that actually rewrites RemoteAddr, which makes the whole
+    # X-Forwarded-For problem disappear.
+    #
+    # proxyProtocol:
+    #   trustedIPs:
+    #     - 10.0.0.0/8
+
+    # Attach scanguard to every router on this entrypoint. This is the broadest
+    # coverage available, and it is STATIC configuration: changing it needs a
+    # Traefik restart, and no provider or plugin can alter it at runtime.
+    #
+    # http:
+    #   middlewares:
+    #     - scanguard@file
+
+  admin:
+    # The admin GUI lives on its own entrypoint. In production bind this to a
+    # private interface — "127.0.0.1:9900" or a tailscale address — so the console
+    # that can unban addresses is not reachable from the internet at all.
+    address: ":9900"
+
+providers:
+  docker:
+    exposedByDefault: false
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+experimental:
+  localPlugins:
+    scanguard:
+      moduleName: github.com/phoen-ix/scanguard

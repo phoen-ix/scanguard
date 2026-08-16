@@ -1,0 +1,37 @@
+displayName: ScanGuard
+type: middleware
+import: github.com/phoen-ix/scanguard
+summary: 'Detects HTTP vulnerability scanners (wp-login, .env, 404 floods, bad bots), bans the source IP, and serves its own web GUI for viewing and managing bans.'
+iconPath: .assets/icon.png
+
+# The plugin catalog EXECUTES this testData when validating the plugin, so it
+# must be a configuration that New() accepts without error.
+testData:
+  enabled: true
+  instanceName: catalog-test
+  dryRun: true
+  store:
+    backend: memory
+  clientIP:
+    trustedProxies: []
+    ipv4Prefix: 32
+    ipv6Prefix: 64
+  detectors:
+    signatures:
+      enabled: true
+    honeypots:
+      enabled: true
+      paths:
+        - /.git/config
+    userAgent:
+      enabled: true
+    badPaths:
+      enabled: true
+      capacity: 10
+      leak: 10s
+  enforcement:
+    rejectStatus: 403
+    escalation:
+      - 1h
+      - 24h
+      - 168h

@@ -1,0 +1,185 @@
+http:
+  middlewares:
+    # The detection middleware. Attach it to routers, or to an entrypoint in the
+    # static configuration for blanket coverage.
+    scanguard:
+      plugin:
+        scanguard:
+          enabled: true
+          instanceName: default
+          dryRun: false
+
+          store:
+            backend: file
+            path: /var/lib/scanguard/state.json
+            snapshotInterval: 15s
+
+          clientIP:
+            # No default, deliberately. Listing a CIDR here means "believe the
+            # forwarded headers this peer sends", so an entry that does not belong
+            # hands an attacker the ability to get third parties banned.
+            #
+            # This must agree with entryPoints.web.forwardedHeaders.trustedIPs in
+            # traefik.yml. Here it is the Docker bridge, so the harness can pose as
+            # many different scanners from one host; in production it is your CDN.
+            trustedProxies:
+              - 127.0.0.1/32
+              - 172.16.0.0/12
+            header: X-Real-Ip
+            ipv4Prefix: 32
+            ipv6Prefix: 64
+
+          allowlist:
+            cidrs:
+              - 127.0.0.1/32
+
+          detectors:
+            signatures:
+              enabled: true
+              useDefaults: true
+            honeypots:
+              enabled: true
+              paths:
+                - /admin.php
+                - /.env.backup
+                - /wp-content/uploads/shell.php
+            userAgent:
+              enabled: true
+              useDefaults: true
+              banEmptyUA: false
+            badPaths:
+              enabled: true
+              capacity: 6
+              leak: 20s
+              statuses: [400, 401, 403, 404, 405, 501]
+            bruteForce:
+              enabled: true
+              statuses: [401, 403]
+              capacity: 5
+              window: 60s
+            rateAbuse:
+              enabled: false
+              rps: 50
+              burst: 100
+            payload:
+              enabled: true
+              useDefaults: true
+              scanQuery: true
+              scanBody: false
+
+          # Required by badPaths and bruteForce. Set to false on routers that
+          # carry WebSockets, Server-Sent Events or gRPC streaming.
+          observeResponse: true
+
+          enforcement:
+            rejectStatus: 403
+            escalation: ["1h", "24h", "168h", "0"]
+            decay: 24h
+            tarpit:
+              enabled: false
+              delay: 3s
+              maxConcurrent: 50
+
+          notify:
+            webhooks: []
+            # chat:
+            #   kind: ntfy
+            #   url: https://ntfy.sh/your-topic
+
+    # The same plugin in UI mode: it serves only the console and never calls the
+    # next handler, so it belongs on its own router.
+    #
+    # It declares nothing but the admin surface. A uiMode instance is a view onto
+    # the shared runtime, not a second configuration of it — the detectors, store
+    # and enforcement above stay in force, and this cannot overwrite them. The one
+    # field that MUST agree is instanceName; a different name would give you a
+    # console attached to an entirely separate, empty store.
+    scanguard-ui:
+      plugin:
+        scanguard:
+          instanceName: default
+          uiMode: true
+          admin:
+            enabled: true
+            token: dev-token-change-me-0123456789
+            eventLogSize: 500
+
+    # Chain your own authentication in front of the console as well. The plugin's
+    # token is defence in depth, not the only lock on the door.
+    scanguard-ui-auth:
+      basicAuth:
+        # dev / dev
+        users:
+          - "dev:$apr1$Q8kV1Zqm$xVsvGx1CxK/g5T8Q2yqBn1"
+
+  routers:
+    site:
+      rule: PathPrefix(`/`)
+      entryPoints: [web]
+      service: site
+      middlewares: [scanguard]
+
+    whoami:
+      rule: PathPrefix(`/whoami`)
+      entryPoints: [web]
+      service: whoami
+      priority: 100
+      middlewares: [scanguard]
+
+    ws:
+      rule: PathPrefix(`/ws`)
+      entryPoints: [web]
+      service: echo
+      priority: 100
+      # Streaming route: response observation stays on to prove the wrapper does
+      # not break upgrades. Turn it off here if you ever see one fail.
+      middlewares: [scanguard]
+
+    sse:
+      rule: PathPrefix(`/sse`)
+      entryPoints: [web]
+      service: sse
+      priority: 100
+      middlewares: [scanguard]
+
+    # Catch-all: without this, probes aimed at a hostname you do not serve are
+    # answered 404 by Traefik's router and never reach any middleware, so the
+    # classic "scan /wp-login.php on an unknown vhost" case is invisible.
+    catchall:
+      rule: HostRegexp(`^.+$`)
+      entryPoints: [web]
+      service: noop
+      priority: 1
+      middlewares: [scanguard]
+
+    scanguard-console:
+      rule: PathPrefix(`/`)
+      entryPoints: [admin]
+      service: noop
+      middlewares: [scanguard-ui]
+
+  services:
+    site:
+      loadBalancer:
+        servers:
+          - url: http://site:80
+    whoami:
+      loadBalancer:
+        servers:
+          - url: http://whoami:80
+    echo:
+      loadBalancer:
+        servers:
+          - url: http://echo:8080
+    sse:
+      loadBalancer:
+        servers:
+          - url: http://sse:80
+    # Never actually reached: the middleware in front of these routers always
+    # terminates the request. A dummy service is used instead of noop@internal,
+    # which is undocumented and hardcodes a 418 — if this service ever IS reached,
+    # a connection error is a much clearer signal that something is wrong.
+    noop:
+      loadBalancer:
+        servers:
+          - url: http://127.0.0.1:1

@@ -1,0 +1,67 @@
+# scanguard development harness.
+#
+#   docker compose up -d
+#   ./scanner-sim.sh                     drive probes and watch bans appear
+#   ./streaming-check.sh                 the WebSocket + SSE release gate
+#   open http://localhost:9900           the console (token in dynamic/scanguard.yml)
+#   open http://localhost:18081          the Traefik dashboard
+#
+# Host ports are set through the environment so they can be moved out of the way
+# of whatever else you are running:  SG_WEB=9000 docker compose up -d
+#
+# The plugin source is mounted at the path Traefik's localPlugins loader expects,
+# which is ./plugins-local/src/<module path> relative to Traefik's working
+# directory. The official image sets no WORKDIR, so that is /plugins-local.
+
+services:
+  traefik:
+    # Pinned deliberately. Yaegi plugins have broken on Traefik PATCH releases
+    # before, silently — routes using the plugin simply start returning 404.
+    image: traefik:v3.7.10
+    command:
+      - --configFile=/etc/traefik/traefik.yml
+    ports:
+      - "${SG_WEB:-8800}:80" # the protected site
+      - "${SG_DASHBOARD:-18081}:8080" # Traefik dashboard (harness only)
+      - "${SG_CONSOLE:-9900}:9900" # scanguard console
+    volumes:
+      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./dynamic:/etc/traefik/dynamic:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # The plugin itself, straight from the working tree: edit, restart, retest.
+      - ..:/plugins-local/src/github.com/phoen-ix/scanguard:ro
+      # Writable state, so bans survive a restart. Without a volume here scanguard
+      # degrades to memory only and says so once in the log.
+      - scanguard-state:/var/lib/scanguard
+    depends_on: [site, whoami, echo, sse]
+
+  # The protected site. nginx rather than whoami, because whoami answers 200 to
+  # every path — with no 404s anywhere, the distinct-bad-path detector has nothing
+  # to observe and the harness silently proves nothing.
+  site:
+    image: nginx:1.27-alpine
+    expose: ["80"]
+
+  # Kept for debugging: it echoes exactly which headers reached the backend, which
+  # is the fastest way to see what Traefik's forwardedHeaders did to a request.
+  whoami:
+    image: traefik/whoami:v1.10
+    expose: ["80"]
+
+  # WebSocket echo, for the upgrade half of the streaming gate.
+  echo:
+    image: jmalloc/echo-server:v0.3.7
+    expose: ["8080"]
+
+  # Server-Sent Events, for the flush half. Ticks every 400ms; if the middleware
+  # has swallowed http.Flusher they all arrive at once at the end instead.
+  sse:
+    image: python:3.12-alpine
+    expose: ["80"]
+    working_dir: /srv
+    command: ["python", "/srv/sse.py"]
+    volumes:
+      - ./sse.py:/srv/sse.py:ro
+
+volumes:
+  scanguard-state:

@@ -1,0 +1,137 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Yaegi plugins have broken on Traefik PATCH releases without any change on our
+  # side, so the compatibility matrix runs on a schedule too. Finding out from a
+  # scheduled run beats finding out from a user.
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # Must match the go directive in go.mod. Traefik interprets this plugin
+          # with Yaegi v0.16.1, which exposes only the Go 1.22 standard library —
+          # building with a newer toolchain would happily accept APIs that fail at
+          # plugin load time.
+          go-version: "1.22"
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt'd:"; echo "$unformatted"; exit 1
+          fi
+
+  yaegi:
+    name: interpreter smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Yaegi resolves the plugin from a GOPATH source tree, so it has to live
+          # at the import path Traefik would use.
+          path: go/src/github.com/phoen-ix/scanguard
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: run the plugin under Yaegi
+        working-directory: go/src/github.com/phoen-ix/scanguard/tools/yaegi-smoke
+        env:
+          SMOKE_GOPATH: ${{ github.workspace }}/go
+        run: go run .
+
+  dependencies:
+    name: no third-party dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: the plugin module must stay dependency-free
+        run: |
+          # Every dependency has to be vendored for the plugin catalog AND has to
+          # survive interpretation. Anything using cgo, assembly, //go:embed or
+          # heavy reflection fails at plugin import, so the safe number is zero.
+          if grep -qE '^\s*require' go.mod; then
+            echo "go.mod has grown a dependency:"; cat go.mod; exit 1
+          fi
+
+  integration:
+    name: traefik ${{ matrix.traefik }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        traefik: ["v3.7.10", "v3.7", "v3.6"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: start the harness
+        working-directory: examples
+        run: |
+          sed -i "s|image: traefik:v3.7.10|image: traefik:${{ matrix.traefik }}|" docker-compose.yml
+          docker compose up -d
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:18081/api/overview >/dev/null && break
+            sleep 2
+          done
+
+      - name: the plugin must actually have loaded
+        working-directory: examples
+        run: |
+          # A plugin that failed to load shows up as "invalid middleware type or
+          # middleware does not exist", and routes using it silently 404 — which
+          # is exactly how this breaks on a Traefik upgrade.
+          if docker compose logs traefik 2>&1 | grep -qiE 'invalid middleware type|middleware does not exist|plugin.*error'; then
+            docker compose logs traefik; exit 1
+          fi
+          docker compose logs traefik 2>&1 | grep -q 'scanguard initialised'
+
+      - name: detection and enforcement
+        working-directory: examples
+        run: ./scanner-sim.sh
+
+      - name: streaming gate (websocket + sse)
+        working-directory: examples
+        run: ./streaming-check.sh
+
+      - name: rule editor
+        working-directory: examples
+        run: ./rules-check.sh
+
+      - name: bans survive a restart
+        working-directory: examples
+        run: |
+          before=$(curl -s -H "X-Scanguard-Token: dev-token-change-me-0123456789" \
+            http://localhost:9900/api/bans | grep -o '"key"' | wc -l)
+          docker compose restart traefik
+          sleep 10
+          after=$(curl -s -H "X-Scanguard-Token: dev-token-change-me-0123456789" \
+            http://localhost:9900/api/bans | grep -o '"key"' | wc -l)
+          echo "bans before=$before after=$after"
+          [ "$after" -gt 0 ] && [ "$after" -eq "$before" ]
+
+      - name: no degraded-streaming warnings
+        working-directory: examples
+        run: |
+          if docker compose logs traefik 2>&1 | grep -qE 'flusher-unavailable|hijacker-unavailable'; then
+            echo "the ResponseWriter wrapper lost an interface on this Traefik version"
+            docker compose logs traefik | grep -E 'flusher|hijacker'
+            exit 1
+          fi
+
+      - name: traefik logs
+        if: failure()
+        working-directory: examples
+        run: docker compose logs traefik
