@@ -81,10 +81,17 @@ http:
               maxConcurrent: 50
 
           notify:
-            webhooks: []
-            # chat:
-            #   kind: ntfy
-            #   url: https://ntfy.sh/your-topic
+            timeout: 5s
+            webhooks:
+              # The generic escape hatch, and the integration point for OS-level
+              # firewall blocking: a privileged helper consumes these events.
+              - url: http://hookrecv:8080/ban
+                headers:
+                  X-Harness: scanguard
+                events: [ban, unban]
+            chat:
+              kind: ntfy
+              url: http://hookrecv:8080/ntfy
 
     # The same plugin in UI mode: it serves only the console and never calls the
     # next handler, so it belongs on its own router.

@@ -33,7 +33,7 @@ services:
       # Writable state, so bans survive a restart. Without a volume here scanguard
       # degrades to memory only and says so once in the log.
       - scanguard-state:/var/lib/scanguard
-    depends_on: [site, whoami, echo, sse]
+    depends_on: [site, whoami, echo, sse, hookrecv]
 
   # The protected site. nginx rather than whoami, because whoami answers 200 to
   # every path — with no 404s anywhere, the distinct-bad-path detector has nothing
@@ -52,6 +52,17 @@ services:
   echo:
     image: jmalloc/echo-server:v0.3.7
     expose: ["8080"]
+
+  # Webhook sink, so the notification path can be verified end to end: interpreted
+  # plugin code spawning a goroutine and making an outbound call out of Traefik.
+  hookrecv:
+    image: python:3.12-alpine
+    expose: ["8080"]
+    ports:
+      - "${SG_HOOKS:-8899}:8080"
+    command: ["python", "/srv/hookrecv.py"]
+    volumes:
+      - ./hookrecv.py:/srv/hookrecv.py:ro
 
   # Server-Sent Events, for the flush half. Ticks every 400ms; if the middleware
   # has swallowed http.Flusher they all arrive at once at the end instead.

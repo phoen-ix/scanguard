@@ -110,6 +110,10 @@ jobs:
         working-directory: examples
         run: ./rules-check.sh
 
+      - name: notifications (outbound HTTP from interpreted goroutines)
+        working-directory: examples
+        run: ./notify-check.sh
+
       - name: bans survive a restart
         working-directory: examples
         run: |

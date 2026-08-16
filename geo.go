@@ -25,7 +25,13 @@ type geoCache struct {
 	mu       sync.Mutex
 	entries  map[string]geoEntry
 	inflight map[string]struct{}
+
+	// base is the lookup API root, injectable for the same reason as abuseBase.
+	base string
 }
+
+// ipAPIBase is the real lookup endpoint.
+const ipAPIBase = "http://ip-api.com"
 
 type geoEntry struct {
 	country string
@@ -46,6 +52,7 @@ func newGeoCache(s *settings) *geoCache {
 		client:   &http.Client{Timeout: 3 * time.Second},
 		entries:  make(map[string]geoEntry),
 		inflight: make(map[string]struct{}),
+		base:     ipAPIBase,
 	}
 }
 
@@ -81,7 +88,7 @@ func (g *geoCache) fetch(ip string) {
 		g.mu.Unlock()
 	}()
 
-	endpoint := "http://ip-api.com/json/" + url.PathEscape(ip) + "?fields=status,countryCode"
+	endpoint := g.base + "/json/" + url.PathEscape(ip) + "?fields=status,countryCode"
 	resp, err := g.client.Get(endpoint)
 	if err != nil {
 		return

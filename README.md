@@ -240,7 +240,10 @@ upgrade** — and if you ever see a `flusher-unavailable` warning in the log, se
 
 scanguard cannot touch nftables itself: `os/exec` does not exist under the Yaegi
 interpreter, and Traefik has no privileges to do it with. Instead it emits a ban
-event, and a small privileged helper applies it:
+event and **you supply the helper** — a small privileged container that consumes
+these webhooks and applies nftables rules. No such helper ships here; what ships
+is the payload contract below, verified end to end by `examples/notify-check.sh`
+against a real receiver:
 
 ```yaml
 notify:
@@ -251,9 +254,15 @@ notify:
 
 ```json
 { "source": "scanguard", "instance": "default",
-  "event": { "kind": "ban", "key": "203.0.113.5/32", "detector": "signature",
-             "rule": "/wp-login\\.php", "banFor": "1h", "path": "/wp-login.php" } }
+  "event": { "kind": "ban", "key": "203.0.113.5/32", "client": "203.0.113.5",
+             "detector": "signature", "rule": "/wp-login\\.php", "banFor": "1h",
+             "method": "GET", "path": "/wp-login.php", "time": "2026-08-16T10:00:00Z" } }
 ```
+
+Only `ban` and `unban` are delivered — per-request rejections are not, so a
+blocked scanner hammering your site cannot turn your webhook endpoint into a
+firehose. Delivery is bounded and fire-and-forget: a dead endpoint costs nothing
+but a log line, and cannot stall a request or take Traefik down with it.
 
 ## Configuration
 
@@ -351,6 +360,7 @@ cd examples && docker compose up -d
 ./scanner-sim.sh                               # 20 end-to-end checks against live Traefik
 ./streaming-check.sh                           # the WebSocket + SSE release gate
 ./rules-check.sh                               # the rule editor, including restart survival
+./notify-check.sh                              # webhooks and chat, delivered for real
 ```
 
 **`tools/yaegi-smoke` is the most important thing in this repository.** Traefik

@@ -40,7 +40,15 @@ type notifier struct {
 	scores   map[string]abuseScore
 	cacheTTL time.Duration
 	inflight map[string]struct{}
+
+	// abuseBase is the AbuseIPDB API root. It is a field rather than a constant so
+	// the tests can point it at an httptest server: outbound calls that only ever
+	// run against a live third party are outbound calls nobody has actually tested.
+	abuseBase string
 }
+
+// abuseIPDBBase is the real API root.
+const abuseIPDBBase = "https://api.abuseipdb.com"
 
 type abuseScore struct {
 	confidence int
@@ -49,16 +57,17 @@ type abuseScore struct {
 
 func newNotifier(s *settings) *notifier {
 	return &notifier{
-		instance: s.instanceName,
-		webhooks: s.notify.Webhooks,
-		chat:     s.notify.Chat,
-		abuse:    s.notify.AbuseIPDB,
-		timeout:  s.notifyTimeout,
-		client:   &http.Client{Timeout: s.notifyTimeout},
-		reported: make(map[string]time.Time),
-		scores:   make(map[string]abuseScore),
-		inflight: make(map[string]struct{}),
-		cacheTTL: s.abuseCacheTTL,
+		instance:  s.instanceName,
+		webhooks:  s.notify.Webhooks,
+		chat:      s.notify.Chat,
+		abuse:     s.notify.AbuseIPDB,
+		timeout:   s.notifyTimeout,
+		client:    &http.Client{Timeout: s.notifyTimeout},
+		reported:  make(map[string]time.Time),
+		scores:    make(map[string]abuseScore),
+		inflight:  make(map[string]struct{}),
+		cacheTTL:  s.abuseCacheTTL,
+		abuseBase: abuseIPDBBase,
 	}
 }
 
@@ -279,7 +288,7 @@ func (n *notifier) reportAbuse(e Event) {
 	form.Set("categories", abuseCategories(e.Detector))
 	form.Set("comment", truncate(comment, 900))
 
-	req, err := http.NewRequest(http.MethodPost, "https://api.abuseipdb.com/api/v2/report",
+	req, err := http.NewRequest(http.MethodPost, n.abuseBase+"/api/v2/report",
 		strings.NewReader(form.Encode()))
 	if err != nil {
 		return
@@ -337,7 +346,7 @@ func (n *notifier) fetchScore(ip string) {
 		n.mu.Unlock()
 	}()
 
-	endpoint := "https://api.abuseipdb.com/api/v2/check?maxAgeInDays=90&ipAddress=" + url.QueryEscape(ip)
+	endpoint := n.abuseBase + "/api/v2/check?maxAgeInDays=90&ipAddress=" + url.QueryEscape(ip)
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
 		return
