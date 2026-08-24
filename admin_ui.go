@@ -147,6 +147,17 @@ const indexHTML = `<!doctype html>
 `
 
 const appCSS = `
+/* Keep this first, and keep the !important.
+   The console shows and hides whole regions with el.hidden, which relies on the
+   browser's built-in [hidden] { display: none }. That rule lives in the user-agent
+   stylesheet, so ANY author rule setting display on the same element beats it
+   regardless of specificity — and .gate below sets display: grid. The result was
+   that unlock() ran, the app appeared, and the login card stayed on screen above
+   it: both visible at once, with the app rendered beneath the gate.
+   A single reset fixes .gate and inoculates the ten other regions toggled the
+   same way (badges, banners, empty states, the toast) against the same trap. */
+[hidden] { display: none !important; }
+
 :root {
   color-scheme: light dark;
   --bg: #f6f7f9;

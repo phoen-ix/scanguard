@@ -292,6 +292,25 @@ func TestAdminSurface(t *testing.T) {
 // /sftp-config.json in the same second, and only the first was a signature, so
 // the sweep went unflagged. Each path here is checked individually because
 // covering half the family is the failure this guards against.
+// The console hides regions with el.hidden, which depends on the user-agent rule
+// [hidden] { display: none }. Any author rule setting display on the same element
+// silently defeats it — .gate sets display: grid, which left the login card on
+// screen after unlock with the app rendered beneath it. The stylesheet must carry
+// its own reset.
+func TestStylesheetResetsHiddenElements(t *testing.T) {
+	if !strings.Contains(appCSS, "[hidden]") {
+		t.Fatal("appCSS has no [hidden] rule; el.hidden is defeated by any author display rule")
+	}
+	if !strings.Contains(appCSS, "[hidden] { display: none !important; }") {
+		t.Error("the [hidden] reset must set display: none !important, or a class rule like .gate will win")
+	}
+	// It has to come before the rules it defends against, or an equal-specificity
+	// later rule wins on source order.
+	if strings.Index(appCSS, "[hidden]") > strings.Index(appCSS, ".gate {") {
+		t.Error("the [hidden] reset must appear before .gate")
+	}
+}
+
 func TestSFTPCredentialSignaturesAreCovered(t *testing.T) {
 	m, err := newMatcher(t.Name(), defaultSignatures)
 	if err != nil {
