@@ -55,6 +55,32 @@ func (rt *runtime) serveAdmin(s *settings, uiMode bool, rw http.ResponseWriter, 
 
 	adminHeaders(rw)
 
+	// The three static assets are served WITHOUT authentication, and they have to
+	// be. The console carries its own login gate: index.html renders an "Access
+	// token" prompt, app.js stores what you type in sessionStorage and validates it
+	// against /api/health before revealing anything. Gating the assets behind the
+	// very check that gate exists to satisfy makes the page undeliverable, so a
+	// browser only ever receives the 401 JSON body and the console is reachable
+	// from curl alone.
+	//
+	// Nothing is given away by serving them. They are compiled-in string constants
+	// with no secrets, no configuration and no state; the 401 they replace already
+	// announced that scanguard is running here. Every endpoint that reads or
+	// changes anything stays behind authenticate() below — including /api/health,
+	// which must stay gated because rejecting a wrong token is exactly how the gate
+	// reports a bad token back to the user.
+	switch path {
+	case "/", "/index.html":
+		rt.serveAsset(rw, req, "text/html; charset=utf-8", indexHTML)
+		return
+	case "/app.css":
+		rt.serveAsset(rw, req, "text/css; charset=utf-8", appCSS)
+		return
+	case "/app.js":
+		rt.serveAsset(rw, req, "application/javascript; charset=utf-8", appJS)
+		return
+	}
+
 	actor, ok := rt.authenticate(s, req)
 	if !ok {
 		rw.Header().Set("WWW-Authenticate", `Bearer realm="scanguard"`)
@@ -65,12 +91,6 @@ func (rt *runtime) serveAdmin(s *settings, uiMode bool, rw http.ResponseWriter, 
 	}
 
 	switch path {
-	case "/", "/index.html":
-		rt.serveAsset(rw, req, "text/html; charset=utf-8", indexHTML)
-	case "/app.css":
-		rt.serveAsset(rw, req, "text/css; charset=utf-8", appCSS)
-	case "/app.js":
-		rt.serveAsset(rw, req, "application/javascript; charset=utf-8", appJS)
 	case "/api/state":
 		rt.apiState(s, rw, req)
 	case "/api/events":

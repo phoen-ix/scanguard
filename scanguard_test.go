@@ -281,6 +281,75 @@ func TestAdminSurface(t *testing.T) {
 	}
 }
 
+// The console ships its own login gate — an "Access token" field that stores what
+// you type in sessionStorage and validates it against /api/health. That gate can
+// only do its job if the browser can fetch the page holding it, so the three
+// static assets must be served WITHOUT a token while every data endpoint keeps
+// demanding one. Authenticating the assets too made the console unreachable from
+// a browser entirely: you got the 401 JSON body and no way to enter a token.
+func TestConsoleAssetsLoadWithoutTokenButDataDoesNot(t *testing.T) {
+	const token = "test-token-0123456789"
+	h := build(t, func(c *Config) {
+		c.Admin.Enabled = true
+		c.Admin.Token = token
+	})
+
+	for _, tc := range []struct{ path, contentType, needle string }{
+		{"/__scanguard/", "text/html", `<label for="token">`},
+		{"/__scanguard/index.html", "text/html", `id="gate-form"`},
+		{"/__scanguard/app.css", "text/css", ""},
+		{"/__scanguard/app.js", "application/javascript", "X-Scanguard-Token"},
+	} {
+		rec := send(h, "GET", tc.path, "203.0.113.21:1", nil)
+		if rec.Code != 200 {
+			t.Errorf("%s without a token returned %d, want 200 — the login gate cannot render", tc.path, rec.Code)
+			continue
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, tc.contentType) {
+			t.Errorf("%s served Content-Type %q, want %q", tc.path, ct, tc.contentType)
+		}
+		if rec.Body.Len() == 0 {
+			t.Errorf("%s served an empty body", tc.path)
+		}
+		if tc.needle != "" && !strings.Contains(rec.Body.String(), tc.needle) {
+			t.Errorf("%s does not contain %q", tc.path, tc.needle)
+		}
+	}
+
+	// The other half of the contract: serving the shell must not have opened up
+	// anything that reads or changes state.
+	for _, path := range []string{
+		"/__scanguard/api/health",
+		"/__scanguard/api/state",
+		"/__scanguard/api/events",
+		"/__scanguard/api/bans",
+		"/__scanguard/api/rules",
+		"/__scanguard/api/rules/compiled",
+	} {
+		if got := send(h, "GET", path, "203.0.113.21:1", nil).Code; got != 401 {
+			t.Errorf("%s without a token returned %d, want 401", path, got)
+		}
+	}
+}
+
+// Same contract for a uiMode instance, which serves the console at its router
+// root rather than under the admin prefix.
+func TestConsoleAssetsLoadWithoutTokenInUIMode(t *testing.T) {
+	const token = "test-token-0123456789"
+	h := build(t, func(c *Config) {
+		c.UIMode = true
+		c.Admin.Token = token
+	})
+
+	rec := send(h, "GET", "/", "203.0.113.22:1", nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `<label for="token">`) {
+		t.Errorf("uiMode console root returned %d without a token, want 200 with the access-token gate", rec.Code)
+	}
+	if got := send(h, "GET", "/api/state", "203.0.113.22:1", nil).Code; got != 401 {
+		t.Errorf("uiMode /api/state without a token returned %d, want 401", got)
+	}
+}
+
 func TestAdminReadOnlyRefusesMutations(t *testing.T) {
 	const token = "test-token-0123456789"
 	h := build(t, func(c *Config) {
