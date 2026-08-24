@@ -51,6 +51,14 @@ type runtime struct {
 	topPaths     *tally
 	topSources   *tally
 	topDetectors *tally
+	// Fed on EVERY request rather than only on a detection, so the console can
+	// break "requests seen" and "exempt" down instead of showing a bare number.
+	// Both are bounded tallies, never per-item records: the event log is a fixed
+	// ring precisely so attack volume cannot leak memory, and a per-request log
+	// would hand that back. Host cardinality is the number of vhosts served;
+	// exemption reasons are a closed set of five.
+	topHosts  *tally
+	topExempt *tally
 
 	notifier *notifier
 	geo      *geoCache
@@ -117,6 +125,8 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 			topPaths:         newTally(1000),
 			topSources:       newTally(1000),
 			topDetectors:     newTally(64),
+			topHosts:         newTally(1000),
+			topExempt:        newTally(16),
 			notifier:         newNotifier(s),
 			geo:              newGeoCache(s),
 		}

@@ -58,6 +58,14 @@ const indexHTML = `<!doctype html>
 
   <main>
     <section class="tiles" id="tiles"></section>
+    <section class="panel" id="tile-detail" hidden>
+      <div class="panel-head">
+        <h2 id="tile-detail-title"></h2>
+        <button id="tile-detail-close" class="ghost" type="button" aria-label="Close">&#10005;</button>
+      </div>
+      <p id="tile-detail-note" class="empty"></p>
+      <div id="tile-detail-body"></div>
+    </section>
 
     <section class="panel">
       <div class="panel-head">
@@ -236,7 +244,18 @@ button.link { background: none; border: none; color: var(--danger); padding: 2px
 
 main { padding: 20px; display: grid; gap: 16px; max-width: 1400px; margin: 0 auto; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
-.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.tile {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  padding: 14px 16px; text-align: left; font: inherit; color: inherit;
+  cursor: pointer; width: 100%;
+}
+.tile:hover { border-color: var(--accent); }
+.tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tile[aria-expanded="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+/* A tile with nothing recorded behind it stays a plain figure, and says so by
+   not offering an affordance it cannot honour. */
+.tile[disabled] { cursor: default; opacity: 1; }
+.tile[disabled]:hover { border-color: var(--line); }
 .tile .n { font-size: 24px; font-weight: 660; font-variant-numeric: tabular-nums; }
 .tile .l { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
 .tile.alert .n { color: var(--danger); }
@@ -379,6 +398,12 @@ function lock(message) {
   if (timer) { clearInterval(timer); timer = null; }
   token = "";
   sessionStorage.removeItem(TOKEN_KEY);
+  // Locking means forget everything, including the drilled-down source addresses
+  // still held in memory and which tile was open.
+  openTile = null;
+  lastState = null;
+  sourcesData = { sources: [], total: 0, truncated: false };
+  $("tile-detail").hidden = true;
   $("app").hidden = true;
   $("gate").hidden = false;
   var err = $("gate-error");
@@ -419,9 +444,19 @@ function fmtExpiry(ban) {
   return "in " + Math.round(hours / 24) + "d";
 }
 
-function tile(container, label, value, alert) {
-  var d = document.createElement("div");
+function tile(container, label, value, alert, kind) {
+  var d = document.createElement("button");
+  d.type = "button";
   d.className = alert ? "tile alert" : "tile";
+  if (kind) {
+    d.dataset.kind = kind;
+    d.setAttribute("aria-expanded", openTile === kind ? "true" : "false");
+    d.setAttribute("aria-controls", "tile-detail");
+  } else {
+    // No data is recorded behind this number, so it does not pretend to be
+    // clickable. Better an honest figure than a control that opens an empty box.
+    d.disabled = true;
+  }
   var n = document.createElement("div");
   n.className = "n";
   n.textContent = String(value);
@@ -433,6 +468,164 @@ function tile(container, label, value, alert) {
   container.appendChild(d);
 }
 
+function renderTiles(s) {
+  var tiles = $("tiles");
+  tiles.textContent = "";
+  tile(tiles, "requests seen", s.stats.requests, false, "requests");
+  tile(tiles, "blocked", s.stats.rejected, s.stats.rejected > 0, "blocked");
+  tile(tiles, "detections", s.stats.detections, false, "detections");
+  tile(tiles, "active bans", s.bans.length, false, "bans");
+  tile(tiles, "tracked sources", s.trackedSources, false, "sources");
+  tile(tiles, "exempt", s.stats.exempt, false, "exempt");
+}
+
+// ── Tile drill-down ──────────────────────────────────────────────────────────
+// The detail expands beneath the tile row rather than replacing the page: the
+// console has no router, so a second view would mean hand-rolling navigation,
+// history and a back affordance. Keeping the tiles on screen also keeps the
+// other five numbers as context for the one being read.
+
+var openTile = null;   // which tile is expanded, or null
+var lastState = null;  // the most recent /api/state, so re-render needs no fetch
+
+var TILE_DETAIL = {
+  "requests": {
+    title: "Requests seen",
+    note: "Every request that reached the middleware, grouped by the Host header.",
+    cols: ["host", "requests"],
+    rows: function (s) { return (s.topHosts || []).map(function (r) { return [r.key, r.count]; }); }
+  },
+  "blocked": {
+    title: "Blocked requests",
+    cols: ["time", "source", "path", "rule"],
+    events: "reject",
+    rows: function (s) { return eventRows(s, "reject"); }
+  },
+  "detections": {
+    title: "Detections",
+    cols: ["time", "source", "detector", "path"],
+    events: "ban",
+    rows: function (s) {
+      return (s.events || []).filter(function (e) { return e.kind === "ban"; })
+        .slice().reverse().map(function (e) {
+          return [fmtTime(e.time) + (e.dryRun ? " (dry)" : ""), e.client || e.key, e.detector, e.path];
+        });
+    }
+  },
+  "bans": {
+    title: "Active bans",
+    note: "The complete ban list \u2014 the same rows as the Active bans panel below.",
+    cols: ["source", "detector", "rule", "expires"],
+    rows: function (s) {
+      return (s.bans || []).map(function (b) { return [b.key, b.detector, b.rule, fmtExpiry(b)]; });
+    }
+  },
+  "sources": {
+    title: "Tracked sources",
+    note: "Most recently seen first. Fetched on demand \u2014 this table is capped at maxEntries and is not part of the three-second poll.",
+    cols: ["source", "last seen", "offences", "distinct bad paths"],
+    remote: true,
+    rows: function () {
+      return (sourcesData.sources || []).map(function (r) {
+        return [r.key, fmtTime(r.lastSeen), r.offences, r.badPaths];
+      });
+    }
+  },
+  "exempt": {
+    title: "Exempt requests",
+    note: "Which allowlist rule granted the exemption. A number climbing here with no matching rule usually means an allowlist entry that is broader than intended.",
+    cols: ["reason", "requests"],
+    rows: function (s) { return (s.topExempt || []).map(function (r) { return [r.key, r.count]; }); }
+  }
+};
+
+var sourcesData = { sources: [], total: 0, truncated: false };
+
+function eventRows(s, kind) {
+  return (s.events || []).filter(function (e) { return e.kind === kind; })
+    .slice().reverse().map(function (e) {
+      return [fmtTime(e.time), e.client || e.key, e.path, e.rule];
+    });
+}
+
+function toggleTile(kind) {
+  if (openTile === kind) { closeDetail(); return; }
+  openTile = kind;
+  if (TILE_DETAIL[kind] && TILE_DETAIL[kind].remote) { fetchSources(); }
+  renderDetail();
+  if (lastState) { renderTiles(lastState); }
+}
+
+function closeDetail() {
+  openTile = null;
+  $("tile-detail").hidden = true;
+  if (lastState) { renderTiles(lastState); }
+}
+
+function fetchSources() {
+  api("api/sources?limit=50").then(function (r) {
+    sourcesData = r;
+    if (openTile === "sources") { renderDetail(); }
+  }).catch(function (err) {
+    if (err.message !== "unauthorized") { toast(err.message); }
+  });
+}
+
+function renderDetail() {
+  var spec = TILE_DETAIL[openTile];
+  var panel = $("tile-detail");
+  if (!spec || !lastState) { panel.hidden = true; return; }
+
+  $("tile-detail-title").textContent = spec.title;
+  var rows = spec.rows(lastState) || [];
+
+  // Say what this list is, and above all what it is NOT. The tile counters are
+  // all-time; the event ring holds only the last eventLogSize entries, so a
+  // detail drawn from it is a recent window, never the whole history.
+  var note = spec.note || "";
+  if (spec.events) {
+    var total = openTile === "blocked" ? lastState.stats.rejected : lastState.stats.detections;
+    note = rows.length >= total
+      ? "All " + total + " so far."
+      : "The " + rows.length + " most recent of " + total + ". Older entries have left the event log.";
+  } else if (openTile === "sources" && sourcesData.truncated) {
+    note = spec.note + " Showing " + rows.length + " of " + sourcesData.total + ".";
+  }
+  $("tile-detail-note").textContent = note;
+  $("tile-detail-note").hidden = !note;
+
+  var body = $("tile-detail-body");
+  body.textContent = "";
+  if (!rows.length) {
+    var p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = "Nothing recorded yet.";
+    body.appendChild(p);
+    panel.hidden = false;
+    return;
+  }
+
+  var table = document.createElement("table");
+  var thead = document.createElement("thead");
+  var hr = document.createElement("tr");
+  spec.cols.forEach(function (c) {
+    var th = document.createElement("th");
+    th.textContent = c;
+    hr.appendChild(th);
+  });
+  thead.appendChild(hr);
+  table.appendChild(thead);
+  var tbody = document.createElement("tbody");
+  rows.forEach(function (cells) {
+    var tr = document.createElement("tr");
+    cells.forEach(function (v, i) { cell(tr, v, i === 0 ? "mono wrap" : ""); });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  body.appendChild(table);
+  panel.hidden = false;
+}
+
 function renderState(s) {
   $("subtitle").textContent = s.instance + " · up " + s.uptime;
   $("footer-instance").textContent = s.instance;
@@ -440,14 +633,9 @@ function renderState(s) {
   $("dryrun").hidden = !s.dryRun;
   $("readonly").hidden = !s.readOnly;
 
-  var tiles = $("tiles");
-  tiles.textContent = "";
-  tile(tiles, "requests seen", s.stats.requests);
-  tile(tiles, "blocked", s.stats.rejected, s.stats.rejected > 0);
-  tile(tiles, "detections", s.stats.detections);
-  tile(tiles, "active bans", s.bans.length);
-  tile(tiles, "tracked sources", s.trackedSources);
-  tile(tiles, "exempt", s.stats.exempt);
+  lastState = s;
+  renderTiles(s);
+  if (openTile) { renderDetail(); }
 
   renderBans(s.bans);
   renderTop("top-paths", s.topPaths);
@@ -903,6 +1091,7 @@ function refresh() {
 function tick() {
   api("api/state").then(function (s) {
     renderState(s);
+    if (openTile === "sources") { fetchSources(); }
     pulse();
   }).catch(function (err) {
     if (err.message !== "unauthorized") { toast(err.message); }
@@ -927,6 +1116,16 @@ document.addEventListener("DOMContentLoaded", function () {
   });
 
   $("lock").addEventListener("click", function () { lock(""); });
+
+  // Delegated, because renderTiles() rebuilds the buttons on every poll.
+  $("tiles").addEventListener("click", function (ev) {
+    var btn = ev.target.closest ? ev.target.closest(".tile") : null;
+    if (btn && btn.dataset.kind) { toggleTile(btn.dataset.kind); }
+  });
+  $("tile-detail-close").addEventListener("click", closeDetail);
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape" && openTile) { closeDetail(); }
+  });
   $("rules-save").addEventListener("click", saveRules);
   $("rules-revert").addEventListener("click", revertRules);
 

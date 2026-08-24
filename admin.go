@@ -95,6 +95,8 @@ func (rt *runtime) serveAdmin(s *settings, uiMode bool, rw http.ResponseWriter, 
 		rt.apiState(s, rw, req)
 	case "/api/events":
 		rt.apiEvents(rw, req)
+	case "/api/sources":
+		rt.apiSources(rw, req)
 	case "/api/bans":
 		rt.apiBans(s, rw, req, actor)
 	case "/api/rules":
@@ -217,6 +219,8 @@ type StateResponse struct {
 	TopPaths   []TopEntry             `json:"topPaths"`
 	TopSources []TopEntry             `json:"topSources"`
 	Detectors  []TopEntry             `json:"topDetectors"`
+	TopHosts   []TopEntry             `json:"topHosts"`
+	TopExempt  []TopEntry             `json:"topExempt"`
 	Config     map[string]interface{} `json:"config"`
 }
 
@@ -251,7 +255,44 @@ func (rt *runtime) apiState(s *settings, rw http.ResponseWriter, req *http.Reque
 		TopPaths:   rt.topPaths.top(10),
 		TopSources: rt.topSources.top(10),
 		Detectors:  rt.topDetectors.top(10),
+		TopHosts:   rt.topHosts.top(10),
+		TopExempt:  rt.topExempt.top(10),
 		Config:     configSummary(s),
+	})
+}
+
+// SourcesResponse is the tracked-source table. A named struct, like every other
+// admin response: encoding one as map[string]interface{} with struct values
+// yields empty objects under Yaegi, with no error to notice.
+type SourcesResponse struct {
+	Sources   []SourceEntry `json:"sources"`
+	Total     int           `json:"total"`
+	Truncated bool          `json:"truncated"`
+}
+
+// apiSources serves the tracked-source table on demand.
+//
+// Deliberately NOT folded into apiState: the console polls that every three
+// seconds, and this walks a table capped at 50000 entries while holding the lock
+// the request hot path needs. It is fetched only while the tile is open.
+func (rt *runtime) apiSources(rw http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		writeJSON(rw, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
+		return
+	}
+
+	limit := 50
+	if v := req.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+
+	sources, total := rt.counters.recent(limit)
+	writeJSON(rw, http.StatusOK, SourcesResponse{
+		Sources:   sources,
+		Total:     total,
+		Truncated: total > len(sources),
 	})
 }
 

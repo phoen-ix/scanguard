@@ -276,6 +276,55 @@ func (c *counters) sweep(now time.Time, idle time.Duration) int {
 }
 
 // size reports how many sources are being tracked.
+// SourceEntry is one row of the tracked-source table, safe to hand to the admin
+// API. A NAMED struct, and it carries copies of the scalars rather than the
+// internal *sourceState: the caller must never hold a pointer into the table it
+// no longer has the lock for, and Yaegi mangles structs that reach a response
+// through an interface{}.
+type SourceEntry struct {
+	Key      string    `json:"key"`
+	LastSeen time.Time `json:"lastSeen"`
+	Offences int       `json:"offences"`
+	BadPaths int       `json:"badPaths"`
+}
+
+// recent returns at most n tracked sources, most recently seen first.
+//
+// mu is the same lock every inbound request takes, so it is held ONLY for the
+// scalar copy — never across the sort, and never across JSON encoding. That is
+// also why this is a dedicated endpoint rather than part of the state payload the
+// console polls every three seconds: at the default cap of 50000 sources, doing
+// this on every poll would stall the proxy for as long as the console is open.
+func (c *counters) recent(n int) ([]SourceEntry, int) {
+	if n <= 0 {
+		n = 50
+	}
+
+	c.mu.Lock()
+	total := len(c.tbl)
+	out := make([]SourceEntry, 0, total)
+	for k, st := range c.tbl {
+		out = append(out, SourceEntry{
+			Key:      k.String(),
+			LastSeen: st.lastSeen.UTC(),
+			Offences: st.offences,
+			BadPaths: len(st.badSeen),
+		})
+	}
+	c.mu.Unlock()
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].LastSeen.Equal(out[j].LastSeen) {
+			return out[i].Key < out[j].Key
+		}
+		return out[i].LastSeen.After(out[j].LastSeen)
+	})
+	if len(out) > n {
+		out = out[:n]
+	}
+	return out, total
+}
+
 func (c *counters) size() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()

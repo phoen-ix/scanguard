@@ -150,26 +150,26 @@ func TestExemptRules(t *testing.T) {
 		c.Allowlist.Paths = []string{`^/health$`}
 	})
 
-	if !s.exempt(request("198.51.100.9:1", nil), s.resolve(request("198.51.100.9:1", nil))) {
+	if _, ok := s.exempt(request("198.51.100.9:1", nil), s.resolve(request("198.51.100.9:1", nil))); !ok {
 		t.Error("an allowlisted CIDR must be exempt")
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.RemoteAddr = "203.0.113.1:1"
-	if !s.exempt(req, s.resolve(req)) {
+	if _, ok := s.exempt(req, s.resolve(req)); !ok {
 		t.Error("an allowlisted path must be exempt")
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "203.0.113.1:1"
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; UptimeRobot/2.0)")
-	if !s.exempt(req, s.resolve(req)) {
+	if _, ok := s.exempt(req, s.resolve(req)); !ok {
 		t.Error("an allowlisted user-agent must be exempt")
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "203.0.113.1:1"
-	if s.exempt(req, s.resolve(req)) {
+	if _, ok := s.exempt(req, s.resolve(req)); ok {
 		t.Error("ordinary traffic must not be exempt")
 	}
 }

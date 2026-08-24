@@ -98,13 +98,15 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	now := time.Now()
 	h.rt.stats.Requests.Add(1)
+	h.rt.topHosts.add(req.Host)
 
 	res := s.resolve(req)
 
 	// Allowlists and unattributable requests short-circuit before any detector
 	// runs, so a bad rule can never lock out an exempt source.
-	if s.exempt(req, res) {
+	if reason, ok := s.exempt(req, res); ok {
 		h.rt.stats.Skipped.Add(1)
+		h.rt.topExempt.add(reason)
 		h.next.ServeHTTP(rw, req)
 		return
 	}

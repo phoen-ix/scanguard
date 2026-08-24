@@ -338,6 +338,37 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 	check("bans survive the New() call Traefik makes on every config reload", rec.Code == 403,
 		"got status %d — state is not shared across middleware instances", rec.Code)
 
+	// The tile drill-downs. Under Yaegi these are exactly the shapes that fail
+	// silently: a struct reaching a response through an interface{} parameter, or a
+	// map[string]interface{} holding structs, both encode to empty with no error.
+	// Asserting the bodies are non-empty and correctly shaped is the only gate that
+	// sees it — `go test` marshals all of these correctly.
+	rec = do(h, "GET", "/__scanguard/api/sources", "203.0.113.80:5000",
+		map[string]string{"X-Scanguard-Token": token})
+	check("sources endpoint answers", rec.Code == 200, "got status %d", rec.Code)
+	var sources struct {
+		Sources []struct {
+			Key      string `json:"key"`
+			LastSeen string `json:"lastSeen"`
+			Offences int    `json:"offences"`
+			BadPaths int    `json:"badPaths"`
+		} `json:"sources"`
+		Total int `json:"total"`
+	}
+	if jerr := json.Unmarshal(rec.Body.Bytes(), &sources); jerr != nil {
+		check("sources response decodes", false, "%v: %s", jerr, truncate(rec.Body.String(), 200))
+	} else {
+		check("sources response carries populated rows, not empty structs",
+			len(sources.Sources) > 0 && sources.Sources[0].Key != "" && sources.Sources[0].LastSeen != "",
+			"total=%d rows=%d body=%s", sources.Total, len(sources.Sources), truncate(rec.Body.String(), 250))
+	}
+
+	rec = do(h, "GET", "/__scanguard/api/state", "203.0.113.81:5000",
+		map[string]string{"X-Scanguard-Token": token})
+	check("state carries the by-host tally that backs the requests tile",
+		strings.Contains(rec.Body.String(), "\"topHosts\"") && strings.Contains(rec.Body.String(), "\"topExempt\""),
+		"body=%s", truncate(rec.Body.String(), 250))
+
 	// A configuration CHANGE must actually reach the running middleware on rebuild.
 	// Traefik drives this path on every dynamic-configuration change, and it is
 	// invisible to `go test`: compiled Go marshals a struct correctly through an

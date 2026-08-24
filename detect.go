@@ -29,30 +29,41 @@ type detection struct {
 	rule     string
 }
 
-// exempt reports whether a request must never be acted on.
+// exempt reports whether a request must never be acted on, and why.
 //
 // Checked before any detector runs and before any ban is written, so a mistake in
 // a detection rule cannot lock out an allowlisted source. Trusted proxies are
 // implicitly exempt: banning your own CDN edge or load balancer takes the site
 // down for every legitimate user at once, which is a far worse outcome than
 // missing a scanner.
-func (s *settings) exempt(req *http.Request, res resolution) bool {
+// The reason returned alongside it names WHICH rule granted the exemption. The
+// console tallies these: "1 exempt" with no way to ask which rule produced it is
+// indistinguishable from a misconfigured allowlist quietly exempting everything.
+const (
+	exemptUnattributable = "unattributable"
+	exemptTrustedProxy   = "trusted-proxy"
+	exemptCIDR           = "allowlist-cidr"
+	exemptPath           = "allowlist-path"
+	exemptUserAgent      = "allowlist-user-agent"
+)
+
+func (s *settings) exempt(req *http.Request, res resolution) (string, bool) {
 	if !res.bannable {
-		return true
+		return exemptUnattributable, true
 	}
 	if containsAddr(s.trustedProxies, res.client) {
-		return true
+		return exemptTrustedProxy, true
 	}
 	if containsAddr(s.allowCIDRs, res.client) {
-		return true
+		return exemptCIDR, true
 	}
 	if s.allowPaths != nil && s.allowPaths.match(req.URL.Path) {
-		return true
+		return exemptPath, true
 	}
 	if s.allowUA != nil && s.allowUA.match(req.UserAgent()) {
-		return true
+		return exemptUserAgent, true
 	}
-	return false
+	return "", false
 }
 
 // detectRequest runs the detectors that can decide before the backend is touched.

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -297,6 +298,135 @@ func TestAdminSurface(t *testing.T) {
 // silently defeats it — .gate sets display: grid, which left the login card on
 // screen after unlock with the app rendered beneath it. The stylesheet must carry
 // its own reset.
+// Every exemption branch must name itself. "1 exempt" with no way to ask which
+// rule produced it is indistinguishable from an allowlist entry quietly exempting
+// far more than intended.
+func TestExemptReportsWhichRuleMatched(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.InstanceName = t.Name()
+	cfg.Allowlist.CIDRs = []string{"10.1.0.0/16"}
+	cfg.Allowlist.Paths = []string{"^/health$"}
+	cfg.Allowlist.UserAgents = []string{"uptime-robot"}
+	cfg.ClientIP.TrustedProxies = []string{"10.2.0.0/16"}
+	cfg.ClientIP.Header = "Cf-Connecting-Ip"
+	s, err := cfg.parse()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	mk := func(remote, path, ua string, hdr map[string]string) (*http.Request, resolution) {
+		req := httptest.NewRequest("GET", path, nil)
+		req.RemoteAddr = remote
+		if ua != "" {
+			req.Header.Set("User-Agent", ua)
+		}
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		return req, s.resolve(req)
+	}
+
+	for _, tc := range []struct {
+		name, remote, path, ua, want string
+		hdr                          map[string]string
+	}{
+		// A trusted peer whose forwarded header names a client that is ITSELF a
+		// trusted proxy. This is the only way the trusted-proxy branch is reached:
+		// the X-Forwarded-For walk skips trusted hops, so it can never resolve one.
+		{name: "forwarded client is itself a proxy", remote: "10.2.0.5:1", path: "/",
+			hdr: map[string]string{"Cf-Connecting-Ip": "10.2.0.9"}, want: exemptTrustedProxy},
+		// A trusted peer with no forwarded header at all. resolve() marks this
+		// unattributable rather than blaming the proxy, and exempt() must say so —
+		// this is the shape of a Traefik forwardedHeaders misconfiguration, and the
+		// console tally is where an operator would notice it.
+		{name: "trusted peer, no forwarded header", remote: "10.2.0.5:1", path: "/",
+			want: exemptUnattributable},
+		{name: "allowlisted cidr", remote: "10.1.0.5:1", path: "/", want: exemptCIDR},
+		{name: "allowlisted path", remote: "203.0.113.5:1", path: "/health", want: exemptPath},
+		{name: "allowlisted ua", remote: "203.0.113.5:1", path: "/", ua: "uptime-robot/1.0",
+			want: exemptUserAgent},
+	} {
+		req, res := mk(tc.remote, tc.path, tc.ua, tc.hdr)
+		got, ok := s.exempt(req, res)
+		if !ok {
+			t.Errorf("%s: not exempt at all", tc.name)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%s: reason %q, want %q", tc.name, got, tc.want)
+		}
+	}
+
+	req, res := mk("203.0.113.9:1", "/", "curl/8", nil)
+	if reason, ok := s.exempt(req, res); ok {
+		t.Errorf("an ordinary request was exempt with reason %q", reason)
+	}
+}
+
+// counters.recent backs the tracked-sources drill-down. It must order by last
+// seen, honour the cap, report the true total behind it, and never hand out a
+// pointer into the table it no longer holds the lock for.
+func TestCountersRecent(t *testing.T) {
+	c := newCounters(100)
+	base := time.Now()
+	for i := 0; i < 5; i++ {
+		key := netip.MustParsePrefix(fmt.Sprintf("203.0.113.%d/32", i))
+		c.mu.Lock()
+		st := c.getLocked(key, base.Add(time.Duration(i)*time.Minute))
+		st.offences = i
+		c.mu.Unlock()
+	}
+
+	got, total := c.recent(3)
+	if total != 5 {
+		t.Errorf("total = %d, want 5", total)
+	}
+	if len(got) != 3 {
+		t.Fatalf("returned %d rows, want the cap of 3", len(got))
+	}
+	if got[0].Key != "203.0.113.4/32" {
+		t.Errorf("first row %s, want the most recently seen 203.0.113.4/32", got[0].Key)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i].LastSeen.After(got[i-1].LastSeen) {
+			t.Errorf("row %d is newer than the row before it; not sorted newest-first", i)
+		}
+	}
+
+	empty, total := newCounters(10).recent(50)
+	if len(empty) != 0 || total != 0 {
+		t.Errorf("an empty table returned %d rows / total %d, want 0 / 0", len(empty), total)
+	}
+}
+
+// The drill-downs are served by the admin API, so they must sit behind the same
+// authentication as everything else that reads state.
+func TestSourcesEndpointRequiresAuth(t *testing.T) {
+	const token = "test-token-0123456789"
+	h := build(t, func(c *Config) {
+		c.Admin.Enabled = true
+		c.Admin.Token = token
+	})
+
+	if got := send(h, "GET", "/__scanguard/api/sources", "203.0.113.31:1", nil).Code; got != 401 {
+		t.Errorf("unauthenticated /api/sources returned %d, want 401", got)
+	}
+	rec := send(h, "GET", "/__scanguard/api/sources", "203.0.113.31:1",
+		map[string]string{"X-Scanguard-Token": token})
+	if rec.Code != 200 {
+		t.Fatalf("authenticated /api/sources returned %d, want 200", rec.Code)
+	}
+	for _, want := range []string{"\"sources\"", "\"total\"", "\"truncated\""} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("response is missing %s: %s", want, truncate(rec.Body.String(), 200))
+		}
+	}
+	if got := send(h, "POST", "/__scanguard/api/sources", "203.0.113.31:1",
+		map[string]string{"X-Scanguard-Token": token}).Code; got != 405 {
+		t.Errorf("POST /api/sources returned %d, want 405", got)
+	}
+}
+
 func TestStylesheetResetsHiddenElements(t *testing.T) {
 	if !strings.Contains(appCSS, "[hidden]") {
 		t.Fatal("appCSS has no [hidden] rule; el.hidden is defeated by any author display rule")
