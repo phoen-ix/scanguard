@@ -124,6 +124,24 @@ func main() {
 
 // backend is the "next" handler. It answers 404 for anything under /missing/ so
 // the response-status detectors have something to observe.
+// withAdminToken copies cfg one level deep, replacing only admin.token, so the
+// caller's configuration map is left untouched.
+func withAdminToken(cfg map[string]interface{}, token string) map[string]interface{} {
+	out := make(map[string]interface{}, len(cfg))
+	for k, v := range cfg {
+		out[k] = v
+	}
+	admin := make(map[string]interface{})
+	if existing, ok := cfg["admin"].(map[string]interface{}); ok {
+		for k, v := range existing {
+			admin[k] = v
+		}
+	}
+	admin["token"] = token
+	out["admin"] = admin
+	return out
+}
+
 func backend() http.HandlerFunc {
 	return func(rw http.ResponseWriter, req *http.Request) {
 		switch {
@@ -319,6 +337,39 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 	rec = do(h2, "GET", "/", "203.0.113.21:5000", nil)
 	check("bans survive the New() call Traefik makes on every config reload", rec.Code == 403,
 		"got status %d — state is not shared across middleware instances", rec.Code)
+
+	// A configuration CHANGE must actually reach the running middleware on rebuild.
+	// Traefik drives this path on every dynamic-configuration change, and it is
+	// invisible to `go test`: compiled Go marshals a struct correctly through an
+	// interface{} parameter, Yaegi empties it. That made every configuration hash
+	// to sha256("{}"), so acquireRuntime compared them equal and treated every
+	// reload as "nothing changed" — no token, allowlist or detector edit in the
+	// dynamic file reached the middleware until Traefik was restarted, silently.
+	rotated := "smoke-token-rotated-9876543210"
+	h3, err := build(withAdminToken(cfg, rotated))
+	if err != nil {
+		fatal("rebuilding with a changed token failed: %v", err)
+	}
+	rec = do(h3, "GET", "/__scanguard/api/health", "203.0.113.90:5000",
+		map[string]string{"X-Scanguard-Token": rotated})
+	check("a changed admin token takes effect on reload", rec.Code == 200,
+		"got status %d — the new configuration was ignored, so nothing in the dynamic file applies without a Traefik restart", rec.Code)
+
+	rec = do(h3, "GET", "/__scanguard/api/health", "203.0.113.90:5000",
+		map[string]string{"X-Scanguard-Token": token})
+	check("the superseded admin token stops working", rec.Code == 401,
+		"got status %d — the old token still authenticates after rotation", rec.Code)
+
+	// Put the original configuration back, so the checks below still hold and the
+	// reload path is shown to apply changes in both directions.
+	h, err = build(cfg)
+	if err != nil {
+		fatal("restoring the original configuration failed: %v", err)
+	}
+	rec = do(h, "GET", "/__scanguard/api/health", "203.0.113.90:5000",
+		map[string]string{"X-Scanguard-Token": token})
+	check("reverting the configuration restores the previous token", rec.Code == 200,
+		"got status %d", rec.Code)
 
 	// Rule editing. This exercises the console's write path end to end through the
 	// interpreter: JSON decode, deep copy of the configuration, re-parse, and the

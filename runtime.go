@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/netip"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -563,23 +564,57 @@ func sameOverrideStamp(a, b *Overrides) bool {
 }
 
 // storeFingerprint captures the fields that require rebuilding the state backend.
+//
+// A map rather than a struct, and hashed through mapFingerprint's concrete
+// parameter type — see configFingerprint for why the distinction matters.
 func storeFingerprint(s *settings) string {
-	return fingerprintOf(map[string]interface{}{
+	return mapFingerprint(map[string]string{
 		"backend":   s.storeBackend,
 		"path":      s.storePath,
 		"redisAddr": s.redis.Address,
-		"redisDB":   s.redis.DB,
+		"redisDB":   strconv.Itoa(s.redis.DB),
 		"redisKey":  s.redis.KeyPrefix,
-		"max":       s.maxEntries,
+		"max":       strconv.Itoa(s.maxEntries),
 	})
 }
 
-// fingerprintOf hashes any JSON-encodable value into a short stable string.
-func fingerprintOf(v interface{}) string {
-	buf, err := json.Marshal(v)
+// configFingerprint hashes a whole plugin configuration. acquireRuntime compares
+// it to decide whether a Traefik reload actually changed anything.
+//
+// The parameter is *Config, NOT interface{}, and that is the entire point. Yaegi
+// empties an interpreted struct when it passes through an interface{} parameter:
+// json.Marshal then returns "{}" — with a nil error — so every configuration
+// hashed to sha256("{}") and compared equal. acquireRuntime therefore took its
+// "nothing changed" branch on every reload, and NO configuration change in the
+// dynamic file ever reached the running middleware. Not the admin token, not the
+// allowlist, not a detector threshold. It failed silently and looked like Traefik
+// refusing to reload; only a Traefik restart, which builds the runtime from
+// scratch, applied anything.
+//
+// Compiled Go marshals the same value correctly through interface{}, so `go test`
+// cannot see this. tools/yaegi-smoke asserts the reload path end to end instead.
+//
+// Keep every fingerprint helper's parameter concretely typed for the same reason,
+// and never route one through a shared interface{} helper again.
+func configFingerprint(c *Config) string {
+	buf, err := json.Marshal(c)
 	if err != nil {
 		return ""
 	}
+	return hashOf(buf)
+}
+
+// mapFingerprint hashes a plain string map. Concretely typed, as above.
+func mapFingerprint(m map[string]string) string {
+	buf, err := json.Marshal(m)
+	if err != nil {
+		return ""
+	}
+	return hashOf(buf)
+}
+
+// hashOf reduces already-encoded bytes to a short stable string.
+func hashOf(buf []byte) string {
 	sum := sha256.Sum256(buf)
 	return hex.EncodeToString(sum[:8])
 }
