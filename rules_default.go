@@ -34,6 +34,18 @@ var defaultSignatures = []string{
 	`/\.vscode/sftp\.json`,
 	`/\.ds_store$`,
 
+	// FTP/SFTP deployment credentials written by editor and IDE plugins. These are
+	// probed as a SET, not individually: the scanner that asked for
+	// /.vscode/sftp.json above requested /sftp-config.json in the same second, so
+	// covering one file of the pair catches half a sweep and bans nobody. Each of
+	// these stores host, username and password in plaintext, and no legitimate
+	// client of any site has a reason to fetch one.
+	`/sftp-config(?:-alt\d*)?\.json`,
+	`/\.ftpconfig`,
+	`/\.remote-sync\.json`,
+	`/(?:sitemanager|recentservers)\.xml`,
+	`/ws_ftp\.ini`,
+
 	// Credentials and secrets left in webroots.
 	`/\.env(?:$|[./])`,
 	`/\.aws/credentials`,

@@ -287,6 +287,47 @@ func TestAdminSurface(t *testing.T) {
 // static assets must be served WITHOUT a token while every data endpoint keeps
 // demanding one. Authenticating the assets too made the console unreachable from
 // a browser entirely: you got the 401 JSON body and no way to enter a token.
+// Editor-plugin FTP/SFTP credential files are swept as a set. Observed in the
+// wild against a parked host: one source requested /.vscode/sftp.json and
+// /sftp-config.json in the same second, and only the first was a signature, so
+// the sweep went unflagged. Each path here is checked individually because
+// covering half the family is the failure this guards against.
+func TestSFTPCredentialSignaturesAreCovered(t *testing.T) {
+	m, err := newMatcher(t.Name(), defaultSignatures)
+	if err != nil {
+		t.Fatalf("newMatcher: %v", err)
+	}
+	for _, path := range []string{
+		"/.vscode/sftp.json",
+		"/sftp-config.json",
+		"/sftp-config-alt.json",
+		"/sftp-config-alt1.json",
+		"/.ftpconfig",
+		"/.remote-sync.json",
+		"/sitemanager.xml",
+		"/recentservers.xml",
+		"/ws_ftp.ini",
+		"/WS_FTP.ini", // matching is case-insensitive
+	} {
+		if !m.match(path) {
+			t.Errorf("%s is not matched by the default signatures", path)
+		}
+	}
+
+	// The curation principle is that a default must be something a legitimate
+	// client would never ask for. These neighbours must NOT match.
+	for _, path := range []string{
+		"/config.json",
+		"/api/sftp-config",
+		"/assets/sitemanager.js",
+		"/manager.xml",
+	} {
+		if m.match(path) {
+			t.Errorf("%s matched a default signature; too broad, this is where false positives come from", path)
+		}
+	}
+}
+
 func TestConsoleAssetsLoadWithoutTokenButDataDoesNot(t *testing.T) {
 	const token = "test-token-0123456789"
 	h := build(t, func(c *Config) {
