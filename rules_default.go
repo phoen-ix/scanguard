@@ -25,6 +25,13 @@ var defaultSignatures = []string{
 	`/wp-content/(?:plugins|themes)/[^/]+/.*\.php`,
 	`/wp-includes/.*\.php`,
 
+	// Joomla, the counterpart to the WordPress block above. Extension manifests are
+	// the version-disclosure step of a Joomla sweep: every extension ships one, they
+	// sit at a predictable path, and nothing renders them. A browser on a Joomla site
+	// loads an extension's JS and CSS, never its XML.
+	`/plugins/(?:editors|system|content|authentication|user)/[^/]+/.*\.xml$`,
+	`/(?:components/com_|modules/mod_)[^/]+/.*\.xml$`,
+
 	// Exposed VCS and editor metadata.
 	`/\.git/(?:config|head|index|logs/head)`,
 	`/\.svn/(?:entries|wc\.db)`,
@@ -65,6 +72,15 @@ var defaultSignatures = []string{
 	`/_ignition/execute-solution`,
 	`/index\.php\?s=/index/\\think`,
 	`/(?:cgi-bin|scripts)/.*\.(?:sh|pl|cgi)$`,
+
+	// A PHP file inside an upload or image directory. This is where a webshell lands
+	// after an upload bypass, and it is the one place a correctly configured site
+	// never executes PHP from — which is what keeps this off legitimate traffic.
+	`/(?:uploads?|images?|img)/.*\.php$`,
+	// blueimp jQuery-File-Upload. Only the handler class, never the upload endpoint
+	// itself: a site using the library POSTs to /server/php/index.php as designed,
+	// but UploadHandler.php is an include and is only ever fetched by a probe.
+	`/server/php/uploadhandler\.php$`,
 
 	// Appliance and framework CVE probes seen constantly in the wild.
 	`/boaform/(?:admin|formlogin)`,
@@ -163,4 +179,9 @@ var defaultPayloadPatterns = []string{
 	`\bbase64_decode\s*\(`,
 	`\b(?:eval|assert|system|passthru|shell_exec)\s*\(`,
 	`\bo:\d+:"[a-z_]`,
+
+	// WordPress REST batch endpoint. Packing many sub-requests into one HTTP request
+	// turns a per-request rate limit into a per-hundred one, which is what makes it
+	// the current vehicle for WordPress credential stuffing.
+	`\brest_route=/+batch/v\d`,
 }

@@ -477,6 +477,70 @@ func TestSFTPCredentialSignaturesAreCovered(t *testing.T) {
 	}
 }
 
+func TestJoomlaAndWebshellSignaturesAreCovered(t *testing.T) {
+	m, err := newMatcher(t.Name(), defaultSignatures)
+	if err != nil {
+		t.Fatalf("newMatcher: %v", err)
+	}
+	for _, path := range []string{
+		"/plugins/editors/jce/jce.xml",
+		"/plugins/system/jcemediabox/jcemediabox.xml",
+		"/components/com_banners/banners.xml",
+		"/modules/mod_menu/mod_menu.xml",
+		"/images/images/cache.php",
+		"/uploads/2023/shell.php",
+		"/img/x.PHP", // matching is case-insensitive
+		"/server/php/UploadHandler.php",
+	} {
+		if !m.match(path) {
+			t.Errorf("%s is not matched by the default signatures", path)
+		}
+	}
+
+	// The curation principle is that a default must be something a legitimate
+	// client would never ask for. These neighbours must NOT match.
+	for _, path := range []string{
+		"/plugins/editors/jce/js/editor.js", // a Joomla site serves its own assets
+		"/components/com_banners/banners.css",
+		"/modules/mod_menu/tmpl/default.php",
+		"/sitemap.xml",
+		"/images/logo.png",
+		"/uploads/report.pdf",
+		"/server/php/index.php", // the library's real upload endpoint
+	} {
+		if m.match(path) {
+			t.Errorf("%s matched a default signature; too broad, this is where false positives come from", path)
+		}
+	}
+}
+
+func TestWordPressBatchEndpointIsCoveredWithoutTheRESTFallback(t *testing.T) {
+	m, err := newMatcher(t.Name(), defaultPayloadPatterns)
+	if err != nil {
+		t.Fatalf("newMatcher: %v", err)
+	}
+	for _, query := range []string{
+		"rest_route=/batch/v1",
+		"rest_route=//batch/v1",
+		"foo=1&rest_route=/batch/v1",
+	} {
+		if !m.match(query) {
+			t.Errorf("%q is not matched by the default payload patterns", query)
+		}
+	}
+
+	// ?rest_route= is how a WordPress site addresses its own REST API when pretty
+	// permalinks are off. Only the batch endpoint is a probe; the rest is traffic.
+	for _, query := range []string{
+		"rest_route=/wp/v2/posts",
+		"rest_route=/wp/v2/users&per_page=1",
+	} {
+		if m.match(query) {
+			t.Errorf("%q matched a default payload pattern; too broad", query)
+		}
+	}
+}
+
 func TestConsoleAssetsLoadWithoutTokenButDataDoesNot(t *testing.T) {
 	const token = "test-token-0123456789"
 	h := build(t, func(c *Config) {
