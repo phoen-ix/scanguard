@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -902,5 +903,103 @@ func TestCrawlerPolicyRejectsAnUnknownValue(t *testing.T) {
 		t.Fatal("an unrecognised crawler policy started up instead of failing")
 	} else if !strings.Contains(err.Error(), "crawlers") {
 		t.Errorf("the error should name the setting, got: %v", err)
+	}
+}
+
+// observeResponse wraps the ResponseWriter, and a wrapper that swallows Flush
+// turns every Server-Sent Events route behind this middleware into a stream that
+// delivers nothing until it ends. respwriter.go forwards Flush and says SSE
+// depends on it; nothing asserted it, and the only Flush in the tests was a no-op
+// bench helper, so the delegation could have been removed without a failure.
+//
+// The test streams through a real server rather than a ResponseRecorder: a
+// recorder buffers by definition, so it cannot tell a forwarded flush from a
+// dropped one.
+//
+// Every wait is bounded and the handler is always released. A swallowed flush
+// stalls the client inside http.Get, before a single byte of body is read -- the
+// headers have not been sent either -- so a test that only guarded the body read
+// would hang here instead of failing.
+func TestObserveResponseDoesNotBufferServerSentEvents(t *testing.T) {
+	defer resetRuntime(t.Name())
+
+	flusherSeen := make(chan bool, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+
+	backend := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		rw.Header().Set("Content-Type", "text/event-stream")
+		rw.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(rw, "data: first\n\n")
+
+		f, ok := rw.(http.Flusher)
+		flusherSeen <- ok
+		if !ok {
+			return
+		}
+		f.Flush()
+
+		// Still inside the handler. If the first event only reaches the client
+		// after this returns, the flush was swallowed.
+		<-release
+		_, _ = io.WriteString(rw, "data: second\n\n")
+	})
+
+	cfg := CreateConfig()
+	cfg.InstanceName = t.Name()
+	cfg.ObserveResponse = true
+	// badPaths is what makes needsResponse true, so the writer is actually wrapped.
+	// Without it scanguard.go never constructs a responseObserver and the test
+	// would pass while proving nothing.
+	cfg.Detectors.BadPaths.Enabled = true
+
+	h, err := New(context.Background(), backend, cfg, "scanguard@test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	srv := httptest.NewServer(h)
+	// LIFO: unblock the handler first, so srv.Close() is not waiting on a request
+	// that is waiting on us.
+	defer srv.Close()
+	defer unblock()
+
+	type read struct {
+		line string
+		err  error
+	}
+	first := make(chan read, 1)
+	go func() {
+		resp, err := http.Get(srv.URL + "/events")
+		if err != nil {
+			first <- read{"", err}
+			return
+		}
+		defer resp.Body.Close()
+		line, err := bufio.NewReader(resp.Body).ReadString('\n')
+		first <- read{line, err}
+	}()
+
+	select {
+	case ok := <-flusherSeen:
+		if !ok {
+			t.Fatal("the wrapped ResponseWriter no longer implements http.Flusher")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the backend handler was never reached")
+	}
+
+	select {
+	case got := <-first:
+		if got.err != nil {
+			t.Fatalf("reading the first event: %v", got.err)
+		}
+		if !strings.Contains(got.line, "first") {
+			t.Fatalf("first event was %q, want it to contain \"first\"", got.line)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first event never arrived while the handler was still running: " +
+			"Flush is not reaching the underlying ResponseWriter, so SSE buffers")
 	}
 }
