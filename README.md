@@ -34,6 +34,7 @@ experimental:
 | **Distinct-404 floods** | A leaky bucket over *distinct* failing paths — so a scanner walking a wordlist is caught, and a real user hammering one broken link never is. |
 | **Honeypots** | Paths you invent that no legitimate client could know. One hit, instant ban, effectively zero false positives. |
 | **Scanner user-agents** | nikto, sqlmap, nuclei, masscan, zgrab and friends. Generic clients like `curl` and `python-requests` are deliberately *not* in the defaults. |
+| **SEO crawlers** | MJ12bot, AhrefsBot, SemrushBot and friends, as a separate opt-in: `detectors.userAgent.crawlers` is `ignore` (default), `ban` or `exempt`. They are not scanners, so they get their own switch rather than being smuggled into another rule. Search engines are never on the list. |
 | **Brute force** | Repeated 401/403 from your real login endpoints. |
 | **Rate abuse** | Token bucket per source, independent of status code. |
 | **Injection payloads** | SQLi, traversal, template injection and XSS probes in the query string and optionally the body. Checked in both raw and decoded form. |

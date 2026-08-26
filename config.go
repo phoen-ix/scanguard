@@ -124,6 +124,38 @@ type UserAgentConfig struct {
 	UseDefaults bool     `json:"useDefaults,omitempty"`
 	Patterns    []string `json:"patterns,omitempty"`
 	BanEmptyUA  bool     `json:"banEmptyUA,omitempty"`
+	// Crawlers decides what happens to the commercial SEO and backlink crawlers in
+	// defaultCrawlers — MJ12bot, AhrefsBot, SemrushBot and friends. They are not
+	// scanners, so the default is to have no opinion about them at all.
+	//
+	//	"ignore" (default) — the list is unused; crawlers are treated like any
+	//	                     other client and can still trip other detectors.
+	//	"ban"              — the list is added to this detector's patterns.
+	//	"exempt"           — the list is added to allowlist.userAgents, so a
+	//	                     matching crawler can never be banned by ANY detector.
+	//
+	// "exempt" is the right answer for a site with content worth crawling, but be
+	// clear about what it costs: a User-Agent is trivially forged, so this hands
+	// anyone who copies the string a free pass past every detector. "ban" carries
+	// no such risk — the worst a forged UA achieves is banning its own author.
+	Crawlers string `json:"crawlers,omitempty"`
+}
+
+// Crawler policy values for UserAgentConfig.Crawlers.
+const (
+	crawlersIgnore = "ignore"
+	crawlersBan    = "ban"
+	crawlersExempt = "exempt"
+)
+
+// crawlerPolicy normalises UserAgentConfig.Crawlers. An unrecognised value is
+// returned as-is so the caller that validates can name it in the error.
+func (c *Config) crawlerPolicy() string {
+	p := strings.ToLower(strings.TrimSpace(c.Detectors.UserAgent.Crawlers))
+	if p == "" {
+		return crawlersIgnore
+	}
+	return p
 }
 
 // BadPathsConfig is a leaky bucket over DISTINCT paths that produced an error
@@ -257,9 +289,17 @@ type AdminConfig struct {
 	// own admin.enabled has asked to serve the console on its router, and still
 	// does, whatever this is set to.
 	//
-	// Leave it false. The console is normally the one thing behind an IP allowlist,
-	// and its static assets are served unauthenticated by design; turning this on
-	// puts an unguarded copy of that surface on every route the detector protects.
+	// That is almost never what an operator wants. The console and the detector
+	// are two middleware definitions sharing one runtime, so a console configured
+	// once — on its own router, behind its own IP allowlist — silently turned every
+	// protected route into a second, unguarded entrance to it. The admin API stays
+	// token-gated either way, but the static console is served unauthenticated by
+	// design, and the whole point of putting the console on a private router is
+	// that it is not reachable anywhere else.
+	//
+	// Leave this false. Set it only if you deliberately want the console answering
+	// on the same routers the detector protects, and understand that whatever
+	// guards the console's own router does not apply there.
 	ServeOnDetectionRoutes bool `json:"serveOnDetectionRoutes,omitempty"`
 }
 
@@ -512,6 +552,9 @@ type settings struct {
 	geoProvider string
 	geoCacheTTL time.Duration
 
+	// uaCrawlers is the resolved detectors.userAgent.crawlers policy.
+	uaCrawlers string
+
 	adminEnabled bool
 	// adminServeHere is THIS middleware definition's own answer to "do I serve the
 	// admin surface", derived only from the config handed to this New() call. It is
@@ -654,7 +697,12 @@ func (c *Config) parseAllowlist(s *settings) error {
 	if s.allowCIDRs, err = parsePrefixes("allowlist.cidrs", c.Allowlist.CIDRs); err != nil {
 		return err
 	}
-	if s.allowUA, err = newMatcher("allowlist.userAgents", c.Allowlist.UserAgents); err != nil {
+	allowUA := c.Allowlist.UserAgents
+	if c.crawlerPolicy() == crawlersExempt {
+		// Appended, not substituted: an explicit allowlist entry still applies.
+		allowUA = append(append([]string{}, allowUA...), defaultCrawlers...)
+	}
+	if s.allowUA, err = newMatcher("allowlist.userAgents", allowUA); err != nil {
 		return err
 	}
 	if s.allowPaths, err = newMatcher("allowlist.paths", c.Allowlist.Paths); err != nil {
@@ -702,9 +750,19 @@ func (c *Config) parseDetectors(s *settings) error {
 	}
 
 	s.uaEnabled = d.UserAgent.Enabled
+	s.uaCrawlers = c.crawlerPolicy()
+	switch s.uaCrawlers {
+	case crawlersIgnore, crawlersBan, crawlersExempt:
+	default:
+		return fmt.Errorf("detectors.userAgent.crawlers: %q is not one of %q, %q, %q",
+			d.UserAgent.Crawlers, crawlersIgnore, crawlersBan, crawlersExempt)
+	}
 	uaPatterns := d.UserAgent.Patterns
 	if d.UserAgent.UseDefaults {
 		uaPatterns = append(append([]string{}, defaultUserAgents...), uaPatterns...)
+	}
+	if s.uaCrawlers == crawlersBan {
+		uaPatterns = append(append([]string{}, uaPatterns...), defaultCrawlers...)
 	}
 	if s.uaMatcher, err = newMatcher("detectors.userAgent.patterns", uaPatterns); err != nil {
 		return err

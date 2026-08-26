@@ -158,6 +158,37 @@ var defaultUserAgents = []string{
 	`\binternet-measurement\.com\b`,
 }
 
+// defaultCrawlers matches commercial SEO and backlink crawlers: bots that obey
+// robots.txt and identify themselves honestly, but that many operators still do
+// not want walking their site. They are NOT scanners, and detectors.userAgent
+// therefore ignores them unless you opt in with detectors.userAgent.crawlers.
+//
+// SEARCH ENGINES ARE DELIBERATELY ABSENT. Googlebot, Bingbot, DuckDuckBot,
+// Applebot, YandexBot and Baiduspider are how people find a site; banning one is
+// a self-inflicted outage that takes weeks to notice and months to undo. If you
+// genuinely want to block a search engine, do it in robots.txt, where it is
+// visible and reversible — not from a middleware that answers 403.
+//
+// This list exists because of a real misdiagnosis worth recording: a query-string
+// rule written for what looked like a CMS exploitation campaign turned out to be
+// catching only MJ12bot, Barkrowler and DotBot re-crawling the URLs of a wiki
+// that had been decommissioned days earlier. Crawler policy belongs in a setting
+// that says "crawler", not in an injection rule.
+var defaultCrawlers = []string{
+	`\bmj12bot\b`,
+	`\bbarkrowler\b`,
+	`\bdotbot\b`,
+	`\bahrefsbot\b`,
+	`\bsemrushbot\b`,
+	`\bblexbot\b`,
+	`\bmegaindex\b`,
+	`\bdataforseobot\b`,
+	`\bserpstatbot\b`,
+	`\bpetalbot\b`,
+	`\bseekportbot\b`,
+	`\bbytespider\b`,
+}
+
 // defaultPayloadPatterns matches injection probes in query strings and bodies.
 // The payload detector is off by default: it is the highest-false-positive and
 // highest-CPU signal here, and it inspects attacker-controlled text on the

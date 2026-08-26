@@ -844,3 +844,63 @@ func TestPrefixModeStillServesTheConsole(t *testing.T) {
 		t.Errorf("prefix mode stopped serving the console, got %d", rec.Code)
 	}
 }
+
+// Crawler policy. The default must be "no opinion": a crawler is not a scanner,
+// and defaultCrawlers must not leak into the ruleset unless asked for.
+func TestCrawlerPolicyDefaultsToIgnore(t *testing.T) {
+	h := build(t, func(c *Config) {
+		c.Detectors.UserAgent.Enabled = true
+		c.Detectors.UserAgent.UseDefaults = true
+	})
+	ua := map[string]string{"User-Agent": "Mozilla/5.0 (compatible; MJ12bot/v1.4.8; http://mj12bot.com/)"}
+	if got := send(h, "GET", "/", "203.0.113.80:1", ua).Code; got != http.StatusOK {
+		t.Errorf("a crawler was banned with no crawler policy set, got %d", got)
+	}
+}
+
+func TestCrawlerPolicyBan(t *testing.T) {
+	h := build(t, func(c *Config) {
+		c.Detectors.UserAgent.Enabled = true
+		c.Detectors.UserAgent.UseDefaults = true
+		c.Detectors.UserAgent.Crawlers = crawlersBan
+	})
+	ua := map[string]string{"User-Agent": "Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)"}
+	if got := send(h, "GET", "/", "203.0.113.81:1", ua).Code; got != http.StatusForbidden {
+		t.Errorf("crawlers: ban did not block a listed crawler, got %d", got)
+	}
+	// A search engine must survive it. Banning Googlebot is the failure mode this
+	// list is curated to avoid.
+	google := map[string]string{"User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"}
+	if got := send(h, "GET", "/", "203.0.113.82:1", google).Code; got != http.StatusOK {
+		t.Errorf("crawlers: ban blocked Googlebot, got %d", got)
+	}
+}
+
+// exempt must beat every detector, not just the user-agent one: that is the whole
+// point of routing it through the allowlist.
+func TestCrawlerPolicyExemptBeatsOtherDetectors(t *testing.T) {
+	h := build(t, func(c *Config) {
+		c.Detectors.UserAgent.Enabled = true
+		c.Detectors.UserAgent.UseDefaults = true
+		c.Detectors.UserAgent.Crawlers = crawlersExempt
+	})
+	ua := map[string]string{"User-Agent": "Mozilla/5.0 (compatible; SemrushBot/7~bl; +http://www.semrush.com/bot.html)"}
+	// /wp-login.php is a signature hit for anybody else.
+	if got := send(h, "GET", "/wp-login.php", "203.0.113.83:1", ua).Code; got != http.StatusOK {
+		t.Errorf("crawlers: exempt did not exempt a listed crawler from signatures, got %d", got)
+	}
+	if got := send(h, "GET", "/wp-login.php", "203.0.113.84:1", nil).Code; got != http.StatusForbidden {
+		t.Errorf("the signature detector stopped working for everyone else, got %d", got)
+	}
+}
+
+func TestCrawlerPolicyRejectsAnUnknownValue(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.InstanceName = t.Name()
+	cfg.Detectors.UserAgent.Crawlers = "block-em-all"
+	if _, err := New(context.Background(), okBackend(), cfg, "scanguard@test"); err == nil {
+		t.Fatal("an unrecognised crawler policy started up instead of failing")
+	} else if !strings.Contains(err.Error(), "crawlers") {
+		t.Errorf("the error should name the setting, got: %v", err)
+	}
+}

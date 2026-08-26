@@ -596,6 +596,7 @@ func configSummary(s *settings) map[string]interface{} {
 			detectorRateAbuse:  s.rate.Enabled,
 			detectorPayload:    s.payload.Enabled,
 		},
+		"crawlers": s.uaCrawlers,
 		"notify": map[string]bool{
 			"webhooks":  len(s.notify.Webhooks) > 0,
 			"chat":      s.notify.Chat.Kind != "",

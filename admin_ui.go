@@ -824,7 +824,10 @@ var RULE_SCHEMA = [
       h: "The most expensive detector. Turning it off recovers most of the throughput." },
     { p: "detectors.userAgent.useDefaults", t: "bool", l: "Include built-in patterns" },
     { p: "detectors.userAgent.banEmptyUA", t: "bool", l: "Ban requests with no User-Agent" },
-    { p: "detectors.userAgent.patterns", t: "lines", l: "Extra patterns" }
+    { p: "detectors.userAgent.patterns", t: "lines", l: "Extra patterns" },
+    { p: "detectors.userAgent.crawlers", t: "select", l: "SEO crawlers",
+      opts: ["ignore", "ban", "exempt"],
+      h: "MJ12bot, AhrefsBot, SemrushBot and friends \u2014 crawlers, not scanners. ignore: no opinion. ban: block them. exempt: never ban them by any detector \u2014 convenient for a real content site, but a User-Agent is trivially forged, so it is a free pass past everything. Search engines are never in this list." }
   ]},
   { title: "Distinct failing paths", fields: [
     { p: "detectors.badPaths.enabled", t: "bool", l: "Enabled" },
@@ -905,7 +908,7 @@ function setPath(obj, path, value) {
 function coerce(kind, v) {
   if (kind === "bool") { return v === true; }
   if (kind === "int") { return typeof v === "number" ? v : 0; }
-  if (kind === "text") { return typeof v === "string" ? v : ""; }
+  if (kind === "text" || kind === "select") { return typeof v === "string" ? v : ""; }
   return Array.isArray(v) ? v : [];
 }
 
@@ -919,7 +922,7 @@ function toField(kind, v) {
 function fromField(kind, raw) {
   if (kind === "bool") { return raw === true; }
   if (kind === "int") { var n = parseInt(raw, 10); return isNaN(n) ? 0 : n; }
-  if (kind === "text") { return String(raw); }
+  if (kind === "text" || kind === "select") { return String(raw); }
   var parts = kind === "lines" ? String(raw).split(/\r?\n/) : String(raw).split(",");
   var out = [];
   for (var i = 0; i < parts.length; i++) {
@@ -955,6 +958,15 @@ function ruleRow(f, readOnly) {
     input = document.createElement("input");
     input.type = "checkbox";
     input.checked = coerce("bool", getPath(ruleModel, f.p));
+  } else if (f.t === "select") {
+    input = document.createElement("select");
+    (f.opts || []).forEach(function (o) {
+      var opt = document.createElement("option");
+      opt.value = o;
+      opt.textContent = o;
+      input.appendChild(opt);
+    });
+    input.value = toField(f.t, getPath(ruleModel, f.p)) || (f.opts || [])[0];
   } else if (f.t === "lines") {
     input = document.createElement("textarea");
     input.value = toField(f.t, getPath(ruleModel, f.p));
