@@ -30,7 +30,7 @@ experimental:
 
 | | |
 |---|---|
-| **Signature probes** | 48 curated paths that only a scanner asks for. Blocked before the request reaches your backend. |
+| **Signature probes** | 61 curated paths that only a scanner asks for. Blocked before the request reaches your backend. |
 | **Distinct-404 floods** | A leaky bucket over *distinct* failing paths — so a scanner walking a wordlist is caught, and a real user hammering one broken link never is. |
 | **Honeypots** | Paths you invent that no legitimate client could know. One hit, instant ban, effectively zero false positives. |
 | **Scanner user-agents** | nikto, sqlmap, nuclei, masscan, zgrab and friends. Generic clients like `curl` and `python-requests` are deliberately *not* in the defaults. |

@@ -20,10 +20,12 @@ var defaultSignatures = []string{
 	`/wp-login\.php`,
 	`/wp-admin(?:/|$)`,
 	`/wp-config\.php`,
-	`/wp-config\.php\.(?:bak|old|save|orig|txt)`,
 	`/xmlrpc\.php`,
 	`/wp-content/(?:plugins|themes)/[^/]+/.*\.php`,
-	`/wp-includes/.*\.php`,
+	// The whole directory, not just PHP inside it: the observed sweeps walk
+	// /wp-includes/assets/, /wp-includes/js/jquery/, /wp-includes/l10n/ and friends
+	// looking for a directory listing, and never reach a .php at all.
+	`/wp-includes/`,
 
 	// Joomla, the counterpart to the WordPress block above. Extension manifests are
 	// the version-disclosure step of a Joomla sweep: every extension ships one, they
@@ -70,8 +72,26 @@ var defaultSignatures = []string{
 	`/(?:shell|c99|r57|wso|alfa|b374k|indoxploit|mini)\.php`,
 	`/vendor/phpunit/phpunit/src/util/php/eval-stdin\.php`,
 	`/_ignition/execute-solution`,
-	`/index\.php\?s=/index/\\think`,
 	`/(?:cgi-bin|scripts)/.*\.(?:sh|pl|cgi)$`,
+
+	// Local-file-read targets and traversal, matched in the PATH.
+	//
+	// These same three patterns exist in defaultPayloadPatterns, and that is not a
+	// duplication: the payload detector only ever inspects RawQuery, and the
+	// signature detector only ever inspects req.URL.Path. Nothing inspects the full
+	// URI, so a probe for /etc/passwd sent as a path -- which is how
+	// /@fs/etc/passwd, /static../etc/passwd and /../../../../etc/passwd arrive --
+	// is invisible to the query-side copy.
+	//
+	// Note Go does not clean dot segments out of a server-side request path, so
+	// `(?:\.\./){2,}` sees them exactly as they were sent.
+	`/etc/(?:passwd|shadow)\b`,
+	`/proc/self/(?:environ|cmdline)`,
+	`(?:\.\./){2,}`,
+	// Vite's dev server exposes arbitrary file reads under /@fs/ (CVE-2025-30208
+	// and CVE-2025-30209). /@fs/ is an internal dev-server route: it has no meaning
+	// in a production build, so nothing legitimate requests it.
+	`/@fs/`,
 
 	// A PHP file inside an upload or image directory. This is where a webshell lands
 	// after an upload bypass, and it is the one place a correctly configured site
@@ -86,6 +106,8 @@ var defaultSignatures = []string{
 	`/boaform/(?:admin|formlogin)`,
 	`/hnap1`,
 	`/gponform/`,
+	`/goform/`,
+	`/setup\.cgi`,
 	`/remote/fgt_lang`,
 	`/dana-na/`,
 	`/\+cscoe\+/`,
@@ -141,6 +163,10 @@ var defaultUserAgents = []string{
 // highest-CPU signal here, and it inspects attacker-controlled text on the
 // request path.
 var defaultPayloadPatterns = []string{
+	// ThinkPHP RCE. This lives here rather than in defaultSignatures because the
+	// exploit is entirely in the query string, and req.URL.Path is split at the
+	// first '?' -- a signature for it could never match.
+	`s=/index/\\think`,
 	// SQL injection.
 	`union[\s/*]+select`,
 	`select.{1,80}from\s+information_schema`,
