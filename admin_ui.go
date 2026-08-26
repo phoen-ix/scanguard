@@ -718,6 +718,12 @@ function renderConfig(cfg) {
     ["escalation", (cfg.escalation || []).join(" → ")],
     ["decay", cfg.decay],
     ["tarpit", cfg.tarpit ? "on" : "off"],
+    // Read-only: admin.* is not console-editable, and this one decides where the
+    // console is reachable from. Change it in the plugin configuration.
+    ["console on detection routes",
+      cfg.adminOnDetectionRoutes
+        ? "YES \u2014 also served on every route the detector protects"
+        : "no \u2014 this router only"],
     ["max tracked", cfg.maxEntries],
     ["notifications", Object.keys(cfg.notify || {}).filter(function (k) { return cfg.notify[k]; }).join(", ") || "none"]
   ];

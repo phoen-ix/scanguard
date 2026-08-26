@@ -582,6 +582,11 @@ func configSummary(s *settings) map[string]interface{} {
 		"escalation":      durationStrings(s.escalation),
 		"decay":           s.decay.String(),
 		"tarpit":          s.tarpitEnabled,
+		// Read-only on purpose. admin.* is never console-editable (see overrides.go),
+		// and this field in particular decides where the console itself is reachable
+		// — a setting a stolen token must not be able to widen. Reported so an
+		// operator can SEE the answer without reading the configuration file.
+		"adminOnDetectionRoutes": s.adminServeShared,
 		"detectors": map[string]bool{
 			detectorSignature:  s.sigEnabled,
 			detectorHoneypot:   s.honeyEnabled,

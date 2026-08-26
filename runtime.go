@@ -245,6 +245,17 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 // inheritAdmin copies the admin surface from src to dst when dst has none. The
 // console and the detector are separate middleware definitions sharing one
 // runtime, and each configures a different half of it.
+//
+// It deliberately does NOT copy adminServeHere. That field answers "does THIS
+// middleware answer the admin surface", which is a per-middleware decision and is
+// carried on the handler, not here. Copying it was the bug: a console configured
+// on its own guarded router turned every detector route into a second, unguarded
+// entrance to the same console. What is copied below is only what the shared
+// runtime genuinely needs to know — the token, the prefix, the ring size — so the
+// console instance can serve, and so serveAdmin can authenticate.
+//
+// adminServeShared IS copied, because it is the explicit opt-in back into that
+// behaviour and has to reach the detection handlers to have any effect.
 func inheritAdmin(dst, src *settings) {
 	if src == nil || !src.adminEnabled || dst.adminEnabled {
 		return
@@ -255,6 +266,7 @@ func inheritAdmin(dst, src *settings) {
 	dst.adminSSO = src.adminSSO
 	dst.adminReadOnly = src.adminReadOnly
 	dst.eventLogSize = src.eventLogSize
+	dst.adminServeShared = src.adminServeShared
 }
 
 // applySettings publishes new effective settings to the request path and resizes

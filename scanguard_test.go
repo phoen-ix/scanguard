@@ -741,3 +741,106 @@ func TestNewRejectsMissingArguments(t *testing.T) {
 		t.Error("a nil next handler must be refused")
 	}
 }
+
+// The console and the detector are two middleware definitions sharing one
+// runtime. Configuring the console must not turn every route the DETECTOR
+// protects into a second, unguarded entrance to that console: the console is
+// normally the only thing behind an IP allowlist, and the static UI is served
+// without a token by design.
+func TestDetectorDoesNotServeTheConsoleOfASiblingInstance(t *testing.T) {
+	instance := t.Name()
+	defer resetRuntime(instance)
+
+	detectorCfg := CreateConfig()
+	detectorCfg.InstanceName = instance
+
+	consoleCfg := CreateConfig()
+	consoleCfg.InstanceName = instance
+	consoleCfg.UIMode = true
+	consoleCfg.Admin.Enabled = true
+	consoleCfg.Admin.Token = ruleToken
+
+	// Build the console first, so the detector is constructed against a runtime
+	// that already has an admin surface. This is the ordering that leaked.
+	console, err := New(context.Background(), okBackend(), consoleCfg, "console@test")
+	if err != nil {
+		t.Fatalf("New console: %v", err)
+	}
+	detector, err := New(context.Background(), okBackend(), detectorCfg, "detector@test")
+	if err != nil {
+		t.Fatalf("New detector: %v", err)
+	}
+
+	// The console still serves, on its own router, at the raw path.
+	if got := send(console, "GET", "/", "203.0.113.70:1", nil).Code; got != http.StatusOK {
+		t.Errorf("the console stopped serving its own UI, got %d", got)
+	}
+
+	// The detector must not. It passes the request to the backend instead, which
+	// is what any other unrecognised path would do.
+	for _, p := range []string{"/__scanguard/", "/__scanguard/index.html", "/__scanguard/app.js"} {
+		rec := send(detector, "GET", p, "203.0.113.71:1", nil)
+		if strings.Contains(rec.Body.String(), "gate-form") {
+			t.Errorf("%s served the console UI from a detection route", p)
+		}
+		if ct := rec.Header().Get("Content-Type"); strings.HasPrefix(ct, "text/html") {
+			t.Errorf("%s served Content-Type %q from a detection route", p, ct)
+		}
+	}
+	// The API must be unreachable there too, token or not.
+	rec := send(detector, "GET", "/__scanguard/api/state", "203.0.113.72:1",
+		map[string]string{"X-Scanguard-Token": ruleToken})
+	if strings.Contains(rec.Body.String(), "\"stats\"") {
+		t.Error("the admin API answered on a detection route")
+	}
+}
+
+// ...unless the operator explicitly asks for it. This is the documented opt-in
+// back into the old implicit behaviour.
+func TestServeOnDetectionRoutesReopensTheConsoleDeliberately(t *testing.T) {
+	instance := t.Name()
+	defer resetRuntime(instance)
+
+	consoleCfg := CreateConfig()
+	consoleCfg.InstanceName = instance
+	consoleCfg.UIMode = true
+	consoleCfg.Admin.Enabled = true
+	consoleCfg.Admin.Token = ruleToken
+	consoleCfg.Admin.ServeOnDetectionRoutes = true
+
+	detectorCfg := CreateConfig()
+	detectorCfg.InstanceName = instance
+
+	if _, err := New(context.Background(), okBackend(), consoleCfg, "console@test"); err != nil {
+		t.Fatalf("New console: %v", err)
+	}
+	detector, err := New(context.Background(), okBackend(), detectorCfg, "detector@test")
+	if err != nil {
+		t.Fatalf("New detector: %v", err)
+	}
+
+	if got := send(detector, "GET", "/__scanguard/", "203.0.113.73:1", nil); !strings.Contains(got.Body.String(), "gate-form") {
+		t.Errorf("the opt-in did not reopen the console on detection routes, got %d", got.Code)
+	}
+}
+
+// Prefix mode is a separate, explicit choice and is unaffected: a DETECTION
+// middleware that declares its own admin block asked to serve the console on its
+// own router, and still does.
+func TestPrefixModeStillServesTheConsole(t *testing.T) {
+	instance := t.Name()
+	defer resetRuntime(instance)
+
+	cfg := CreateConfig()
+	cfg.InstanceName = instance
+	cfg.Admin.Enabled = true
+	cfg.Admin.Token = ruleToken
+
+	h, err := New(context.Background(), okBackend(), cfg, "scanguard@test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if rec := send(h, "GET", "/__scanguard/", "203.0.113.74:1", nil); !strings.Contains(rec.Body.String(), "gate-form") {
+		t.Errorf("prefix mode stopped serving the console, got %d", rec.Code)
+	}
+}

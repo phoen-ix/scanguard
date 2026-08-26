@@ -40,7 +40,16 @@ func consoleHandler(t *testing.T, mutate func(*Config)) (http.Handler, *runtime)
 	return h, rt
 }
 
+// ruleRequest drives the rule API on a middleware running in PREFIX mode, where
+// serveAdmin strips admin.pathPrefix before routing.
 func ruleRequest(t *testing.T, h http.Handler, method string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	return ruleRequestAt(t, h, method, body, "/__scanguard/api/rules")
+}
+
+// ruleRequestAt is the same thing against an explicit path. A uiMode console
+// routes on the raw path, so it answers /api/rules rather than the prefixed form.
+func ruleRequestAt(t *testing.T, h http.Handler, method string, body interface{}, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader *strings.Reader
 	if body != nil {
@@ -53,7 +62,7 @@ func ruleRequest(t *testing.T, h http.Handler, method string, body interface{}) 
 		reader = strings.NewReader("")
 	}
 
-	req := httptest.NewRequest(method, "/__scanguard/api/rules", reader)
+	req := httptest.NewRequest(method, path, reader)
 	req.RemoteAddr = "203.0.113.200:1"
 	req.Header.Set("X-Scanguard-Token", ruleToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -68,7 +77,17 @@ func ruleRequest(t *testing.T, h http.Handler, method string, body interface{}) 
 
 func fetchRules(t *testing.T, h http.Handler) map[string]interface{} {
 	t.Helper()
-	rec := ruleRequest(t, h, http.MethodGet, nil)
+	return decodeRules(t, ruleRequest(t, h, http.MethodGet, nil))
+}
+
+// fetchRulesUI is fetchRules against a uiMode console.
+func fetchRulesUI(t *testing.T, h http.Handler) map[string]interface{} {
+	t.Helper()
+	return decodeRules(t, ruleRequestAt(t, h, http.MethodGet, nil, "/api/rules"))
+}
+
+func decodeRules(t *testing.T, rec *httptest.ResponseRecorder) map[string]interface{} {
+	t.Helper()
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET rules returned %d: %s", rec.Code, rec.Body.String())
 	}
@@ -400,19 +419,22 @@ func TestSavedRulesRestoreWhenConsoleIsBuiltFirst(t *testing.T) {
 		return c
 	}
 
-	// Save a rule edit the ordinary way.
-	h, err := New(context.Background(), okBackend(), detectorCfg(), "detector@test")
-	if err != nil {
+	// Save a rule edit the ordinary way. The rule API is driven through the CONSOLE
+	// handler, which is where it lives in a real deployment: a detection middleware
+	// no longer answers the admin surface merely because a sibling console instance
+	// configured one.
+	if _, err := New(context.Background(), okBackend(), detectorCfg(), "detector@test"); err != nil {
 		t.Fatalf("New detector: %v", err)
 	}
-	if _, err = New(context.Background(), okBackend(), consoleCfg(), "console@test"); err != nil {
+	console, err := New(context.Background(), okBackend(), consoleCfg(), "console@test")
+	if err != nil {
 		t.Fatalf("New console: %v", err)
 	}
-	rules := fetchRules(t, h)
+	rules := fetchRulesUI(t, console)
 	edit := editableOf(t, rules, "effective")
 	edit.Detectors.Honeypots.Enabled = true
 	edit.Detectors.Honeypots.Paths = []string{"/order-trap"}
-	if rec := ruleRequest(t, h, http.MethodPut, edit); rec.Code != http.StatusOK {
+	if rec := ruleRequestAt(t, console, http.MethodPut, edit, "/api/rules"); rec.Code != http.StatusOK {
 		t.Fatalf("PUT returned %d: %s", rec.Code, rec.Body.String())
 	}
 

@@ -247,6 +247,20 @@ type AdminConfig struct {
 	ReadOnly bool `json:"readOnly,omitempty"`
 	// EventLogSize bounds the in-memory ring buffer backing the live event view.
 	EventLogSize int `json:"eventLogSize,omitempty"`
+	// ServeOnDetectionRoutes re-enables a behaviour that used to be implicit: every
+	// DETECTION middleware sharing this runtime answering the admin surface at
+	// PathPrefix on every router it protects, using an admin block it never
+	// declared itself. Declare it on the block you actually wrote — normally the
+	// uiMode console's.
+	//
+	// This does not affect prefix mode. A detection middleware that declares its
+	// own admin.enabled has asked to serve the console on its router, and still
+	// does, whatever this is set to.
+	//
+	// Leave it false. The console is normally the one thing behind an IP allowlist,
+	// and its static assets are served unauthenticated by design; turning this on
+	// puts an unguarded copy of that surface on every route the detector protects.
+	ServeOnDetectionRoutes bool `json:"serveOnDetectionRoutes,omitempty"`
 }
 
 // CreateConfig returns the default plugin configuration. Traefik calls this
@@ -498,12 +512,21 @@ type settings struct {
 	geoProvider string
 	geoCacheTTL time.Duration
 
-	adminEnabled  bool
-	adminPrefix   string
-	adminToken    string
-	adminSSO      bool
-	adminReadOnly bool
-	eventLogSize  int
+	adminEnabled bool
+	// adminServeHere is THIS middleware definition's own answer to "do I serve the
+	// admin surface", derived only from the config handed to this New() call. It is
+	// copied onto the handler at construction time, for the same reason uiMode is:
+	// the shared settings object cannot express a per-middleware decision.
+	adminServeHere bool
+	// adminServeShared is the runtime-wide opt-in that restores the old implicit
+	// behaviour: every detection middleware sharing this runtime also answers the
+	// admin prefix, using an admin block it never declared itself. Off by default.
+	adminServeShared bool
+	adminPrefix      string
+	adminToken       string
+	adminSSO         bool
+	adminReadOnly    bool
+	eventLogSize     int
 
 	// needsResponse records whether any enabled detector actually requires the
 	// response status. If none does, the ResponseWriter is never wrapped and the
@@ -839,6 +862,13 @@ func (c *Config) parseNotify(s *settings) error {
 
 func (c *Config) parseAdmin(s *settings) error {
 	s.adminEnabled = c.Admin.Enabled || c.UIMode
+	// Whether THIS middleware answers the admin surface is decided by THIS config
+	// and nothing else: a uiMode router is the console, and a detection router that
+	// declares its own admin block asked for prefix mode explicitly. What is
+	// deliberately excluded is the third case — a detection router with no admin
+	// block of its own, answering because a sibling console instance had one.
+	s.adminServeHere = c.UIMode || c.Admin.Enabled
+	s.adminServeShared = c.Admin.ServeOnDetectionRoutes
 	s.adminPrefix = strings.TrimRight(strings.TrimSpace(c.Admin.PathPrefix), "/")
 	if s.adminPrefix == "" {
 		s.adminPrefix = "/__scanguard"

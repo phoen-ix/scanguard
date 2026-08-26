@@ -59,7 +59,10 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		return nil, fmt.Errorf("scanguard (%s): %w", name, err)
 	}
 
-	return &handler{next: next, rt: rt, name: name, uiMode: s.uiMode}, nil
+	// s is this middleware's OWN parsed settings. acquireRuntime may merge a
+	// sibling console's admin block into the shared object, so adminServeHere has
+	// to be read here, before that happens.
+	return &handler{next: next, rt: rt, name: name, uiMode: s.uiMode, servePrefix: s.adminServeHere}, nil
 }
 
 // handler is the per-router middleware. It holds no durable state: that lives on
@@ -70,11 +73,20 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 // shared settings: the console and the detector are two middleware definitions
 // sharing one runtime, and a global uiMode flag would put the detector into
 // console mode the moment the console was constructed.
+//
+// servePrefix is the second exception, for exactly the same reason. It records
+// whether THIS middleware definition was itself configured to answer the admin
+// surface, captured from its own parsed settings before inheritAdmin merges the
+// console's admin block into the shared object. Reading the shared adminEnabled
+// here instead would mean that configuring the console once, on its own guarded
+// router, silently opened an unguarded copy of it on every route the detector
+// protects.
 type handler struct {
-	next   http.Handler
-	rt     *runtime
-	name   string
-	uiMode bool
+	next        http.Handler
+	rt          *runtime
+	name        string
+	uiMode      bool
+	servePrefix bool
 }
 
 func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
@@ -86,7 +98,7 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	// Admin surface. In uiMode this instance serves only the console and never
 	// calls next, so it belongs on its own router.
-	if s.adminEnabled {
+	if s.adminEnabled && (h.servePrefix || s.adminServeShared) {
 		if h.uiMode || strings.HasPrefix(req.URL.Path, s.adminPrefix) {
 			h.rt.serveAdmin(s, h.uiMode, rw, req)
 			return
