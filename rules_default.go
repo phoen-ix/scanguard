@@ -153,9 +153,27 @@ var defaultUserAgents = []string{
 	`\b(?:zmeu|morfeus)\b`,
 	`\bxrumer\b`,
 	`\bsemrushbot-ba\b`,
-	`\bl9(?:explore|tcpid)\b`,
+	`\bl9(?:explore|tcpid|scan)\b`,
 	`\bcensysinspect\b`,
 	`\binternet-measurement\.com\b`,
+
+	// Internet-wide survey scanners that name themselves in the user-agent and
+	// nowhere else. They are here rather than among the signatures because they
+	// only ever request "/" — there is no path for a signature to match, so a
+	// user-agent pattern is the only thing that can see them at all. Measured as
+	// the single largest miss on a live deployment.
+	//
+	// Same category as censysinspect and internet-measurement.com above: honest,
+	// non-destructive, and still a port scan of your estate. Remove them if you
+	// would rather be surveyed.
+	// Both halves of the observed string, so a change to either the greeting or
+	// the documentation URL still matches.
+	`hello from palo alto networks|\bcortex-xpanse\b`,
+	// Single-CVE detection sweeps. The CVE and the tool name change every month,
+	// so these match the shape rather than any one campaign: a user-agent that
+	// names a CVE is announcing a vulnerability scan.
+	`\bcve-\d{4}-\d{4,7}-(?:detect|scan|check|poc|exploit)\b`,
+	`^cve-\d{4}-\d{4,7}(?:[/\s]|$)`,
 }
 
 // defaultCrawlers matches commercial SEO and backlink crawlers: bots that obey
