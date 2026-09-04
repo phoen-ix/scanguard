@@ -107,7 +107,7 @@ func (rt *runtime) serveAdmin(s *settings, uiMode bool, rw http.ResponseWriter, 
 		writeJSON(rw, http.StatusOK, map[string]interface{}{
 			"ok":       true,
 			"instance": rt.name,
-			"backend":  rt.store.backend(),
+			"backend":  rt.store().backend(),
 		})
 	default:
 		writeJSON(rw, http.StatusNotFound, map[string]string{"error": "no such endpoint"})
@@ -219,6 +219,7 @@ type StateResponse struct {
 	TopPaths   []TopEntry             `json:"topPaths"`
 	TopSources []TopEntry             `json:"topSources"`
 	Detectors  []TopEntry             `json:"topDetectors"`
+	TopRules   []TopEntry             `json:"topRules"`
 	TopHosts   []TopEntry             `json:"topHosts"`
 	TopExempt  []TopEntry             `json:"topExempt"`
 	Config     map[string]interface{} `json:"config"`
@@ -233,7 +234,7 @@ func (rt *runtime) apiState(s *settings, rw http.ResponseWriter, req *http.Reque
 
 	writeJSON(rw, http.StatusOK, StateResponse{
 		Instance: rt.name,
-		Backend:  rt.store.backend(),
+		Backend:  rt.store().backend(),
 		DryRun:   s.dryRun,
 		ReadOnly: s.adminReadOnly,
 		Uptime:   now.Sub(rt.stats.StartedAt).Truncate(time.Second).String(),
@@ -249,12 +250,13 @@ func (rt *runtime) apiState(s *settings, rw http.ResponseWriter, req *http.Reque
 		},
 		Tracked:    rt.counters.size(),
 		Evicted:    rt.counters.evicted(),
-		Bans:       rt.store.list(now),
+		Bans:       rt.store().list(now),
 		Events:     rt.events.recent(100),
 		LastSeq:    rt.events.lastSeq(),
 		TopPaths:   rt.topPaths.top(10),
 		TopSources: rt.topSources.top(10),
 		Detectors:  rt.topDetectors.top(10),
+		TopRules:   rt.topRules.top(15),
 		TopHosts:   rt.topHosts.top(10),
 		TopExempt:  rt.topExempt.top(10),
 		Config:     configSummary(s),
@@ -315,8 +317,22 @@ func (rt *runtime) apiEvents(rw http.ResponseWriter, req *http.Request) {
 		}
 	}
 
+	// kind= narrows the feed to one event kind. Without it the ring is mostly
+	// rejects from sources that were already banned, and the ban events — the only
+	// ones carrying a rule, path and user-agent worth tuning a rule on — are the
+	// needle in it.
+	kind := req.URL.Query().Get("kind")
+	switch kind {
+	case "", eventDetect, eventBan, eventUnban, eventReject:
+	default:
+		writeJSON(rw, http.StatusBadRequest, map[string]string{
+			"error": "kind must be one of detect, ban, unban, reject",
+		})
+		return
+	}
+
 	writeJSON(rw, http.StatusOK, EventsResponse{
-		Events:  rt.events.since(since, limit),
+		Events:  rt.events.sinceKind(since, limit, kind),
 		LastSeq: rt.events.lastSeq(),
 	})
 }
@@ -331,7 +347,7 @@ type banRequest struct {
 func (rt *runtime) apiBans(s *settings, rw http.ResponseWriter, req *http.Request, actor string) {
 	switch req.Method {
 	case http.MethodGet:
-		writeJSON(rw, http.StatusOK, BanListResponse{Bans: rt.store.list(time.Now())})
+		writeJSON(rw, http.StatusOK, BanListResponse{Bans: rt.store().list(time.Now())})
 
 	case http.MethodPost:
 		if !rt.authorizeMutation(s, rw, req) {

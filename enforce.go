@@ -42,19 +42,39 @@ func (rt *runtime) applyBan(s *settings, res resolution, det *detection, req *ht
 		Offences: offence,
 		LastPath: truncate(req.URL.Path, 512),
 		LastUA:   truncate(req.UserAgent(), 256),
-		Country:  rt.geo.lookup(res.client.String()),
+		Country:  rt.geo().lookup(res.client.String()),
 	}
 	if duration != permanent {
 		ban.Expires = now.Add(duration).UTC()
 	}
+	// Decay is measured from the end of this ban, not from the offence that caused
+	// it — otherwise the ban's own duration counts as good behaviour and the
+	// ladder cannot climb past the rung whose length equals the decay period.
+	rt.counters.noteBan(res.key, ban.Expires)
 
 	rt.stats.Detections.Add(1)
 	rt.topDetectors.add(det.detector)
-	rt.topSources.add(res.key.String())
-	rt.topPaths.add(req.URL.Path)
+	// The rule, not just the detector name. "signature fired 1027 times" cannot
+	// tell you which of 61 signatures earned its place and which have never
+	// matched anything; the pattern that fired can.
+	rt.topRules.add(det.detector + ": " + det.rule)
 
-	if !s.dryRun {
-		if err := rt.store.put(ban); err != nil {
+	// A dry run records the ban in the shadow list instead of the real one. It is
+	// still a ban as far as every counter and every report is concerned — it just
+	// cannot reject anything, and it never reaches disk or Redis. Without this the
+	// source is re-detected on its next request and the ladder runs away; see the
+	// comment on runtime.shadow.
+	if s.dryRun {
+		if err := rt.shadow.put(ban); err != nil {
+			logWarn(rt.name, "could not record dry-run ban", map[string]interface{}{
+				"key":   ban.Key,
+				"error": err.Error(),
+			})
+		} else {
+			rt.stats.BansIssued.Add(1)
+		}
+	} else {
+		if err := rt.store().put(ban); err != nil {
 			logWarn(rt.name, "could not record ban", map[string]interface{}{
 				"key":   ban.Key,
 				"error": err.Error(),
@@ -64,7 +84,7 @@ func (rt *runtime) applyBan(s *settings, res resolution, det *detection, req *ht
 			// Persist immediately on a ban-list change. Counter updates deliberately
 			// do not trigger a write — rewriting the snapshot on every counter bump
 			// under a 404 flood would burn through IOPS or an SD card.
-			if fs, ok := rt.store.(*fileStore); ok {
+			if fs, ok := rt.store().(*fileStore); ok {
 				if err := fs.flush(); err != nil {
 					logWarn(rt.name, "could not persist state", map[string]interface{}{"error": err.Error()})
 				}
@@ -118,12 +138,12 @@ func (rt *runtime) banManual(s *settings, key netip.Prefix, duration time.Durati
 		ban.Expires = now.Add(duration).UTC()
 	}
 
-	if err := rt.store.put(ban); err != nil {
+	if err := rt.store().put(ban); err != nil {
 		logWarn(rt.name, "could not record manual ban", map[string]interface{}{"key": ban.Key, "error": err.Error()})
 		return ban
 	}
 	rt.stats.BansManual.Add(1)
-	if fs, ok := rt.store.(*fileStore); ok {
+	if fs, ok := rt.store().(*fileStore); ok {
 		_ = fs.flush()
 	}
 

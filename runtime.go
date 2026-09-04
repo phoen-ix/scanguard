@@ -44,13 +44,53 @@ type runtime struct {
 	uiFP             string
 	storeFingerprint string
 
-	store    banStore
+	// depsV holds the three things a configuration reload replaces: the ban store,
+	// the notifier and the geo cache. They are swapped while requests are reading
+	// them, so they live behind an atomic rather than in plain fields.
+	//
+	// settings already had this treatment (see cfg above); these three did not.
+	// The reload path wrote them under registryMu while the request path read them
+	// under nothing at all — a real race on a host where the docker provider
+	// watches a socket and every container start rebuilds the router tree, and one
+	// the race detector reproduces in a few hundred milliseconds once a test
+	// actually reloads under traffic.
+	//
+	// One atomic holding all three, not three atomics: a reload replaces them
+	// together, and a request that read the new store and the old notifier would
+	// be observing a configuration that never existed.
+	//
+	// It holds a *runtimeDeps and the load asserts that concrete pointer type.
+	// Yaegi cannot reliably assert an interface value out of an atomic.Value, nor
+	// assert to an anonymous interface — both segfault the plugin at load time
+	// while compiling and passing -race perfectly. Pointer-to-struct is the shape
+	// cfg already proves works under the interpreter.
+	depsV atomic.Value
+
 	counters *counters
 	events   *eventLog
+
+	// shadow holds the bans a DRY RUN would have written. It exists because
+	// without it a dry run cannot answer the only question it is asked.
+	//
+	// The enforcing path bans a source once and rejects everything after that, so
+	// the source is detected exactly once. A dry run writes no ban, so the same
+	// source is detected again on every subsequent request and climbs the
+	// escalation ladder each time — one observed source reached offence 514 and a
+	// reported duration of 30d where enforcement would have said 1h. Every number
+	// a dry run produced was therefore inflated by however long the scan ran.
+	//
+	// Deliberately a private memStore rather than the real store: a dry run must never
+	// write a ban to disk or to Redis, because flipping dryRun off afterwards
+	// would silently enforce bans that were only ever hypothetical.
+	shadow *memStore
 
 	topPaths     *tally
 	topSources   *tally
 	topDetectors *tally
+	// topRules ranks the individual rule that fired, not just the detector that
+	// owns it, so an operator can see which patterns are earning their place and
+	// which have never matched anything. Keyed "detector: rule".
+	topRules *tally
 	// Fed on EVERY request rather than only on a detection, so the console can
 	// break "requests seen" and "exempt" down instead of showing a bare number.
 	// Both are bounded tallies, never per-item records: the event log is a fixed
@@ -59,9 +99,6 @@ type runtime struct {
 	// exemption reasons are a closed set of five.
 	topHosts  *tally
 	topExempt *tally
-
-	notifier *notifier
-	geo      *geoCache
 
 	stats stats
 
@@ -89,6 +126,15 @@ type runtime struct {
 	// because tarpit() loads it once and releases into that same one, so requests
 	// already in flight drain through the old channel.
 	tarpitSem atomic.Value
+}
+
+// runtimeDeps is the set of collaborators a configuration reload replaces
+// wholesale. Treated as immutable once published: a reload builds a new one and
+// swaps it in, so a request holding the old one keeps a consistent view.
+type runtimeDeps struct {
+	store    banStore
+	notifier *notifier
+	geo      *geoCache
 }
 
 // stats are cheap process counters surfaced by the admin API.
@@ -119,17 +165,17 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 		rt = &runtime{
 			name:             s.instanceName,
 			storeFingerprint: storeFingerprint(s),
-			store:            store,
 			counters:         newCounters(s.maxEntries),
+			shadow:           newMemStore(s.maxEntries),
 			events:           newEventLog(s.eventLogSize),
 			topPaths:         newTally(1000),
 			topSources:       newTally(1000),
 			topDetectors:     newTally(64),
+			topRules:         newTally(512),
 			topHosts:         newTally(1000),
 			topExempt:        newTally(16),
-			notifier:         newNotifier(s),
-			geo:              newGeoCache(s),
 		}
+		rt.setDeps(store, newNotifier(s), newGeoCache(s))
 		rt.stats.StartedAt = time.Now().UTC()
 		if s.uiMode {
 			rt.uiFP = fp
@@ -141,6 +187,7 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 			}
 		}
 		rt.applySettings(s)
+		rt.seedLadder(store, time.Now())
 		registry[s.instanceName] = rt
 
 		effective := rt.restoreOverrides(s)
@@ -195,20 +242,19 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 			return nil, err
 		}
 		// Carry the live ban list across a backend change rather than dropping it.
-		for _, b := range rt.store.list(time.Now()) {
+		for _, b := range rt.store().list(time.Now()) {
 			_ = store.put(b)
 		}
 		logInfo(s.instanceName, "state backend reconfigured", map[string]interface{}{
-			"from": rt.store.backend(),
+			"from": rt.store().backend(),
 			"to":   store.backend(),
 		})
-		rt.store = store
+		rt.setDeps(store, rt.notifier(), rt.geo())
 		rt.storeFingerprint = newFP
 	}
 
 	rt.detectFP = fp
-	rt.notifier = newNotifier(&merged)
-	rt.geo = newGeoCache(&merged)
+	rt.setDeps(rt.store(), newNotifier(&merged), newGeoCache(&merged))
 	rt.applySettings(&merged)
 
 	// The file configuration changed underneath the console's edits. Re-layer them
@@ -277,6 +323,16 @@ func (rt *runtime) applySettings(s *settings) {
 	if cur, ok := rt.tarpitSem.Load().(chan struct{}); !ok || cap(cur) != s.tarpitMax {
 		rt.tarpitSem.Store(make(chan struct{}, s.tarpitMax))
 	}
+
+	// The store has to know how wide the detector's own keys are, so it can tell
+	// an operator's range ban from an ordinary one. Both widths are editable, so
+	// this is re-applied on every configuration change rather than set once.
+	if st := rt.store(); st != nil {
+		st.setKeyWidths(s.ipv4Prefix, s.ipv6Prefix)
+	}
+	if rt.shadow != nil {
+		rt.shadow.setKeyWidths(s.ipv4Prefix, s.ipv6Prefix)
+	}
 }
 
 // rebuildLocked re-derives effective settings from the file configuration plus
@@ -340,7 +396,7 @@ func (rt *runtime) loadStoredOverridesLocked() *settings {
 	}
 	rt.overridesLoaded = true
 
-	stored := rt.store.loadOverrides()
+	stored := rt.store().loadOverrides()
 	if stored.empty() {
 		return nil
 	}
@@ -370,6 +426,63 @@ func (rt *runtime) settings() *settings {
 		}
 	}
 	return nil
+}
+
+// deps returns the collaborators published by the last configuration apply.
+func (rt *runtime) deps() *runtimeDeps {
+	d, _ := rt.depsV.Load().(*runtimeDeps)
+	return d
+}
+
+// setDeps publishes a new set. Called only from acquireRuntime, under registryMu.
+func (rt *runtime) setDeps(store banStore, n *notifier, g *geoCache) {
+	rt.depsV.Store(&runtimeDeps{store: store, notifier: n, geo: g})
+}
+
+// store returns the live ban store.
+func (rt *runtime) store() banStore {
+	if d := rt.deps(); d != nil {
+		return d.store
+	}
+	return nil
+}
+
+// notifier returns the live notifier.
+func (rt *runtime) notifier() *notifier {
+	if d := rt.deps(); d != nil {
+		return d.notifier
+	}
+	return nil
+}
+
+// geo returns the live geo cache.
+func (rt *runtime) geo() *geoCache {
+	if d := rt.deps(); d != nil {
+		return d.geo
+	}
+	return nil
+}
+
+// seedLadder replays the persisted ban list into the escalation counters, so a
+// restart does not reset every repeat offender to the first rung. Returns how
+// many ladder positions were restored.
+func (rt *runtime) seedLadder(store banStore, now time.Time) int {
+	seeded := 0
+	for _, b := range store.list(now) {
+		key, err := netip.ParsePrefix(b.Key)
+		if err != nil {
+			continue
+		}
+		rt.counters.seed(key, b.Offences, b.Created, b.Expires, now)
+		if b.Offences > 0 {
+			seeded++
+		}
+	}
+	if seeded > 0 {
+		logInfo(rt.name, "restored escalation ladder from persisted bans",
+			map[string]interface{}{"sources": seeded})
+	}
+	return seeded
 }
 
 // startJanitor launches the single background goroutine for this instance.
@@ -415,7 +528,7 @@ func (rt *runtime) tick() {
 	}
 	now := time.Now()
 
-	for _, b := range rt.store.sweep(now) {
+	for _, b := range rt.store().sweep(now) {
 		rt.stats.Expired.Add(1)
 		rt.events.add(Event{
 			Kind:     eventUnban,
@@ -426,16 +539,30 @@ func (rt *runtime) tick() {
 		})
 	}
 
+	// The shadow list expires on the same schedule as the real one, so a dry run
+	// re-detects a source once its hypothetical ban would have run out — which is
+	// exactly what enforcement would have done.
+	for _, b := range rt.shadow.sweep(now) {
+		rt.events.add(Event{
+			Kind:     eventUnban,
+			Key:      b.Key,
+			Detector: b.Detector,
+			Actor:    "expiry",
+			DryRun:   true,
+			Time:     now.UTC(),
+		})
+	}
+
 	idle := s.decay
 	if idle < time.Hour {
 		idle = time.Hour
 	}
 	rt.counters.sweep(now, idle)
 
-	if err := rt.store.flush(); err != nil {
+	if err := rt.store().flush(); err != nil {
 		logWarn(rt.name, "could not persist state", map[string]interface{}{"error": err.Error()})
 	}
-	if r, ok := rt.store.(interface{ refresh() error }); ok {
+	if r, ok := rt.store().(interface{ refresh() error }); ok {
 		if err := r.refresh(); err != nil {
 			logWarn(rt.name, "could not refresh shared ban list", map[string]interface{}{"error": err.Error()})
 		}
@@ -443,14 +570,14 @@ func (rt *runtime) tick() {
 		// seen, so this is where a rule change made on another replica lands.
 		rt.syncOverrides()
 	}
-	rt.geo.sweep(now)
+	rt.geo().sweep(now)
 }
 
 // record adds an event to the ring buffer and forwards it to notifiers.
 func (rt *runtime) record(e Event) Event {
 	stored := rt.events.add(e)
 	if e.Kind == eventBan || e.Kind == eventUnban {
-		rt.notifier.dispatch(stored)
+		rt.notifier().dispatch(stored)
 	}
 	return stored
 }
@@ -461,7 +588,7 @@ func (rt *runtime) record(e Event) Event {
 // would re-ban the source at the next rung on its very next request, which is not
 // what an operator clicking "Unblock" means.
 func (rt *runtime) unban(key netip.Prefix, actor string) bool {
-	existed, err := rt.store.delete(key)
+	existed, err := rt.store().delete(key)
 	if err != nil {
 		logWarn(rt.name, "could not remove ban", map[string]interface{}{"key": key.String(), "error": err.Error()})
 		return false
@@ -473,7 +600,7 @@ func (rt *runtime) unban(key netip.Prefix, actor string) bool {
 
 	rt.stats.Unbans.Add(1)
 	rt.record(Event{Kind: eventUnban, Key: key.String(), Actor: actor})
-	if fs, ok := rt.store.(*fileStore); ok {
+	if fs, ok := rt.store().(*fileStore); ok {
 		_ = fs.flush()
 	}
 	return true
@@ -507,13 +634,13 @@ func (rt *runtime) setOverrides(ov *Overrides, actor string) error {
 	rt.overrides = ov
 	rt.applySettings(s)
 
-	if err := rt.store.saveOverrides(ov); err != nil {
+	if err := rt.store().saveOverrides(ov); err != nil {
 		logWarn(rt.name, "rule changes are live but could not be saved; they will be lost on restart",
 			map[string]interface{}{"error": err.Error()})
 	}
 	// Persist immediately rather than waiting for the janitor: an operator who
 	// edits a rule and restarts Traefik a second later should not lose the edit.
-	if fs, ok := rt.store.(*fileStore); ok {
+	if fs, ok := rt.store().(*fileStore); ok {
 		if err := fs.flush(); err != nil {
 			logWarn(rt.name, "could not persist rule changes", map[string]interface{}{"error": err.Error()})
 		}
@@ -552,7 +679,7 @@ func (rt *runtime) rulesView() (effective, fromFile editableConfig, ov *Override
 // back is the value this process wrote, so the timestamp matches and nothing
 // happens.
 func (rt *runtime) syncOverrides() {
-	stored := rt.store.loadOverrides()
+	stored := rt.store().loadOverrides()
 
 	rt.mu.Lock()
 	defer rt.mu.Unlock()

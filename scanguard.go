@@ -123,9 +123,35 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// "Most probed paths" and "Top sources" are fed here, from every request that
+	// a detector could have acted on — not from applyBan.
+	//
+	// Fed from applyBan they ranked only the request that happened to trip a ban,
+	// which on a live deployment was 1,907 of 294,526 rejected requests: less than
+	// one percent of the traffic, ranked under a label promising all of it. The
+	// giveaway was /robots.txt topping "most probed paths", which was crawler ban
+	// volume rather than probing. Both tallies are capped and pruned, so the
+	// attacker-controlled key space stays bounded (see tally).
+	h.rt.topPaths.add(req.URL.Path)
+	h.rt.topSources.add(res.key.String())
+
 	// The hot path proper: one map lookup under a read lock.
-	if ban, banned := h.rt.store.get(res.key, now); banned {
-		h.rt.store.countHit(res.key)
+	//
+	// A dry run consults its shadow list here as well, and a hit ends the request
+	// the same way — recorded, counted, then passed to the backend instead of
+	// rejected. Skipping the detectors for an already-banned source is the whole
+	// point: enforcement only ever detects a source once, so a dry run that kept
+	// detecting would report an escalation ladder that enforcement would never
+	// have climbed.
+	ban, banned := h.rt.store().get(res.key, now)
+	if banned {
+		h.rt.store().countHit(res.key)
+	} else if s.dryRun {
+		if ban, banned = h.rt.shadow.get(res.key, now); banned {
+			h.rt.shadow.countHit(res.key)
+		}
+	}
+	if banned {
 		h.rt.stats.Rejected.Add(1)
 		h.rt.events.add(Event{
 			Kind:     eventReject,
@@ -138,8 +164,13 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			Path:     req.URL.Path,
 			UA:       req.UserAgent(),
 			Status:   s.rejectStatus,
+			DryRun:   s.dryRun,
 		})
-		h.rt.reject(s, rw, req)
+		if !s.dryRun {
+			h.rt.reject(s, rw, req)
+			return
+		}
+		h.next.ServeHTTP(rw, req)
 		return
 	}
 

@@ -130,8 +130,8 @@ func (rt *runtime) detectRequest(s *settings, req *http.Request, res resolution,
 	// Reputation is consulted from cache only. The lookup itself happens in the
 	// background: a third-party API must never be able to add latency to, or stall,
 	// a user's request.
-	if score, ok := rt.notifier.score(res.client.String()); ok {
-		if threshold := rt.notifier.minConfidence(); score >= threshold {
+	if score, ok := rt.notifier().score(res.client.String()); ok {
+		if threshold := rt.notifier().minConfidence(); score >= threshold {
 			return &detection{
 				detector: detectorReputation,
 				rule:     fmt.Sprintf("abuseipdb confidence %d (threshold %d)", score, threshold),

@@ -102,7 +102,22 @@ const indexHTML = `<!doctype html>
 
     <section class="panel">
       <div class="panel-head">
+        <h2>Rules that fired</h2>
+        <span class="hint">which patterns are earning their place</span>
+      </div>
+      <div class="scroll short"><table id="top-rules"><tbody></tbody></table></div>
+      <p id="top-rules-empty" class="empty">No rule has fired yet.</p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
         <h2>Live activity</h2>
+        <div id="event-filter">
+          <button type="button" class="chip on" data-kind="">all</button>
+          <button type="button" class="chip" data-kind="ban">bans</button>
+          <button type="button" class="chip" data-kind="reject">rejects</button>
+          <button type="button" class="chip" data-kind="unban">unbans</button>
+        </div>
         <label class="toggle"><input id="follow" type="checkbox" checked> follow</label>
       </div>
       <div class="scroll tall">
@@ -261,6 +276,14 @@ main { padding: 20px; display: grid; gap: 16px; max-width: 1400px; margin: 0 aut
 .tile.alert .n { color: var(--danger); }
 
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+#event-filter { display: flex; gap: 4px; }
+.chip {
+  font: inherit; font-size: 12px; padding: 2px 9px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 999px;
+  background: transparent; color: var(--muted);
+}
+.chip:hover { color: var(--fg); }
+.chip.on { background: var(--accent); border-color: var(--accent); color: var(--bg); }
 .panel-head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 12px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap;
@@ -331,6 +354,7 @@ td.wrap { max-width: 420px; word-break: break-all; }
 .rule-row.inline { grid-template-columns: auto 1fr; align-items: center; gap: 8px; }
 .rule-row label { font-size: 12.5px; }
 .rule-row .hint { font-size: 11px; color: var(--muted); line-height: 1.35; }
+.panel-head .hint { font-size: 11px; color: var(--muted); }
 .rule-row input[type="text"], .rule-row input[type="number"], .rule-row textarea {
   width: 100%; font-family: var(--mono); font-size: 12px;
 }
@@ -638,16 +662,22 @@ function renderState(s) {
   if (openTile) { renderDetail(); }
 
   renderBans(s.bans);
+  renderTop("top-rules", s.topRules);
+  $("top-rules-empty").hidden = !!(s.topRules && s.topRules.length);
   renderTop("top-paths", s.topPaths);
   renderTop("top-sources", s.topSources);
   renderDetectors(s.config.detectors, s.topDetectors);
   renderConfig(s.config);
 
-  if (s.events && s.events.length) {
+  // First paint only. After that the table is fed incrementally from
+  // api/events?since=, which is why lastSeq and appendEvents exist — repainting
+  // from api/state on every poll capped the console at the 100 events that
+  // response carries and made admin.eventLogSize do nothing for the UI.
+  if (!eventsPainted && s.events && s.events.length) {
     var chrono = s.events.slice().reverse();
     $("events").tBodies[0].textContent = "";
-    lastSeq = 0;
     appendEvents(chrono);
+    eventsPainted = true;
   }
   $("events-empty").hidden = $("events").tBodies[0].rows.length > 0;
 }
@@ -763,6 +793,33 @@ function renderRules(rules) {
     wrap.appendChild(ul);
     box.appendChild(wrap);
   });
+}
+
+// eventKind is the activity filter. Empty means every kind.
+var eventKind = "";
+// eventsPainted records that the table has had its one repaint from api/state.
+// Everything after that arrives through api/events, so a filtered feed that is
+// legitimately empty is not mistaken for "not painted yet".
+var eventsPainted = false;
+
+function setEventKind(kind) {
+  if (eventKind === kind) { return; }
+  eventKind = kind;
+  lastSeq = 0;
+  eventsPainted = true;
+  $("events").tBodies[0].textContent = "";
+  var buttons = document.querySelectorAll("#event-filter button");
+  for (var i = 0; i < buttons.length; i++) {
+    buttons[i].className = buttons[i].getAttribute("data-kind") === kind ? "chip on" : "chip";
+  }
+  // Repaint straight from the ring rather than waiting for the next state poll,
+  // so the filter feels like a filter and not like a three-second stall.
+  var url = "api/events?since=0&limit=500";
+  if (kind) { url += "&kind=" + encodeURIComponent(kind); }
+  api(url).then(function (r) {
+    appendEvents(r.events);
+    $("events-empty").hidden = $("events").tBodies[0].rows.length > 0;
+  }).catch(function () {});
 }
 
 function appendEvents(events) {
@@ -1111,9 +1168,22 @@ function tick() {
     renderState(s);
     if (openTile === "sources") { fetchSources(); }
     pulse();
+    return pollEvents();
   }).catch(function (err) {
     if (err.message !== "unauthorized") { toast(err.message); }
   });
+}
+
+// pollEvents appends everything the ring has produced since the last poll. A
+// failure here is deliberately silent: the activity feed falling behind is not
+// worth a toast on top of whatever already failed.
+function pollEvents() {
+  if (!eventsPainted) { return; }
+  var url = "api/events?since=" + lastSeq + "&limit=500";
+  if (eventKind) { url += "&kind=" + encodeURIComponent(eventKind); }
+  return api(url).then(function (r) {
+    appendEvents(r.events);
+  }).catch(function () {});
 }
 
 function unban(key) {
@@ -1144,6 +1214,12 @@ document.addEventListener("DOMContentLoaded", function () {
   document.addEventListener("keydown", function (ev) {
     if (ev.key === "Escape" && openTile) { closeDetail(); }
   });
+  var filterButtons = document.querySelectorAll("#event-filter button");
+  for (var fi = 0; fi < filterButtons.length; fi++) {
+    filterButtons[fi].addEventListener("click", function (ev) {
+      setEventKind(ev.currentTarget.getAttribute("data-kind"));
+    });
+  }
   $("rules-save").addEventListener("click", saveRules);
   $("rules-revert").addEventListener("click", revertRules);
 

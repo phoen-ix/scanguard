@@ -1003,3 +1003,211 @@ func TestObserveResponseDoesNotBufferServerSentEvents(t *testing.T) {
 			"Flush is not reaching the underlying ResponseWriter, so SSE buffers")
 	}
 }
+
+// A dry run is only useful if it reports what enforcement WOULD have done. It
+// used to report something else entirely: because no ban was written, the source
+// was re-detected on every subsequent request and climbed the escalation ladder
+// each time. On a live deployment one source reached offence 514 and a reported
+// duration of 30d where enforcement would have said 1h, and 923 "would-ban"
+// events came from just 23 sources.
+func TestDryRunBansEachSourceOnceInsteadOfEscalatingForever(t *testing.T) {
+	h := build(t, func(c *Config) { c.DryRun = true })
+	rt := registry[t.Name()]
+
+	const probes = 25
+	for i := 0; i < probes; i++ {
+		rec := send(h, "GET", fmt.Sprintf("/wp-admin/%d.php", i), "203.0.113.60:1", nil)
+		if rec.Code == 403 {
+			t.Fatalf("probe %d was blocked; a dry run must never block", i)
+		}
+		if rec.Header().Get("X-Backend") != "reached" {
+			t.Fatalf("probe %d never reached the backend", i)
+		}
+	}
+
+	var bans []Event
+	for _, e := range rt.events.recent(0) {
+		if e.Kind == eventBan {
+			bans = append(bans, e)
+		}
+	}
+	if len(bans) != 1 {
+		t.Fatalf("%d probes produced %d would-ban events, want exactly 1", probes, len(bans))
+	}
+	if !bans[0].DryRun {
+		t.Error("the would-ban event is not marked as a dry run")
+	}
+	if bans[0].BanFor != "1h" {
+		t.Errorf("would-ban duration is %q, want the first rung 1h", bans[0].BanFor)
+	}
+
+	// Nothing may reach the real ban list, or turning dryRun off later would
+	// enforce bans that were only ever hypothetical.
+	if got := len(rt.store().list(time.Now())); got != 0 {
+		t.Errorf("the real ban list holds %d entries after a dry run, want 0", got)
+	}
+}
+
+// Decay is measured from the end of the previous ban, not from the offence that
+// caused it. Measuring from the offence charges the ban's own duration against
+// the decay period, which pins the ladder at whichever rung equals the decay:
+// with the shipped 1h/24h/7d/30d ladder and a 24h decay, a source released from
+// its 24h ban has by definition been quiet for 24h and drops back to rung 1.
+// Observed on a real source that oscillated 1h/24h for nine days across fourteen
+// bans without ever reaching 7d.
+func TestEscalationClimbsAcrossABanExpiry(t *testing.T) {
+	c := newCounters(100)
+	key := netip.MustParsePrefix("203.0.113.61/32")
+	const decay = 24 * time.Hour
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Rung 1: a 1h ban.
+	if got := c.recordOffence(key, now, decay); got != 1 {
+		t.Fatalf("first offence recorded as %d, want 1", got)
+	}
+	c.noteBan(key, now.Add(time.Hour))
+
+	// Re-offends an hour after that ban expired.
+	now = now.Add(2 * time.Hour)
+	if got := c.recordOffence(key, now, decay); got != 2 {
+		t.Fatalf("second offence recorded as %d, want 2", got)
+	}
+	c.noteBan(key, now.Add(24*time.Hour))
+
+	// Re-offends a minute after the 24h ban expired. Before the fix this was 1,
+	// forever, and rungs 3 and 4 were unreachable.
+	now = now.Add(24*time.Hour + time.Minute)
+	if got := c.recordOffence(key, now, decay); got != 3 {
+		t.Fatalf("third offence recorded as %d, want 3 — the ladder is pinned", got)
+	}
+	c.noteBan(key, now.Add(7*24*time.Hour))
+
+	// A source that genuinely behaves after release must still decay: two full
+	// decay periods of quiet after the ban ends drops it two rungs.
+	now = now.Add(7*24*time.Hour + 2*decay + time.Minute)
+	if got := c.recordOffence(key, now, decay); got != 2 {
+		t.Fatalf("after two quiet decay periods the offence count is %d, want 2", got)
+	}
+}
+
+// The console offers a manual ban "by IP or CIDR" and the README advertises it,
+// but a range ban was only ever stored: lookups are an exact map hit on the
+// aggregated request key, so a /24 could never match the /32 a request arrives
+// under. It showed as active in the console and blocked nothing.
+func TestManualCIDRBanBlocksAddressesInsideIt(t *testing.T) {
+	const token = "test-token-0123456789"
+	h := build(t, func(c *Config) {
+		c.Admin.Enabled = true
+		c.Admin.Token = token
+	})
+	withAction := map[string]string{
+		"X-Scanguard-Token":  token,
+		"X-Scanguard-Action": "1",
+	}
+
+	req := httptest.NewRequest("POST", "/__scanguard/api/bans",
+		strings.NewReader(`{"key":"198.51.100.0/24","duration":"1h","reason":"range test"}`))
+	req.RemoteAddr = "203.0.113.62:1"
+	for k, v := range withAction {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("manual range ban returned %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Every address inside the range is blocked, on an innocent path.
+	for _, addr := range []string{"198.51.100.1:1", "198.51.100.55:1", "198.51.100.254:1"} {
+		if got := send(h, "GET", "/", addr, nil).Code; got != 403 {
+			t.Errorf("%s inside the banned /24 got %d, want 403", addr, got)
+		}
+	}
+	// An address outside it is untouched.
+	if got := send(h, "GET", "/", "192.0.2.1:1", nil).Code; got != 200 {
+		t.Errorf("an address outside the banned /24 got %d, want 200", got)
+	}
+
+	// And unbanning the range releases it again.
+	del := httptest.NewRequest("DELETE", "/__scanguard/api/bans?key=198.51.100.0/24", nil)
+	del.RemoteAddr = "203.0.113.62:1"
+	for k, v := range withAction {
+		del.Header.Set(k, v)
+	}
+	delRec := httptest.NewRecorder()
+	h.ServeHTTP(delRec, del)
+	if delRec.Code != 200 {
+		t.Fatalf("unbanning the range returned %d: %s", delRec.Code, delRec.Body.String())
+	}
+	if got := send(h, "GET", "/", "198.51.100.55:1", nil).Code; got != 200 {
+		t.Errorf("still blocked after the range ban was lifted, got %d", got)
+	}
+}
+
+// Traefik rebuilds every middleware on any dynamic-configuration change, and on a
+// host running the docker provider that happens on every container start. The
+// reload path swaps the store, the notifier and the geo cache while requests are
+// reading them; those three were plain field writes under a lock the request path
+// never takes. Run with -race, which is what CI does.
+func TestConfigReloadIsSafeUnderConcurrentTraffic(t *testing.T) {
+	name := t.Name()
+	// The configuration has to actually CHANGE on each rebuild. acquireRuntime
+	// short-circuits on an unchanged fingerprint, so reloading an identical config
+	// never reaches the swaps and would make this test vacuous.
+	newHandler := func(rps int) http.Handler {
+		cfg := CreateConfig()
+		cfg.InstanceName = name
+		cfg.Detectors.RateAbuse.RPS = rps
+		h, err := New(context.Background(), okBackend(), cfg, fmt.Sprintf("scanguard@test-%d", rps))
+		if err != nil {
+			t.Errorf("New: %v", err)
+		}
+		return h
+	}
+
+	h := newHandler(1000)
+
+	// RFC 5737 documentation ranges: TEST-NET-1, TEST-NET-2, TEST-NET-3.
+	docNets := []string{"192.0.2", "198.51.100", "203.0.113"}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for j := 0; ; j++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				// A FRESH source every iteration, on a clean path. A source that gets
+				// banned takes the early reject branch for the rest of the run and
+				// stops exercising the detector chain, which is where the notifier and
+				// the geo cache are read — so reusing addresses would quietly make
+				// this test cover nothing.
+				//
+				// Every goroutine gets its own half of one RFC 5737 documentation
+				// range, so no two of them ever collide on a source.
+				src := fmt.Sprintf("%s.%d:1", docNets[n/2], (n%2)*127+j%127+1)
+				if j%50 == 0 {
+					// Occasionally trip a ban too, so the store is written and the geo
+					// cache read while the reload swaps them.
+					send(h, "GET", "/wp-config.php", src, nil)
+					continue
+				}
+				send(h, "GET", "/", src, nil)
+			}
+		}(i)
+	}
+
+	// Each New() with the same instance name takes the reload branch of
+	// acquireRuntime, which is where the swaps happen.
+	for i := 0; i < 40; i++ {
+		newHandler(1000 + i)
+	}
+	close(stop)
+	wg.Wait()
+}

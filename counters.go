@@ -32,6 +32,9 @@ type sourceState struct {
 	// Escalation ladder position.
 	offences    int
 	lastOffence time.Time
+	// banUntil is when the ban issued for the last offence ran out. Decay is
+	// measured from it rather than from lastOffence; see recordOffence.
+	banUntil time.Time
 }
 
 // counters is the local per-source counter table, hard-capped and LRU-evicted.
@@ -217,22 +220,92 @@ func (c *counters) noteRequest(key netip.Prefix, now time.Time, rps, burst int) 
 // Decay is applied first: a source that has behaved for a full decay period drops
 // one rung, so a single bad day does not permanently poison an address that later
 // gets reassigned to somebody else by their ISP.
+//
+// "Behaved" is measured from the moment the previous ban RAN OUT, not from the
+// offence that caused it, and the difference is not academic. A banned source
+// cannot re-offend while it is banned, so measuring from the offence charges the
+// ban's own duration against the decay period. With the shipped ladder that is
+// self-defeating: rung 2 is 24h and the default decay is 24h, so every source
+// released from a 24h ban has by definition been "quiet" for 24h and drops
+// straight back to rung 1. Rungs 3 and 4 are then unreachable no matter how
+// persistent the offender is — observed on a real source that oscillated 1h,
+// 24h, 1h, 24h for nine days across fourteen bans without ever reaching 7d.
+//
+// Measuring from expiry makes the ladder behave the way its own configuration
+// reads, at any combination of rungs and decay, instead of silently requiring
+// decay to exceed the longest rung.
 func (c *counters) recordOffence(key netip.Prefix, now time.Time, decay time.Duration) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	st := c.getLocked(key, now)
-	if decay > 0 && !st.lastOffence.IsZero() {
-		if steps := int(now.Sub(st.lastOffence) / decay); steps > 0 {
-			st.offences -= steps
-			if st.offences < 0 {
-				st.offences = 0
+	if decay > 0 {
+		if since := st.quietSince(); !since.IsZero() {
+			if steps := int(now.Sub(since) / decay); steps > 0 {
+				st.offences -= steps
+				if st.offences < 0 {
+					st.offences = 0
+				}
 			}
 		}
 	}
 	st.offences++
 	st.lastOffence = now
 	return st.offences
+}
+
+// quietSince reports the instant from which this source has had the opportunity
+// to behave: the end of its last ban, or the last offence when that ban has not
+// expired yet or there was none.
+func (st *sourceState) quietSince() time.Time {
+	if st.banUntil.After(st.lastOffence) {
+		return st.banUntil
+	}
+	return st.lastOffence
+}
+
+// noteBan records when the ban just issued for a source will expire, so the next
+// offence can measure decay from the end of it. A permanent ban (zero expiry)
+// records nothing: the source can never come back to re-offend.
+func (c *counters) noteBan(key netip.Prefix, expires time.Time) {
+	if expires.IsZero() {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if st, ok := c.tbl[key]; ok {
+		st.banUntil = expires
+	}
+}
+
+// seed restores a ladder position from a ban that outlived the process.
+//
+// Bans persist and counters do not, so without this every restart hands the most
+// persistent offenders a clean slate — and installing or upgrading the plugin
+// REQUIRES a restart, so it happens routinely rather than rarely. A source whose
+// stored ban says "offence 7" must come back at rung 7.
+//
+// Takes the maximum rather than overwriting, so replaying the ban list can never
+// walk a live ladder backwards.
+func (c *counters) seed(key netip.Prefix, offences int, created, expires, now time.Time) {
+	if offences <= 0 {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	st := c.getLocked(key, now)
+	if offences > st.offences {
+		st.offences = offences
+	}
+	if created.After(st.lastOffence) {
+		st.lastOffence = created
+	}
+	if expires.After(st.banUntil) {
+		st.banUntil = expires
+	}
 }
 
 // offences reports the current ladder position without advancing it.
