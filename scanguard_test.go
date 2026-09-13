@@ -1299,14 +1299,14 @@ func TestEscalationClimbsAcrossABanExpiry(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 	// Rung 1: a 1h ban.
-	if got := c.recordOffence(key, now, decay); got != 1 {
+	if got, _ := c.recordOffence(key, now, decay, nil); got != 1 {
 		t.Fatalf("first offence recorded as %d, want 1", got)
 	}
 	c.noteBan(key, now.Add(time.Hour))
 
 	// Re-offends an hour after that ban expired.
 	now = now.Add(2 * time.Hour)
-	if got := c.recordOffence(key, now, decay); got != 2 {
+	if got, _ := c.recordOffence(key, now, decay, nil); got != 2 {
 		t.Fatalf("second offence recorded as %d, want 2", got)
 	}
 	c.noteBan(key, now.Add(24*time.Hour))
@@ -1314,7 +1314,7 @@ func TestEscalationClimbsAcrossABanExpiry(t *testing.T) {
 	// Re-offends a minute after the 24h ban expired. Before the fix this was 1,
 	// forever, and rungs 3 and 4 were unreachable.
 	now = now.Add(24*time.Hour + time.Minute)
-	if got := c.recordOffence(key, now, decay); got != 3 {
+	if got, _ := c.recordOffence(key, now, decay, nil); got != 3 {
 		t.Fatalf("third offence recorded as %d, want 3 — the ladder is pinned", got)
 	}
 	c.noteBan(key, now.Add(7*24*time.Hour))
@@ -1322,7 +1322,7 @@ func TestEscalationClimbsAcrossABanExpiry(t *testing.T) {
 	// A source that genuinely behaves after release must still decay: two full
 	// decay periods of quiet after the ban ends drops it two rungs.
 	now = now.Add(7*24*time.Hour + 2*decay + time.Minute)
-	if got := c.recordOffence(key, now, decay); got != 2 {
+	if got, _ := c.recordOffence(key, now, decay, nil); got != 2 {
 		t.Fatalf("after two quiet decay periods the offence count is %d, want 2", got)
 	}
 }
@@ -1447,4 +1447,154 @@ func TestConfigReloadIsSafeUnderConcurrentTraffic(t *testing.T) {
 	}
 	close(stop)
 	wg.Wait()
+}
+
+// The path allowlist was a rejection bypass: it returned before the ban lookup,
+// so a banned source reached the backend by prefixing its probe with an
+// allowlisted path. Seen in production against `^/\.well-known/acme-challenge/`
+// — a source banned minutes earlier fetched eight webshell names under it, all
+// proxied through. Harmless in front of a static file server; not harmless in
+// front of anything that executes.
+func TestAllowlistedPathIsNotAWayAroundABan(t *testing.T) {
+	h := build(t, func(c *Config) {
+		c.Allowlist.Paths = []string{`^/\.well-known/acme-challenge/`}
+		c.Detectors.Signatures.Enabled = true
+		c.Detectors.Signatures.UseDefaults = true
+	})
+	const src = "203.0.113.140:1"
+
+	if got := send(h, "GET", "/wp-login.php", src, nil).Code; got != http.StatusForbidden {
+		t.Fatalf("setup: the source was not banned, got %d", got)
+	}
+	if got := send(h, "GET", "/.well-known/acme-challenge/webshell.php", src, nil).Code; got != http.StatusForbidden {
+		t.Errorf("a banned source reached the backend through the path allowlist, got %d", got)
+	}
+}
+
+// ...but the allowlist must still do its actual job: a probe-shaped path under an
+// allowlisted prefix must not CAUSE a ban. Otherwise closing the bypass above
+// would just move the problem, and an ACME challenge that happens to look like a
+// probe would lock out the certificate client.
+func TestAllowlistedPathStillPreventsABan(t *testing.T) {
+	h := build(t, func(c *Config) {
+		c.Allowlist.Paths = []string{`^/\.well-known/acme-challenge/`}
+		c.Detectors.Signatures.Enabled = true
+		c.Detectors.Signatures.UseDefaults = true
+	})
+	const src = "203.0.113.141:1"
+
+	// /wp-login.php is a signature hit anywhere else.
+	if got := send(h, "GET", "/.well-known/acme-challenge/wp-login.php", src, nil).Code; got != http.StatusOK {
+		t.Fatalf("an allowlisted path was blocked, got %d", got)
+	}
+	if got := len(registry[t.Name()].store().list(time.Now())); got != 0 {
+		t.Errorf("an allowlisted path caused %d ban(s); it must cause none", got)
+	}
+	// And the source is still free on an ordinary path.
+	if got := send(h, "GET", "/", src, nil).Code; got != http.StatusOK {
+		t.Errorf("the source was banned anyway, got %d", got)
+	}
+}
+
+// A source-level exemption is a statement about who the client is, so it must
+// still bypass the ban list entirely — that is what makes an allowlisted CIDR a
+// reliable escape hatch when a rule misfires.
+func TestAllowlistedCIDRStillBypassesABan(t *testing.T) {
+	h := build(t, func(c *Config) {
+		c.Allowlist.CIDRs = []string{"203.0.113.142/32"}
+		c.Detectors.Signatures.Enabled = true
+		c.Detectors.Signatures.UseDefaults = true
+	})
+	// Ban a different source, then confirm the allowlisted one is untouched even
+	// after the store holds a ban.
+	send(h, "GET", "/wp-login.php", "203.0.113.143:1", nil)
+	if got := send(h, "GET", "/wp-login.php", "203.0.113.142:1", nil).Code; got != http.StatusOK {
+		t.Errorf("an allowlisted CIDR was blocked, got %d", got)
+	}
+}
+
+// A burst must cost ONE rung, not one per connection.
+//
+// The offence counter used to increment once per concurrent in-flight request,
+// each increment emitting its own ban record. On a live deployment every source
+// that ever reached offence >= 4 got there inside its first burst, in 1-6 ms —
+// not one earned a 30-day ban by actually coming back — and 10 of 98 live bans
+// were 30-day bans handed to a first-time offender. Escalation is meant to
+// measure "came back", not "was parallel".
+func TestABurstOfConcurrentProbesCountsAsOneOffence(t *testing.T) {
+	h := build(t, func(c *Config) {
+		c.Detectors.Signatures.Enabled = true
+		c.Detectors.Signatures.UseDefaults = true
+		c.Enforcement.Escalation = []string{"1h", "24h", "168h", "720h"}
+	})
+	rt := registry[t.Name()]
+
+	const conns = 16
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < conns; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			send(h, "GET", fmt.Sprintf("/wp-admin/%d.php", i), "203.0.113.150:1", nil)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	bans := rt.store().list(time.Now())
+	if len(bans) != 1 {
+		t.Fatalf("a %d-connection burst produced %d ban records, want 1", conns, len(bans))
+	}
+	// And one ban EVENT, not one per connection: the console showed sixteen bans
+	// for what is a single ban.
+	var banEvents int
+	for _, e := range rt.events.recent(0) {
+		if e.Kind == eventBan {
+			banEvents++
+		}
+	}
+	if banEvents != 1 {
+		t.Errorf("a %d-connection burst emitted %d ban events, want 1", conns, banEvents)
+	}
+	if bans[0].Offences != 1 {
+		t.Errorf("a first-time offender reached offence %d in one burst; duration %v",
+			bans[0].Offences, bans[0].Expires.Sub(bans[0].Created))
+	}
+	// The ladder must still be intact: 1h, not something further up it.
+	if d := bans[0].Expires.Sub(bans[0].Created); d < 55*time.Minute || d > 65*time.Minute {
+		t.Errorf("first offence produced a %v ban, want ~1h", d)
+	}
+}
+
+// The other half: a source that genuinely comes back AFTER its ban expires must
+// still climb. Closing the burst race must not flatten the ladder.
+func TestEscalationStillClimbsForASourceThatComesBack(t *testing.T) {
+	c := newCounters(100)
+	key := netip.MustParsePrefix("203.0.113.151/32")
+	ladder := func(offence int) time.Duration {
+		switch offence {
+		case 1:
+			return time.Hour
+		case 2:
+			return 24 * time.Hour
+		default:
+			return 168 * time.Hour
+		}
+	}
+	now := time.Now()
+	decay := 24 * time.Hour
+
+	if got, _ := c.recordOffence(key, now, decay, ladder); got != 1 {
+		t.Fatalf("first offence: got %d, want 1", got)
+	}
+	// Still inside the 1h ban: another hit is the same burst, not a new offence.
+	if got, _ := c.recordOffence(key, now.Add(30*time.Minute), decay, ladder); got != 1 {
+		t.Errorf("a hit inside the ban counted as a new offence: got %d, want 1", got)
+	}
+	// Ban expired, and it came back before the decay window closed.
+	if got, _ := c.recordOffence(key, now.Add(90*time.Minute), decay, ladder); got != 2 {
+		t.Errorf("a source that came back after its ban did not climb: got %d, want 2", got)
+	}
 }

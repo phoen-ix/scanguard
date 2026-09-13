@@ -184,6 +184,20 @@ func (c *Config) crawlerPolicy() (policy string, declared bool) {
 // BadPathsConfig is a leaky bucket over DISTINCT paths that produced an error
 // status. Counting distinct paths rather than raw 404 volume is what stops one
 // broken link, hammered by a legitimate client, from banning that client.
+//
+// Capacity defaults to 20. It was 10, and on a host that answers 404 to
+// everything — a placeholder domain, or any catch-all — "capacity 10" means
+// nothing more than "asked for 11 URLs", which several well-behaved agents do as
+// a matter of course. Every false positive observed on a live deployment came
+// from this detector at 10, and all of them were discovery rather than scanning:
+// an MCP client walking its 11 well-known paths, and a legal-notice compliance
+// crawler trying 13 spellings of /impressum. Real scanning does not sit near the
+// line — the wordlists seen alongside them ran 200 to 600 distinct paths a
+// minute — so the gap between 13 and 20 costs nothing and buys the benefit of
+// the doubt.
+//
+// Lower it if the routes behind you serve real 404s to real users, where a
+// scanner has to work harder to be distinguishable.
 type BadPathsConfig struct {
 	Enabled  bool   `json:"enabled,omitempty"`
 	Capacity int    `json:"capacity,omitempty"`
@@ -368,7 +382,7 @@ func CreateConfig() *Config {
 			// this point would leak into whatever the operator configures.
 			BadPaths: BadPathsConfig{
 				Enabled:  true,
-				Capacity: 10,
+				Capacity: 20,
 				Leak:     "10s",
 			},
 			BruteForce: BruteForceConfig{
@@ -809,7 +823,7 @@ func (c *Config) parseDetectors(s *settings) error {
 
 	s.badPaths = d.BadPaths
 	if s.badPaths.Capacity <= 0 {
-		s.badPaths.Capacity = 10
+		s.badPaths.Capacity = 20
 	}
 	if s.badPathsLeak, err = parseDuration("detectors.badPaths.leak", d.BadPaths.Leak, 10*time.Second); err != nil {
 		return err

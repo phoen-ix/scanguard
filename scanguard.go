@@ -144,10 +144,16 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	// Allowlists and unattributable requests short-circuit before any detector
 	// runs, so a bad rule can never lock out an exempt source.
+	//
+	// A SOURCE-level exemption — unattributable, trusted proxy, allowlisted CIDR
+	// or User-Agent — is a statement about who the client is, so it bypasses
+	// everything, the ban list included. A PATH exemption is not, and is handled
+	// after the ban lookup instead; see below.
 	crawlers := h.effectiveCrawlers(s)
-	if reason, ok := s.exemptFor(req, res, crawlers); ok {
+	exemptReason, exempted := s.exemptFor(req, res, crawlers)
+	if exempted && exemptReason != exemptPath {
 		h.rt.stats.Skipped.Add(1)
-		h.rt.topExempt.add(reason)
+		h.rt.topExempt.add(exemptReason)
 		h.next.ServeHTTP(rw, req)
 		return
 	}
@@ -161,8 +167,10 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	// giveaway was /robots.txt topping "most probed paths", which was crawler ban
 	// volume rather than probing. Both tallies are capped and pruned, so the
 	// attacker-controlled key space stays bounded (see tally).
-	h.rt.topPaths.add(req.URL.Path)
-	h.rt.topSources.add(res.key.String())
+	if !exempted {
+		h.rt.topPaths.add(req.URL.Path)
+		h.rt.topSources.add(res.key.String())
+	}
 
 	// The hot path proper: one map lookup under a read lock.
 	//
@@ -199,6 +207,24 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			h.rt.reject(s, rw, req)
 			return
 		}
+		h.next.ServeHTTP(rw, req)
+		return
+	}
+
+	// The path allowlist means "this path must never CAUSE a ban", not "this path
+	// is a way around one". It used to return before the ban lookup above, which
+	// made it a rejection bypass: a banned source could reach the backend simply by
+	// prefixing its probe with an allowlisted path. Observed in the wild against
+	// the usual `^/\.well-known/acme-challenge/` entry — a source banned minutes
+	// earlier fetched eight webshell names under it, every one proxied to the
+	// backend. Harmless against a static file server, not harmless in front of
+	// anything that executes.
+	//
+	// Detection is still skipped, so the original purpose holds: a probe-shaped
+	// ACME path cannot get the ACME client banned.
+	if exempted {
+		h.rt.stats.Skipped.Add(1)
+		h.rt.topExempt.add(exemptReason)
 		h.next.ServeHTTP(rw, req)
 		return
 	}

@@ -234,11 +234,32 @@ func (c *counters) noteRequest(key netip.Prefix, now time.Time, rps, burst int) 
 // Measuring from expiry makes the ladder behave the way its own configuration
 // reads, at any combination of rungs and decay, instead of silently requiring
 // decay to exceed the longest rung.
-func (c *counters) recordOffence(key netip.Prefix, now time.Time, decay time.Duration) int {
+// durationFor maps the new offence number to a ban length so the ban window can
+// be recorded in the SAME critical section as the increment. It may be nil, in
+// which case the caller is responsible for calling noteBan; production always
+// passes it, and passing nil reopens the race described below.
+// fresh reports whether this call actually advanced the ladder. False means the
+// source was already serving a ban, so the caller is looking at a second request
+// from a burst that has already been dealt with and should not record it again.
+func (c *counters) recordOffence(key netip.Prefix, now time.Time, decay time.Duration, durationFor func(int) time.Duration) (offence int, fresh bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	st := c.getLocked(key, now)
+
+	// Already inside a ban this source has not served out, so this is another
+	// request from the same burst rather than a new offence.
+	//
+	// Without this the counter climbed once per concurrent in-flight request. A
+	// scanner opening four connections at once landed on rung 4 in a millisecond:
+	// on a live deployment every source that ever reached offence >= 4 got there
+	// inside its first burst, in 1-6 ms, and 10 of 98 live bans were 30-day bans
+	// handed to a first-time offender. Escalation is supposed to measure "came
+	// back", not "was parallel".
+	if st.banUntil.After(now) {
+		return st.offences, false
+	}
+
 	if decay > 0 {
 		if since := st.quietSince(); !since.IsZero() {
 			if steps := int(now.Sub(since) / decay); steps > 0 {
@@ -251,7 +272,18 @@ func (c *counters) recordOffence(key netip.Prefix, now time.Time, decay time.Dur
 	}
 	st.offences++
 	st.lastOffence = now
-	return st.offences
+
+	// Recorded here, not in a separate noteBan call after the ban is built. That
+	// call sat about twenty lines later in applyBan, behind a geo lookup, and the
+	// gap was wide enough for a concurrent request to record its own offence
+	// before the first one had marked the source banned — which is the other half
+	// of the same race.
+	if durationFor != nil {
+		if d := durationFor(st.offences); d != permanent {
+			st.banUntil = now.Add(d)
+		}
+	}
+	return st.offences, true
 }
 
 // quietSince reports the instant from which this source has had the opportunity

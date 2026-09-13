@@ -62,6 +62,25 @@ var defaultSignatures = []string{
 	`/\.npmrc$`,
 	`/\.htpasswd$`,
 	`/(?:credentials|secrets|id_rsa)(?:\.txt|\.json|\.yml|\.yaml)?$`,
+	// Cloud, container and mail credentials, all dotfiles a webroot never serves.
+	// Seen probed as one set by the same wordlists that ask for /.env: 1,616
+	// requests from 108 addresses in nine days at one small deployment.
+	`/\.(?:s3cfg|boto|netrc|msmtprc|esmtprc|gitconfig|amplifyrc|terraform\.tfstate)(?:$|[?/%])`,
+	`/\.(?:docker/(?:config|secrets)\.json|terraform/credentials\.tfrc\.json)$`,
+	// Framework configuration files that carry database and API credentials. None
+	// is ever served by a correctly deployed application: Spring reads
+	// application.properties off the classpath, ASP.NET reads appsettings.json off
+	// disk, and neither maps into the webroot.
+	`^/(?:config/)?(?:application|bootstrap)\.(?:properties|ya?ml)$`,
+	`^/appsettings(?:\.[a-z]+)?\.json$`,
+	// A backup of a WordPress config, which is the live credentials with an
+	// extension that stops PHP executing it and starts the web server serving it.
+	// Distinct from /wp-config.php itself, which a running site does have.
+	`/\.?wp-config\.(?:php\.(?:bak|old|save|swp|orig|txt)|old|bak|save|orig|txt|dist|sample)$`,
+	// rclone stores cloud-storage credentials here in plaintext.
+	`/rclone\.conf$`,
+	// Laravel's log, which routinely contains stack traces with connection strings.
+	`/storage/logs/laravel\.log$`,
 
 	// Database and admin panels.
 	`/(?:phpmyadmin|phpmyadm1n|pma|myadmin|mysqladmin)(?:/|$)`,
@@ -71,7 +90,14 @@ var defaultSignatures = []string{
 	// PHP webshells and known RCE entrypoints.
 	`/(?:shell|c99|r57|wso|alfa|b374k|indoxploit|mini)\.php`,
 	`/vendor/phpunit/phpunit/src/util/php/eval-stdin\.php`,
-	`/_ignition/execute-solution`,
+	`/_ignition/(?:execute-solution|health-check)`,
+	// Go's pprof handlers. net/http/pprof registers on DefaultServeMux, so this is
+	// exposed by accident rather than on purpose, and it hands out heap dumps and
+	// full goroutine stacks. 1,021 requests from 252 addresses in nine days.
+	`^/debug/pprof(?:/|$)`,
+	// A POST to an interpreter path is a command-execution attempt against an
+	// appliance or a misconfigured CGI handler. No HTTP application routes these.
+	`^/bin/(?:sh|bash|busybox)$`,
 	`/(?:cgi-bin|scripts)/.*\.(?:sh|pl|cgi)$`,
 
 	// Local-file-read targets and traversal, matched in the PATH.
@@ -84,14 +110,25 @@ var defaultSignatures = []string{
 	// is invisible to the query-side copy.
 	//
 	// Note Go does not clean dot segments out of a server-side request path, so
-	// `(?:\.\./){2,}` sees them exactly as they were sent.
+	// the traversal pattern sees them exactly as they were sent.
+	//
+	// Both separators, in both encodings. The plain `(?:\.\./){2,}` form missed
+	// `..\..\..\var/log/apache2/access.log`, which is how the same wordlists send
+	// it at a target they think is Windows. Go decodes %5C into a backslash in
+	// URL.Path, so the decoded form is what a detector normally sees — but Traefik
+	// can be configured to preserve encoded separators, and the payload copy of
+	// this pattern reads RawQuery, which is never decoded. Hence all four.
 	`/etc/(?:passwd|shadow)\b`,
 	`/proc/self/(?:environ|cmdline)`,
-	`(?:\.\./){2,}`,
+	`(?:(?:\.\.|%2e%2e)(?:[\\/]|%2f|%5c)){2,}`,
 	// Vite's dev server exposes arbitrary file reads under /@fs/ (CVE-2025-30208
 	// and CVE-2025-30209). /@fs/ is an internal dev-server route: it has no meaning
 	// in a production build, so nothing legitimate requests it.
 	`/@fs/`,
+	// The rest of the Vite dev-server namespace, same reasoning as /@fs/: a
+	// production build never serves it, so a request is either a probe or a
+	// deployment that shipped its dev server.
+	`^/@vite/`,
 
 	// A PHP file inside an upload or image directory. This is where a webshell lands
 	// after an upload bypass, and it is the one place a correctly configured site
@@ -174,6 +211,23 @@ var defaultUserAgents = []string{
 	// names a CVE is announcing a vulnerability scan.
 	`\bcve-\d{4}-\d{4,7}-(?:detect|scan|check|poc|exploit)\b`,
 	`^cve-\d{4}-\d{4,7}(?:[/\s]|$)`,
+
+	// A Chrome user-agent with no AppleWebKit and no Safari token. Real Chrome has
+	// emitted both for its entire existence, so this string cannot come from the
+	// browser it claims to be — it is forged, and badly. Worth its own entry
+	// because the traffic behind it is invisible to every other detector: it
+	// requests "/", "/login", "/signin" and "/api/auth/signin", which are real
+	// endpoints, at roughly one attempt an hour per address. 4,277 requests from
+	// 21 addresses in nine days at one deployment, every one a credential probe.
+	`^mozilla/5\.0 \([^)]*\) chrome/[\d.]+$`,
+
+	// Self-identifying scanners with no signature-visible path: like the survey
+	// scanners above they mostly request "/", so the user-agent is the only thing
+	// that can see them.
+	`\blibredtail-http\b`,
+	`\binfrawatch\b`,
+	`\bmcpharvest\b`,
+	`visionheight\.com/scan`,
 }
 
 // defaultCrawlers matches commercial SEO and backlink crawlers: bots that obey
@@ -226,7 +280,7 @@ var defaultPayloadPatterns = []string{
 	`\bwaitfor\s+delay\b`,
 
 	// Path traversal and local file inclusion.
-	`(?:\.\./){2,}`,
+	`(?:(?:\.\.|%2e%2e)(?:[\\/]|%2f|%5c)){2,}`,
 	`(?:%2e%2e(?:%2f|%5c)){2,}`,
 	`/etc/(?:passwd|shadow)\b`,
 	`/proc/self/environ`,

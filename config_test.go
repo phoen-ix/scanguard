@@ -242,3 +242,100 @@ func TestDefaultUserAgentsAvoidLegitimateClients(t *testing.T) {
 		}
 	}
 }
+
+// The rules added from nine days of live traffic, each with the shape of probe
+// it was derived from and the legitimate traffic it must not touch.
+func TestRulesAddedFromMeasuredTraffic(t *testing.T) {
+	s := mustSettings(t, nil)
+
+	for _, path := range []string{
+		"/.s3cfg", "/.boto", "/.netrc", "/.gitconfig", "/.terraform.tfstate",
+		"/.docker/config.json", "/.terraform/credentials.tfrc.json",
+		"/application.properties", "/config/application.yml", "/bootstrap.yaml",
+		"/appsettings.json", "/appsettings.production.json",
+		"/wp-config.php.bak", "/wp-config.old", "/wp-config.php.save",
+		"/rclone.conf", "/storage/logs/laravel.log",
+		"/_ignition/health-check", "/debug/pprof/", "/debug/pprof/heap",
+		"/bin/sh", "/@vite/env",
+		// Traversal in both separators and both encodings. Go decodes %5C into a
+		// backslash in URL.Path, so the decoded form is what the detector normally
+		// sees — but the encoded forms must match too, because Traefik can be told
+		// to preserve them and the payload copy of this pattern reads RawQuery,
+		// which is never decoded. The old `(?:\.\./){2,}` matched only the first.
+		"/../../../etc/passwd",
+		"/..\\..\\..\\windows/win.ini",
+		`/..%5C..%5C..%5Cvar/log/apache2/access.log`,
+		"/%2e%2e%2f%2e%2e%2fetc/passwd",
+		`/..%2f..%2fetc/passwd`,
+	} {
+		if !s.sigMatcher.match(path) {
+			t.Errorf("default signatures do not match %s", path)
+		}
+	}
+
+	// Legitimate paths these could plausibly have caught. /settings.json and
+	// /config.json are ordinary SPA endpoints; /debug is a real route name; the
+	// Nextcloud and osTicket paths are from a live 60-endpoint ground truth.
+	for _, path := range []string{
+		"/settings.json", "/config.json", "/manifest.json", "/site.webmanifest",
+		"/debug", "/debugger", "/bin", "/binaries/tool.tar.gz",
+		"/apps/richdocuments/settings/fonts.json", "/remote.php/dav/files/admin/x",
+		"/ocs/v2.php/apps/notifications", "/index.php/204", "/status.php",
+		"/login.php", "/open.php", "/view.php", "/account.php",
+		"/assets/index-abc123.js", "/locales/en/game.json", "/sprites/player.png",
+		"/wp-config-sample-guide/", "/docs/application.properties.md",
+	} {
+		if s.sigMatcher.match(path) {
+			t.Errorf("default signatures falsely match %s — that is a self-inflicted outage", path)
+		}
+	}
+
+	// A Chrome user-agent with neither AppleWebKit nor Safari cannot come from
+	// Chrome. Every source sending it on the deployment this was derived from was
+	// a credential prober on a hosting range.
+	for _, ua := range []string{
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
+		"Mozilla/5.0 (X11; Linux x86_64) Chrome/119.0",
+	} {
+		if !s.uaMatcher.match(ua) {
+			t.Errorf("default user-agents do not match the forged Chrome string %q", ua)
+		}
+	}
+	// Real browsers and crawlers must survive it. These are verbatim strings from
+	// live traffic; the forged one differs only by the missing tokens.
+	for _, ua := range []string{
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+		"Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+		"Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)",
+		"Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+	} {
+		if s.uaMatcher.match(ua) {
+			t.Errorf("default user-agents falsely match a real client: %q", ua)
+		}
+	}
+
+	// The crawler list must never contain a search engine — the curation promise
+	// that makes `crawlers: ban` safe to offer at all.
+	for _, ua := range []string{
+		"Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+		"Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)",
+		"Mozilla/5.0 (compatible; DuckDuckBot/1.1; +http://duckduckgo.com/duckduckbot.html)",
+		"Mozilla/5.0 (compatible; Applebot/0.1; +http://www.apple.com/go/applebot)",
+		"Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots)",
+		"Mozilla/5.0 (compatible; Baiduspider/2.0; +http://www.baidu.com/search/spider.html)",
+	} {
+		if s.crawlerMatcher.match(ua) {
+			t.Errorf("the SEO crawler list matches a search engine: %q", ua)
+		}
+	}
+	for _, ua := range []string{
+		"Mozilla/5.0 (compatible; MJ12bot/v1.4.8; http://mj12bot.com/)",
+		"Mozilla/5.0 (compatible; Bytespider; spider-feedback@bytedance.com)",
+	} {
+		if !s.crawlerMatcher.match(ua) {
+			t.Errorf("the SEO crawler list does not match %q", ua)
+		}
+	}
+}

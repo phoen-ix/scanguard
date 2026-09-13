@@ -364,7 +364,7 @@ detectors:
   honeypots:   { enabled: true,  paths: [] }
   userAgent:   { enabled: true,  useDefaults: true, patterns: [], banEmptyUA: false,
                  crawlers: ignore }   # ignore | ban | block | exempt — settable per router
-  badPaths:    { enabled: true,  capacity: 10, leak: 10s, statuses: [400,401,403,404,405,501] }
+  badPaths:    { enabled: true,  capacity: 20, leak: 10s, statuses: [400,401,403,404,405,501] }
   bruteForce:  { enabled: false, capacity: 5, window: 60s, statuses: [401,403], paths: [] }
   rateAbuse:   { enabled: false, rps: 50, burst: 100 }
   payload:     { enabled: false, useDefaults: true, scanQuery: true, scanBody: false, maxBodyBytes: 8192 }
@@ -476,13 +476,14 @@ Where the time goes, from `go test -bench .`:
 |---|---|---|
 | Already-banned request | **881 ns**, 4 allocs | resolve, one map lookup, write a status |
 | Client-IP resolution | 208 ns, 0 allocs | with four trusted-proxy CIDRs |
-| Signature match (48 patterns) | 3.2 µs | short subject, so cheap |
-| User-agent match (22 patterns) | 25 µs | **the dominant cost** |
+| Signature match (71 patterns) | 5.3 µs | short subject, so cheap |
+| User-agent match (30 patterns) | 26 µs | **the dominant cost** |
 | Clean request, end to end | 52 µs, 3 allocs | almost entirely the two matches |
 
 An alternation with no literal prefix must attempt a match at every position, so
 cost scales with subject length — which is why matching a 90-character
-user-agent costs 8× more than matching a path despite having half the patterns.
+user-agent costs 5× more than matching a path despite having fewer than half the
+patterns.
 A literal pre-filter measures 3.2× faster interpreted, and is deliberately not
 implemented; see the note in `matcher.go` for why a wrong pre-filter fails
 silently in exactly the direction you cannot afford.

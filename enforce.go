@@ -23,6 +23,15 @@ func (s *settings) banDuration(offence int) time.Duration {
 	return s.escalation[idx]
 }
 
+// activeBan reads the ban currently in force for a source, from whichever list
+// this instance writes to. A dry run keeps its bans in the shadow list.
+func (rt *runtime) activeBan(s *settings, key netip.Prefix, now time.Time) (Ban, bool) {
+	if s.dryRun {
+		return rt.shadow.get(key, now)
+	}
+	return rt.store().get(key, now)
+}
+
 // applyBan records a ban for a detected source and returns it.
 //
 // In dry-run mode everything happens except the write: the event is logged, the
@@ -30,7 +39,17 @@ func (s *settings) banDuration(offence int) time.Duration {
 // useful for tuning rules on live traffic — you see exactly what would have been
 // banned without banning anybody.
 func (rt *runtime) applyBan(s *settings, res resolution, det *detection, req *http.Request, now time.Time) Ban {
-	offence := rt.counters.recordOffence(res.key, now, s.decay)
+	offence, fresh := rt.counters.recordOffence(res.key, now, s.decay, s.banDuration)
+	if !fresh {
+		// Another request from the same burst already banned this source. Carrying
+		// on would overwrite that ban with an identical one and emit a second ban
+		// event: sixteen concurrent probes produced sixteen "banned source" lines
+		// and sixteen console entries for what is one ban.
+		if existing, ok := rt.activeBan(s, res.key, now); ok {
+			return existing
+		}
+		return Ban{}
+	}
 	duration := s.banDuration(offence)
 
 	ban := Ban{
@@ -47,10 +66,11 @@ func (rt *runtime) applyBan(s *settings, res resolution, det *detection, req *ht
 	if duration != permanent {
 		ban.Expires = now.Add(duration).UTC()
 	}
-	// Decay is measured from the end of this ban, not from the offence that caused
-	// it — otherwise the ban's own duration counts as good behaviour and the
-	// ladder cannot climb past the rung whose length equals the decay period.
-	rt.counters.noteBan(res.key, ban.Expires)
+	// The ban window was recorded inside recordOffence, in the same critical
+	// section as the increment — see the comment there. Decay is measured from the
+	// end of the ban, not from the offence that caused it, otherwise the ban's own
+	// duration counts as good behaviour and the ladder cannot climb past the rung
+	// whose length equals the decay period.
 
 	rt.stats.Detections.Add(1)
 	rt.topDetectors.add(det.detector)

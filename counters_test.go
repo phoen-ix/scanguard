@@ -153,15 +153,15 @@ func TestEscalationLadderAndDecay(t *testing.T) {
 	k := key("203.0.113.8/32")
 	now := time.Now()
 
-	if got := c.recordOffence(k, now, time.Hour); got != 1 {
+	if got, _ := c.recordOffence(k, now, time.Hour, nil); got != 1 {
 		t.Fatalf("first offence = %d, want 1", got)
 	}
-	if got := c.recordOffence(k, now, time.Hour); got != 2 {
+	if got, _ := c.recordOffence(k, now, time.Hour, nil); got != 2 {
 		t.Fatalf("second offence = %d, want 2", got)
 	}
 
 	// Behaving for two decay periods drops two rungs, then this offence adds one.
-	if got := c.recordOffence(k, now.Add(2*time.Hour+time.Minute), time.Hour); got != 1 {
+	if got, _ := c.recordOffence(k, now.Add(2*time.Hour+time.Minute), time.Hour, nil); got != 1 {
 		t.Fatalf("offence after decay = %d, want 1", got)
 	}
 }
@@ -208,8 +208,8 @@ func TestForgetClearsLadder(t *testing.T) {
 	k := key("203.0.113.9/32")
 	now := time.Now()
 
-	c.recordOffence(k, now, time.Hour)
-	c.recordOffence(k, now, time.Hour)
+	_, _ = c.recordOffence(k, now, time.Hour, nil)
+	_, _ = c.recordOffence(k, now, time.Hour, nil)
 	c.forget(k)
 
 	if got := c.offences(k); got != 0 {
