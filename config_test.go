@@ -274,8 +274,9 @@ func TestRulesAddedFromMeasuredTraffic(t *testing.T) {
 	}
 
 	// Legitimate paths these could plausibly have caught. /settings.json and
-	// /config.json are ordinary SPA endpoints; /debug is a real route name; the
-	// Nextcloud and osTicket paths are from a live 60-endpoint ground truth.
+	// /config.json are ordinary SPA endpoints, /debug is a real route name, and
+	// the rest are stock endpoints of widely deployed PHP applications — the
+	// shapes most likely to collide with a rule aimed at a probe.
 	for _, path := range []string{
 		"/settings.json", "/config.json", "/manifest.json", "/site.webmanifest",
 		"/debug", "/debugger", "/bin", "/binaries/tool.tar.gz",
