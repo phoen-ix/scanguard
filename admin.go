@@ -323,7 +323,11 @@ func (rt *runtime) apiEvents(rw http.ResponseWriter, req *http.Request) {
 	// needle in it.
 	kind := req.URL.Query().Get("kind")
 	switch kind {
-	case "", eventDetect, eventBan, eventUnban, eventReject:
+	// No eventDetect: it was declared and accepted here for years but never
+	// emitted anywhere, so filtering by it returned nothing and looked like a
+	// quiet day rather than a filter that cannot match. A detection that leads
+	// nowhere is not recorded; one that bans is an eventBan, in dry run too.
+	case "", eventBan, eventUnban, eventReject:
 	default:
 		writeJSON(rw, http.StatusBadRequest, map[string]string{
 			"error": "kind must be one of detect, ban, unban, reject",
@@ -559,7 +563,24 @@ func parseBanKey(s *settings, raw string) (netip.Prefix, error) {
 		if err != nil {
 			return netip.Prefix{}, errBadKey
 		}
-		return p.Masked(), nil
+		p = p.Masked()
+		// A prefix NARROWER than the width requests arrive under can never match
+		// anything. Requests are keyed at ipv4Prefix/ipv6Prefix, the store's exact
+		// lookup uses that key, and the containment scan only covers prefixes that
+		// are WIDER (memStore.isWideLocked). So a /128 typed while ipv6Prefix is 64
+		// used to be accepted, listed as active in the console, and block nothing —
+		// the precise failure the wide-prefix handling was added to eliminate,
+		// surviving at the other end of the range.
+		//
+		// Refused rather than silently widened: widening bans more than the
+		// operator typed, and doing that quietly to a ban is not a kindness.
+		if bits := keyWidth(p.Addr(), s); p.Bits() > bits {
+			w := strconv.Itoa(bits)
+			return netip.Prefix{}, adminError(p.String() +
+				" is narrower than the /" + w + " that requests are keyed at, so it could never match;" +
+				" ban the /" + w + " instead, or lower clientIP." + prefixSettingName(p.Addr()))
+		}
+		return p, nil
 	}
 	addr, err := netip.ParseAddr(raw)
 	if err != nil {
@@ -576,6 +597,22 @@ const (
 	errKeyRequired adminError = "key is required (an IP address or a CIDR)"
 	errBadKey      adminError = "key is not a valid IP address or CIDR"
 )
+
+// keyWidth is the prefix length requests of this address family arrive under.
+func keyWidth(addr netip.Addr, s *settings) int {
+	if addr.Is4() {
+		return s.ipv4Prefix
+	}
+	return s.ipv6Prefix
+}
+
+// prefixSettingName names the setting to change, for an error an operator reads.
+func prefixSettingName(addr netip.Addr) string {
+	if addr.Is4() {
+		return "ipv4Prefix"
+	}
+	return "ipv6Prefix"
+}
 
 func prefixStrings(prefixes []netip.Prefix) []string {
 	out := make([]string, 0, len(prefixes))

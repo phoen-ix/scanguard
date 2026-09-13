@@ -466,6 +466,19 @@ func (rt *runtime) geo() *geoCache {
 // seedLadder replays the persisted ban list into the escalation counters, so a
 // restart does not reset every repeat offender to the first rung. Returns how
 // many ladder positions were restored.
+//
+// KNOWN GAP: it restores only sources whose ban is still LIVE. store.list
+// excludes expired bans and restore() drops them on load, so a source whose ban
+// has expired but whose decay window is still open loses its ladder position
+// across a restart and comes back at rung 1. Measured on a live deployment: all
+// seven "offence N then offence 1 inside the decay window" transitions in a
+// nine-day sample straddled a restart, and none occurred anywhere else in 211
+// hours — so the effect is real, bounded, and only as frequent as restarts are.
+//
+// Fixing it means retaining expired bans for `decay` purely so their ladder
+// position can be replayed, which changes what list/sweep/restore mean and how
+// maxEntries eviction counts. That is the most delicate part of this codebase
+// and deserves its own change rather than a corner of one.
 func (rt *runtime) seedLadder(store banStore, now time.Time) int {
 	seeded := 0
 	for _, b := range store.list(now) {

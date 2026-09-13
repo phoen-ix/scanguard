@@ -47,14 +47,25 @@ func newFileStore(s *settings) (*fileStore, error) {
 		instance: s.instanceName,
 	}
 
+	// store.failOpen applies here as it does to Redis: false means "a store I
+	// cannot persist to is a startup error, not something to carry on quietly
+	// without". It used to be read only by the Redis backend, so a deployment that
+	// set failOpen: false and a file backend got the opposite of what it asked for
+	// — silently, since the degraded mode logs a warning and serves normally.
 	dir := filepath.Dir(fs.path)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
+		if !s.failOpen {
+			return nil, fmt.Errorf("store.path: %s could not be created and store.failOpen is false: %w", dir, err)
+		}
 		warnOnce(fs.instance, "state-dir-unwritable",
 			"state directory could not be created; scanguard will run in memory only and bans will not survive a restart",
 			map[string]interface{}{"dir": dir, "error": err.Error()})
 		return fs, nil
 	}
 	if err := fs.probeWritable(dir); err != nil {
+		if !s.failOpen {
+			return nil, fmt.Errorf("store.path: %s is not writable and store.failOpen is false: %w", dir, err)
+		}
 		warnOnce(fs.instance, "state-dir-unwritable",
 			"state directory is not writable; scanguard will run in memory only and bans will not survive a restart",
 			map[string]interface{}{"dir": dir, "error": err.Error()})
@@ -64,6 +75,9 @@ func newFileStore(s *settings) (*fileStore, error) {
 
 	loaded, err := fs.load()
 	if err != nil {
+		if !s.failOpen {
+			return nil, fmt.Errorf("store.path: %s could not be read and store.failOpen is false: %w", fs.path, err)
+		}
 		// A corrupt or unreadable snapshot must not stop Traefik from starting.
 		// Losing the ban list is recoverable; refusing to serve traffic is not.
 		logWarn(fs.instance, "could not read state snapshot; starting with an empty ban list",

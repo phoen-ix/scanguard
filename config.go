@@ -51,8 +51,15 @@ type StoreConfig struct {
 	// Counter updates never trigger a write on their own; a 404 flood would
 	// otherwise burn IOPS rewriting the file thousands of times a second.
 	SnapshotInterval string `json:"snapshotInterval,omitempty"`
-	// FailOpen decides what happens when the backend is unreachable. Fail-closed
-	// on a Redis blip takes the whole site down, so this defaults to true.
+	// FailOpen decides what happens when the backend is unusable — Redis
+	// unreachable, or the file backend's directory unwritable and its snapshot
+	// unreadable. True carries on without persistence and logs a warning; false
+	// makes it a startup error. Fail-closed on a Redis blip takes the whole site
+	// down, so this defaults to true.
+	//
+	// Set it false where losing the ban list silently is worse than not starting:
+	// a container whose state volume failed to mount looks healthy, serves
+	// traffic, and forgets every ban on every restart.
 	FailOpen bool `json:"failOpen,omitempty"`
 	// MaxEntries hard-caps the tracked-source table. Entries are LRU-evicted past
 	// this point: an unbounded per-IP map is a memory-exhaustion vector under a

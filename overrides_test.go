@@ -512,3 +512,44 @@ func contains(list []string, want string) bool {
 	}
 	return false
 }
+
+// A manual ban narrower than the width requests arrive under could never match:
+// the store's exact lookup uses the request key, and the containment scan only
+// covers prefixes that are WIDER. A /128 typed while ipv6Prefix is 64 was
+// accepted, listed as active in the console, and blocked nothing — the same
+// class of silent failure the wide-prefix handling was added to eliminate,
+// surviving at the other end of the range.
+func TestAManualBanNarrowerThanTheKeyWidthIsRefused(t *testing.T) {
+	s, err := func() (*settings, error) {
+		c := CreateConfig()
+		c.InstanceName = t.Name()
+		c.ClientIP.IPv4Prefix = 24
+		c.ClientIP.IPv6Prefix = 64
+		return c.parse()
+	}()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	for _, raw := range []string{"2001:db8::5/128", "203.0.113.5/32"} {
+		if _, err := parseBanKey(s, raw); err == nil {
+			t.Errorf("%s was accepted; it can never match a request key", raw)
+		} else if !strings.Contains(err.Error(), "never match") {
+			t.Errorf("%s: the error should say why, got: %v", raw, err)
+		}
+	}
+
+	// At or wider than the key width is fine, and so is a bare address.
+	for _, raw := range []string{"2001:db8::/64", "2001:db8::/48", "203.0.113.0/24", "203.0.113.0/16"} {
+		if _, err := parseBanKey(s, raw); err != nil {
+			t.Errorf("%s was refused: %v", raw, err)
+		}
+	}
+	got, err := parseBanKey(s, "2001:db8::5")
+	if err != nil {
+		t.Fatalf("a bare address was refused: %v", err)
+	}
+	if got.Bits() != 64 {
+		t.Errorf("a bare address normalised to /%d, want /64", got.Bits())
+	}
+}

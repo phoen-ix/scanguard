@@ -8,7 +8,6 @@ import (
 
 // Event kinds.
 const (
-	eventDetect = "detect"
 	eventBan    = "ban"
 	eventUnban  = "unban"
 	eventReject = "reject"
