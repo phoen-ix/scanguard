@@ -62,7 +62,14 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	// s is this middleware's OWN parsed settings. acquireRuntime may merge a
 	// sibling console's admin block into the shared object, so adminServeHere has
 	// to be read here, before that happens.
-	return &handler{next: next, rt: rt, name: name, uiMode: s.uiMode, servePrefix: s.adminServeHere}, nil
+	return &handler{
+		next:        next,
+		rt:          rt,
+		name:        name,
+		uiMode:      s.uiMode,
+		servePrefix: s.adminServeHere,
+		crawlers:    s.uaCrawlersDeclared,
+	}, nil
 }
 
 // handler is the per-router middleware. It holds no durable state: that lives on
@@ -73,6 +80,15 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 // shared settings: the console and the detector are two middleware definitions
 // sharing one runtime, and a global uiMode flag would put the detector into
 // console mode the moment the console was constructed.
+//
+// crawlers is the third exception. detectors.userAgent.crawlers is per-router by
+// design (see UserAgentConfig.Crawlers): one instance may protect placeholder
+// hosts that should refuse SEO crawlers and a content site that wants them, and
+// splitting instances to express that would split the ban list too. It is read
+// from THIS definition's own parsed settings, before a sibling definition can
+// publish different shared settings over the top, and it is excluded from
+// configFingerprint so two definitions differing only in this value do not fight
+// over the shared settings on every reload.
 //
 // servePrefix is the second exception, for exactly the same reason. It records
 // whether THIS middleware definition was itself configured to answer the admin
@@ -87,6 +103,18 @@ type handler struct {
 	name        string
 	uiMode      bool
 	servePrefix bool
+	crawlers    string
+}
+
+// effectiveCrawlers resolves the crawler policy for this router: its own declared
+// value, else the instance-wide one. Resolved per request rather than at New() so
+// a console edit of the instance value reaches routers that stated no policy
+// immediately, without waiting for a Traefik reload.
+func (h *handler) effectiveCrawlers(s *settings) string {
+	if h.crawlers != "" {
+		return h.crawlers
+	}
+	return s.uaCrawlers
 }
 
 func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
@@ -116,7 +144,8 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	// Allowlists and unattributable requests short-circuit before any detector
 	// runs, so a bad rule can never lock out an exempt source.
-	if reason, ok := s.exempt(req, res); ok {
+	crawlers := h.effectiveCrawlers(s)
+	if reason, ok := s.exemptFor(req, res, crawlers); ok {
 		h.rt.stats.Skipped.Add(1)
 		h.rt.topExempt.add(reason)
 		h.next.ServeHTTP(rw, req)
@@ -174,7 +203,35 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if det := h.rt.detectRequest(s, req, res, now); det != nil {
+	if det := h.rt.detectRequest(s, crawlers, req, res, now); det != nil {
+		if det.detector == detectorCrawler && crawlers == crawlersBlock {
+			// Router-local refusal: no ban record, no offence, no escalation, so
+			// nothing about this reaches the other routers on this instance. That
+			// is the entire difference from "ban", and the reason "block" exists:
+			// the ban list is shared, so a crawler banned on a placeholder host
+			// would otherwise be refused on the content site too — and no policy
+			// set there could undo it, because the ban list is consulted first.
+			h.rt.stats.Rejected.Add(1)
+			h.rt.events.add(Event{
+				Kind:     eventReject,
+				Key:      res.key.String(),
+				Client:   res.client.String(),
+				Detector: det.detector,
+				Rule:     det.rule,
+				Method:   req.Method,
+				Host:     req.Host,
+				Path:     req.URL.Path,
+				UA:       req.UserAgent(),
+				Status:   s.rejectStatus,
+				DryRun:   s.dryRun,
+			})
+			if !s.dryRun {
+				h.rt.reject(s, rw, req)
+				return
+			}
+			h.next.ServeHTTP(rw, req)
+			return
+		}
 		h.rt.applyBan(s, res, det, req, now)
 		if !s.dryRun {
 			h.rt.stats.Rejected.Add(1)

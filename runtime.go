@@ -745,8 +745,29 @@ func storeFingerprint(s *settings) string {
 //
 // Keep every fingerprint helper's parameter concretely typed for the same reason,
 // and never route one through a shared interface{} helper again.
+//
+// detectors.userAgent.crawlers is EXCLUDED from the hash. It is the one
+// per-router setting (see handler.crawlers), so the intended configuration is two
+// middleware definitions sharing an instanceName and differing only in that
+// value. Hashing it would make them look like two different configurations, so
+// every reload would rebuild and republish the shared settings twice — once per
+// sibling, in whatever order Traefik built them.
+//
+// A DECLARED policy would survive that anyway, because each handler captures its
+// own value in New(). What the exclusion actually buys is: no pointless settings
+// churn on every reload, and a stable value for the instance-wide fallback that
+// definitions stating no policy inherit. Excluding it makes the two siblings hash
+// equal, so the shared settings simply stay put.
+//
+// Definitions that differ in anything ELSE still fight, exactly as before. Keep
+// siblings identical apart from this one key.
 func configFingerprint(c *Config) string {
-	buf, err := json.Marshal(c)
+	// Shallow copy: Detectors and UserAgent are struct values, so blanking the
+	// field on the copy cannot touch the caller's config. Slices are shared but
+	// never mutated here. Same idiom as inheritAdmin, which Yaegi already runs.
+	stripped := *c
+	stripped.Detectors.UserAgent.Crawlers = ""
+	buf, err := json.Marshal(&stripped)
 	if err != nil {
 		return ""
 	}

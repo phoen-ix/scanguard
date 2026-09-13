@@ -34,7 +34,7 @@ experimental:
 | **Distinct-404 floods** | A leaky bucket over *distinct* failing paths — so a scanner walking a wordlist is caught, and a real user hammering one broken link never is. |
 | **Honeypots** | Paths you invent that no legitimate client could know. One hit, instant ban, effectively zero false positives. |
 | **Scanner user-agents** | nikto, sqlmap, nuclei, masscan, zgrab and friends. Generic clients like `curl` and `python-requests` are deliberately *not* in the defaults. |
-| **SEO crawlers** | MJ12bot, AhrefsBot, SemrushBot and friends, as a separate opt-in: `detectors.userAgent.crawlers` is `ignore` (default), `ban` or `exempt`. They are not scanners, so they get their own switch rather than being smuggled into another rule. Search engines are never on the list. |
+| **SEO crawlers** | MJ12bot, AhrefsBot, SemrushBot and friends, as a separate opt-in: `detectors.userAgent.crawlers` is `ignore` (default), `ban`, `block` or `exempt`. They are not scanners, so they get their own switch rather than being smuggled into another rule. Search engines are never on the list. **This is the one setting that can differ per router** — see [Crawlers, per router](#crawlers-per-router). |
 | **Brute force** | Repeated 401/403 from your real login endpoints. |
 | **Rate abuse** | Token bucket per source, independent of status code. |
 | **Injection payloads** | SQLi, traversal, template injection and XSS probes in the query string and optionally the body. Checked in both raw and decoded form. |
@@ -162,6 +162,65 @@ http:
       service: your-dummy-service
       middlewares: [scanguard]
 ```
+
+### Crawlers, per router
+
+`detectors.userAgent.crawlers` is the one setting read from the middleware
+definition that handled the request rather than from the instance. That exists
+because a single instance often protects both placeholder hosts, which have
+nothing to crawl, and a real site, which wants crawling — and splitting them into
+two `instanceName`s to express that would split the ban list and the console too.
+
+```yaml
+http:
+  middlewares:
+    # Placeholder hosts: refuse crawlers.
+    scanguard-parked:
+      plugin:
+        scanguard: &sg
+          instanceName: prod
+          detectors:
+            userAgent: { enabled: true, useDefaults: true, crawlers: block }
+
+    # Real content: same instance, same ban list, opposite answer.
+    scanguard-content:
+      plugin:
+        scanguard:
+          <<: *sg
+          detectors:
+            userAgent: { enabled: true, useDefaults: true, crawlers: ignore }
+```
+
+**Prefer `block` to `ban` when the instance also protects a site you want
+crawled.** The difference is where the decision is recorded:
+
+| value | effect |
+| --- | --- |
+| `ignore` (default) | the crawler list is unused |
+| `ban` | writes a ban record — the crawler is then refused on **every** router this instance protects, and escalates |
+| `block` | refuses the crawler on **this router only**, with `rejectStatus`. No ban record, no offence, no escalation |
+| `exempt` | adds the list to the User-Agent allowlist, so a matching crawler skips every detector **and** an existing ban |
+
+The trap `block` exists to avoid: the ban list is keyed by source and shared by
+the whole instance, and it is consulted *before* any crawler policy. So one `ban`
+on a placeholder host refuses that crawler on your content site as well, and
+setting `ignore` there does **not** undo it. `block` writes nothing shared, so
+each router genuinely decides for itself.
+
+`exempt` is the only value that forgives an existing ban, because the allowlist is
+checked before the ban list. Be clear about the cost: a User-Agent is trivially
+forged, so `exempt` hands anyone who copies the string a free pass past every
+detector. `ban` and `block` carry no such risk — the worst a forged UA achieves is
+getting its own author refused.
+
+Two practical notes. Siblings sharing an `instanceName` should be **identical
+apart from this one key** — they publish to one settings object, and any other
+difference means whichever Traefik builds last wins. And state the policy on every
+definition that shares an instance: one that states none inherits the
+instance-wide value, and which sibling supplies that is decided by build order.
+
+A crawler refused by policy is reported under its own detector, `crawler`, not
+`user-agent`, so the console and the event log tell the two apart.
 
 ### Turn on the console
 
@@ -297,13 +356,14 @@ clientIP:
 
 allowlist:
   cidrs: []                  # office egress, uptime monitors
-  userAgents: []             # verified crawlers
+  userAgents: []             # matched against the User-Agent header — see the warning below
   paths: []                  # e.g. ^/health$
 
 detectors:
   signatures:  { enabled: true,  useDefaults: true, patterns: [], exclude: [] }
   honeypots:   { enabled: true,  paths: [] }
-  userAgent:   { enabled: true,  useDefaults: true, patterns: [], banEmptyUA: false }
+  userAgent:   { enabled: true,  useDefaults: true, patterns: [], banEmptyUA: false,
+                 crawlers: ignore }   # ignore | ban | block | exempt — settable per router
   badPaths:    { enabled: true,  capacity: 10, leak: 10s, statuses: [400,401,403,404,405,501] }
   bruteForce:  { enabled: false, capacity: 5, window: 60s, statuses: [401,403], paths: [] }
   rateAbuse:   { enabled: false, rps: 50, burst: 100 }

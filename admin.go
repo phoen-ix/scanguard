@@ -532,6 +532,11 @@ func (rt *runtime) apiCompiledRules(s *settings, rw http.ResponseWriter, req *ht
 		"signatures": s.sigMatcher.list(),
 		"exclude":    s.sigExclude.list(),
 		"userAgents": s.uaMatcher.list(),
+		// Its own key, because the crawler list is no longer folded into
+		// userAgents (for "ban") or allowUA (for "exempt") at parse time — the
+		// policy is per-router now, so the list is compiled once and consulted per
+		// request. Without this the console would stop showing it entirely.
+		"crawlers":   s.crawlerMatcher.list(),
 		"honeypots":  honeypots,
 		"payload":    s.payloadMatch.list(),
 		"allowPaths": s.allowPaths.list(),

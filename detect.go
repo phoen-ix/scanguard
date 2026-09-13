@@ -15,6 +15,7 @@ const (
 	detectorSignature  = "signature"
 	detectorHoneypot   = "honeypot"
 	detectorUserAgent  = "user-agent"
+	detectorCrawler    = "crawler"
 	detectorBadPaths   = "bad-paths"
 	detectorBruteForce = "brute-force"
 	detectorRateAbuse  = "rate-abuse"
@@ -45,6 +46,7 @@ const (
 	exemptCIDR           = "allowlist-cidr"
 	exemptPath           = "allowlist-path"
 	exemptUserAgent      = "allowlist-user-agent"
+	exemptCrawler        = "crawler-exempt"
 )
 
 func (s *settings) exempt(req *http.Request, res resolution) (string, bool) {
@@ -66,10 +68,35 @@ func (s *settings) exempt(req *http.Request, res resolution) (string, bool) {
 	return "", false
 }
 
+// exemptFor is exempt plus the per-router crawler policy. Request-path callers
+// want this one; exempt itself stays as the policy-free check so its existing
+// callers and tests are unaffected.
+//
+// The crawler test comes last so the reason string still names the more specific
+// rule when both apply — a crawler arriving from a trusted proxy reports
+// "trusted-proxy", as it did before this was per-router.
+//
+// Being here rather than in detectRequest is deliberate and load-bearing: exempt
+// is consulted BEFORE the ban lookup, so "exempt" forgives a crawler that some
+// other router already banned. Moving it later would silently turn that into
+// "detected nothing, but still refused", which is the whole failure this policy
+// exists to avoid.
+func (s *settings) exemptFor(req *http.Request, res resolution, crawlers string) (string, bool) {
+	if reason, ok := s.exempt(req, res); ok {
+		return reason, true
+	}
+	if crawlers == crawlersExempt && s.crawlerMatcher != nil {
+		if ua := req.UserAgent(); ua != "" && s.crawlerMatcher.match(ua) {
+			return exemptCrawler, true
+		}
+	}
+	return "", false
+}
+
 // detectRequest runs the detectors that can decide before the backend is touched.
 // A hit here means the request is never proxied at all, which is the whole point:
 // a probe for /wp-login.php should cost the backend nothing.
-func (rt *runtime) detectRequest(s *settings, req *http.Request, res resolution, now time.Time) *detection {
+func (rt *runtime) detectRequest(s *settings, crawlers string, req *http.Request, res resolution, now time.Time) *detection {
 	path := req.URL.Path
 
 	// Honeypots first: one map lookup, and a hit is unambiguous. No legitimate
@@ -94,6 +121,14 @@ func (rt *runtime) detectRequest(s *settings, req *http.Request, res resolution,
 			}
 		} else if s.uaMatcher.match(ua) {
 			return &detection{detector: detectorUserAgent, rule: s.uaMatcher.which(ua)}
+		} else if (crawlers == crawlersBan || crawlers == crawlersBlock) &&
+			s.crawlerMatcher != nil && s.crawlerMatcher.match(ua) {
+			// Reported as its own detector, not as "user-agent": a commercial
+			// crawler refused by policy is not the same finding as a scanner, and
+			// filing them together made the detector statistics lie. What the
+			// caller does with this — ban, or refuse on this router only — depends
+			// on the policy; see handler.ServeHTTP.
+			return &detection{detector: detectorCrawler, rule: s.crawlerMatcher.which(ua)}
 		}
 	}
 

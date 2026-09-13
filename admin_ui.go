@@ -774,6 +774,7 @@ function renderRules(rules) {
     ["Signatures", rules.signatures],
     ["Honeypots", rules.honeypots],
     ["User agents", rules.userAgents],
+    ["SEO crawlers", rules.crawlers],
     ["Payload", rules.payload],
     ["Allowlisted CIDRs", rules.allowCIDRs],
     ["Trusted proxies", rules.trusted]
@@ -883,8 +884,8 @@ var RULE_SCHEMA = [
     { p: "detectors.userAgent.banEmptyUA", t: "bool", l: "Ban requests with no User-Agent" },
     { p: "detectors.userAgent.patterns", t: "lines", l: "Extra patterns" },
     { p: "detectors.userAgent.crawlers", t: "select", l: "SEO crawlers",
-      opts: ["ignore", "ban", "exempt"],
-      h: "MJ12bot, AhrefsBot, SemrushBot and friends \u2014 crawlers, not scanners. ignore: no opinion. ban: block them. exempt: never ban them by any detector \u2014 convenient for a real content site, but a User-Agent is trivially forged, so it is a free pass past everything. Search engines are never in this list." }
+      opts: ["ignore", "ban", "block", "exempt"],
+      h: "MJ12bot, AhrefsBot, SemrushBot and friends \u2014 crawlers, not scanners. ignore: no opinion. ban: refuse them AND write a ban, which applies on every router this instance protects. block: refuse them on the router they hit, writing nothing shared \u2014 prefer this when the instance also protects a site you want crawled. exempt: never ban them by any detector, and forgive an existing ban \u2014 convenient for a content site, but a User-Agent is trivially forged, so it is a free pass past everything. Search engines are never in this list. NOTE: a router may override this in its own middleware definition; this value is the fallback for those that do not." }
   ]},
   { title: "Distinct failing paths", fields: [
     { p: "detectors.badPaths.enabled", t: "bool", l: "Enabled" },

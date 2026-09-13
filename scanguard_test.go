@@ -906,6 +906,243 @@ func TestCrawlerPolicyRejectsAnUnknownValue(t *testing.T) {
 	}
 }
 
+// buildOn stands up a middleware definition on a NAMED instance, so a test can
+// create two definitions that share one runtime. That is the configuration the
+// per-router crawler policy exists for, and the one build() cannot express.
+func buildOn(t *testing.T, instance, router string, mutate func(*Config)) http.Handler {
+	t.Helper()
+	cfg := CreateConfig()
+	cfg.InstanceName = instance
+	cfg.Detectors.UserAgent.Enabled = true
+	cfg.Detectors.UserAgent.UseDefaults = true
+	if mutate != nil {
+		mutate(cfg)
+	}
+	h, err := New(context.Background(), okBackend(), cfg, router)
+	if err != nil {
+		t.Fatalf("New(%s): %v", router, err)
+	}
+	return h
+}
+
+func crawlerUA() map[string]string {
+	return map[string]string{"User-Agent": "Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)"}
+}
+
+// The point of the whole setting: one instance, one ban list, two routers that
+// disagree about crawlers.
+func TestCrawlerPolicyIsPerRouterOnASharedInstance(t *testing.T) {
+	blocking := buildOn(t, t.Name(), "parked@file", func(c *Config) {
+		c.Detectors.UserAgent.Crawlers = crawlersBlock
+	})
+	serving := buildOn(t, t.Name(), "content@file", func(c *Config) {
+		c.Detectors.UserAgent.Crawlers = crawlersIgnore
+	})
+	if got := send(blocking, "GET", "/", "203.0.113.90:1", crawlerUA()).Code; got != http.StatusForbidden {
+		t.Errorf("crawlers: block served a crawler, got %d", got)
+	}
+	if got := send(serving, "GET", "/", "203.0.113.91:1", crawlerUA()).Code; got != http.StatusOK {
+		t.Errorf("crawlers: ignore refused a crawler, got %d", got)
+	}
+}
+
+// "block" must not write to the shared ban list — that is the only thing that
+// distinguishes it from "ban", and the reason it exists.
+func TestCrawlerBlockDoesNotLeakToAnotherRouter(t *testing.T) {
+	blocking := buildOn(t, t.Name(), "parked@file", func(c *Config) {
+		c.Detectors.UserAgent.Crawlers = crawlersBlock
+	})
+	serving := buildOn(t, t.Name(), "content@file", func(c *Config) {
+		c.Detectors.UserAgent.Crawlers = crawlersIgnore
+	})
+	const src = "203.0.113.92:1"
+	if got := send(blocking, "GET", "/", src, crawlerUA()).Code; got != http.StatusForbidden {
+		t.Fatalf("setup: crawlers: block served a crawler, got %d", got)
+	}
+	if got := len(registry[t.Name()].store().list(time.Now())); got != 0 {
+		t.Errorf("crawlers: block wrote %d ban record(s); it must write none", got)
+	}
+	// Same source, other router: must still be served.
+	if got := send(serving, "GET", "/", src, crawlerUA()).Code; got != http.StatusOK {
+		t.Errorf("a crawler blocked on one router was refused on another, got %d", got)
+	}
+}
+
+// The mirror, and the reason "block" had to be added: "ban" is instance-wide, so
+// setting "ignore" on the content router does NOT rescue a banned crawler. Pin it
+// so nobody "fixes" this by accident and so the documentation stays honest.
+func TestCrawlerBanDoesLeakToAnotherRouter(t *testing.T) {
+	banning := buildOn(t, t.Name(), "parked@file", func(c *Config) {
+		c.Detectors.UserAgent.Crawlers = crawlersBan
+	})
+	serving := buildOn(t, t.Name(), "content@file", func(c *Config) {
+		c.Detectors.UserAgent.Crawlers = crawlersIgnore
+	})
+	const src = "203.0.113.93:1"
+	if got := send(banning, "GET", "/", src, crawlerUA()).Code; got != http.StatusForbidden {
+		t.Fatalf("setup: crawlers: ban served a crawler, got %d", got)
+	}
+	if got := send(serving, "GET", "/", src, crawlerUA()).Code; got != http.StatusForbidden {
+		t.Errorf("crawlers: ban is documented as instance-wide, but the other router served the source (%d)", got)
+	}
+}
+
+// "exempt" is the one policy that forgives an existing ban, because the allowlist
+// is consulted before the ban list.
+func TestCrawlerExemptForgivesABanFromAnotherRouter(t *testing.T) {
+	banning := buildOn(t, t.Name(), "parked@file", func(c *Config) {
+		c.Detectors.UserAgent.Crawlers = crawlersBan
+	})
+	exempting := buildOn(t, t.Name(), "content@file", func(c *Config) {
+		c.Detectors.UserAgent.Crawlers = crawlersExempt
+	})
+	const src = "203.0.113.94:1"
+	if got := send(banning, "GET", "/", src, crawlerUA()).Code; got != http.StatusForbidden {
+		t.Fatalf("setup: crawlers: ban served a crawler, got %d", got)
+	}
+	if got := send(exempting, "GET", "/", src, crawlerUA()).Code; got != http.StatusOK {
+		t.Errorf("crawlers: exempt did not forgive a ban from another router, got %d", got)
+	}
+}
+
+// A definition that states no policy inherits the instance-wide one.
+func TestCrawlerPolicyFallsBackToTheInstanceValue(t *testing.T) {
+	stated := buildOn(t, t.Name(), "parked@file", func(c *Config) {
+		c.Detectors.UserAgent.Crawlers = crawlersBlock
+	})
+	silent := buildOn(t, t.Name(), "other@file", nil)
+	if got := send(stated, "GET", "/", "203.0.113.95:1", crawlerUA()).Code; got != http.StatusForbidden {
+		t.Fatalf("setup: crawlers: block served a crawler, got %d", got)
+	}
+	if got := send(silent, "GET", "/", "203.0.113.96:1", crawlerUA()).Code; got != http.StatusForbidden {
+		t.Errorf("a router that stated no policy did not inherit the instance value, got %d", got)
+	}
+}
+
+// Two detection middlewares on one instance publish to ONE settings object, and
+// whichever New() runs last wins. A declared policy survives that because each
+// handler captures its own value in New() — this pins that, in both build orders,
+// across a reload.
+//
+// Note what it does NOT prove: removing the configFingerprint exclusion does not
+// make this fail, because the per-handler capture is what carries the value, not
+// the shared settings. TestCrawlerPolicyIsExcludedFromTheConfigFingerprint is the
+// test that actually guards the exclusion; this one guards the capture.
+func TestCrawlerPolicySurvivesAReloadInEitherBuildOrder(t *testing.T) {
+	for _, order := range []struct {
+		name  string
+		first string
+	}{{"block-first", crawlersBlock}, {"ignore-first", crawlersIgnore}} {
+		t.Run(order.name, func(t *testing.T) {
+			instance := t.Name()
+			resetRuntime(instance)
+			defer resetRuntime(instance)
+
+			mk := func() (http.Handler, http.Handler) {
+				// rejectStatus is shared, not per-router: it proves the settings
+				// object itself survived rather than being rebuilt by the sibling.
+				b := buildOn(t, instance, "parked@file", func(c *Config) {
+					c.Detectors.UserAgent.Crawlers = crawlersBlock
+					c.Enforcement.RejectStatus = http.StatusNotFound
+				})
+				i := buildOn(t, instance, "content@file", func(c *Config) {
+					c.Detectors.UserAgent.Crawlers = crawlersIgnore
+					c.Enforcement.RejectStatus = http.StatusNotFound
+				})
+				return b, i
+			}
+			if order.first == crawlersIgnore {
+				// Build them the other way round on the first pass too.
+				i := buildOn(t, instance, "content@file", func(c *Config) {
+					c.Detectors.UserAgent.Crawlers = crawlersIgnore
+					c.Enforcement.RejectStatus = http.StatusNotFound
+				})
+				_ = i
+			}
+			blocking, serving := mk()
+			// Now simulate a Traefik reload: New() runs again for both.
+			blocking, serving = mk()
+
+			if got := send(blocking, "GET", "/", "203.0.113.97:1", crawlerUA()).Code; got != http.StatusNotFound {
+				t.Errorf("after reload the blocking router answered %d, want 404 (shared rejectStatus + per-router block)", got)
+			}
+			if got := send(serving, "GET", "/", "203.0.113.98:1", crawlerUA()).Code; got != http.StatusOK {
+				t.Errorf("after reload the serving router refused a crawler (%d): the sibling clobbered its policy", got)
+			}
+		})
+	}
+}
+
+// Pins the fingerprint exclusion directly, so a regression names itself instead
+// of showing up as a flaky ordering failure above.
+func TestCrawlerPolicyIsExcludedFromTheConfigFingerprint(t *testing.T) {
+	a, b := CreateConfig(), CreateConfig()
+	a.Detectors.UserAgent.Crawlers = crawlersBlock
+	b.Detectors.UserAgent.Crawlers = crawlersIgnore
+	if configFingerprint(a) != configFingerprint(b) {
+		t.Error("configs differing only in the crawler policy hashed differently; siblings will clobber each other on every reload")
+	}
+	// The exclusion must be surgical: any other difference must still be seen.
+	b.Detectors.UserAgent.Crawlers = crawlersBlock
+	b.Detectors.UserAgent.BanEmptyUA = true
+	if configFingerprint(a) == configFingerprint(b) {
+		t.Error("configs differing in banEmptyUA hashed equal; the fingerprint is blind to real changes")
+	}
+	// And it must not mutate the caller's config.
+	if a.Detectors.UserAgent.Crawlers != crawlersBlock {
+		t.Error("configFingerprint modified the config it was handed")
+	}
+}
+
+// A crawler refused by policy is not the same finding as a scanner, and filing
+// them under one detector made the statistics lie. SemrushBot-BA is the ordering
+// canary: it is in defaultUserAgents as a scanner AND matches the crawler list.
+func TestCrawlerHitIsLabelledDistinctlyFromAScannerUserAgent(t *testing.T) {
+	h := buildOn(t, t.Name(), "parked@file", func(c *Config) {
+		c.Detectors.UserAgent.Crawlers = crawlersBlock
+	})
+	rt := registry[t.Name()]
+
+	send(h, "GET", "/", "203.0.113.99:1", crawlerUA())
+	send(h, "GET", "/", "203.0.113.100:1", map[string]string{
+		"User-Agent": "Mozilla/5.0 (compatible; SemrushBot-BA; +http://www.semrush.com/bot.html)"})
+
+	var sawCrawler, sawScanner bool
+	for _, e := range rt.events.recent(0) {
+		switch e.Detector {
+		case detectorCrawler:
+			sawCrawler = true
+		case detectorUserAgent:
+			sawScanner = true
+		}
+	}
+	if !sawCrawler {
+		t.Error("a crawler hit was not reported under the crawler detector")
+	}
+	if !sawScanner {
+		t.Error("SemrushBot-BA stopped reporting as a scanner user-agent; the crawler matcher is being consulted first")
+	}
+}
+
+// The exempt reason feeds the console's "why was this skipped" tally, where
+// "allowlist-user-agent" for something nobody put in the allowlist is a puzzle.
+func TestCrawlerExemptIsReportedAsItsOwnReason(t *testing.T) {
+	h := buildOn(t, t.Name(), "content@file", func(c *Config) {
+		c.Detectors.UserAgent.Crawlers = crawlersExempt
+	})
+	rt := registry[t.Name()]
+	send(h, "GET", "/wp-login.php", "203.0.113.101:1", crawlerUA())
+	found := false
+	for _, e := range rt.topExempt.top(0) {
+		if e.Key == exemptCrawler {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("a crawler exemption was not tallied as %q", exemptCrawler)
+	}
+}
+
 // observeResponse wraps the ResponseWriter, and a wrapper that swallows Flush
 // turns every Server-Sent Events route behind this middleware into a stream that
 // delivers nothing until it ends. respwriter.go forwards Flush and says SSE

@@ -142,6 +142,33 @@ func withAdminToken(cfg map[string]interface{}, token string) map[string]interfa
 	return out
 }
 
+// withCrawlers copies cfg two levels deep along detectors.userAgent, replacing
+// only the crawler policy. Used to stand up sibling middleware definitions that
+// share an instanceName and differ in nothing else — the exact configuration the
+// per-router crawler policy exists for.
+func withCrawlers(cfg map[string]interface{}, policy string) map[string]interface{} {
+	out := make(map[string]interface{}, len(cfg))
+	for k, v := range cfg {
+		out[k] = v
+	}
+	det := make(map[string]interface{})
+	if existing, ok := cfg["detectors"].(map[string]interface{}); ok {
+		for k, v := range existing {
+			det[k] = v
+		}
+	}
+	ua := make(map[string]interface{})
+	if existing, ok := det["userAgent"].(map[string]interface{}); ok {
+		for k, v := range existing {
+			ua[k] = v
+		}
+	}
+	ua["crawlers"] = policy
+	det["userAgent"] = ua
+	out["detectors"] = det
+	return out
+}
+
 func backend() http.HandlerFunc {
 	return func(rw http.ResponseWriter, req *http.Request) {
 		switch {
@@ -337,6 +364,47 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 	rec = do(h2, "GET", "/", "203.0.113.21:5000", nil)
 	check("bans survive the New() call Traefik makes on every config reload", rec.Code == 403,
 		"got status %d — state is not shared across middleware instances", rec.Code)
+
+	// Per-router crawler policy. This is the only gate that sees a Yaegi
+	// regression in it: configFingerprint now takes a shallow struct copy to blank
+	// the crawler field before hashing, and a struct copy is exactly the shape the
+	// interpreter has broken before (see the comment on configFingerprint). If the
+	// copy misbehaves under Yaegi the two siblings below stop differing, or the
+	// shared settings get rebuilt and the admin token stops working.
+	crawler := map[string]string{
+		"User-Agent": "Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)"}
+
+	blocking, berr := build(withCrawlers(cfg, "block"))
+	if berr != nil {
+		fatal("New rejected crawlers: block: %v", berr)
+	}
+	serving, serr := build(withCrawlers(cfg, "ignore"))
+	if serr != nil {
+		fatal("New rejected crawlers: ignore: %v", serr)
+	}
+
+	rec = do(blocking, "GET", "/", "203.0.113.90:5000", crawler)
+	check("crawlers: block refuses a listed crawler", rec.Code == 403, "got status %d", rec.Code)
+
+	rec = do(serving, "GET", "/", "203.0.113.91:5000", crawler)
+	check("a sibling router on the same instance still serves that crawler",
+		rec.Code == 200, "got status %d — the per-router policy did not survive", rec.Code)
+
+	// block must write nothing to the shared ban list: same source, other router.
+	rec = do(blocking, "GET", "/", "203.0.113.92:5000", crawler)
+	check("crawlers: block refuses the second source too", rec.Code == 403, "got status %d", rec.Code)
+	rec = do(serving, "GET", "/", "203.0.113.92:5000", crawler)
+	check("a crawler blocked on one router is not banned on the other",
+		rec.Code == 200, "got status %d — block leaked into the shared ban list", rec.Code)
+
+	// And the siblings must not have clobbered the shared settings on the way.
+	rec = do(serving, "GET", "/__scanguard/api/state", "203.0.113.93:5000",
+		map[string]string{"X-Scanguard-Token": token})
+	check("the shared admin token still works after building divergent siblings",
+		rec.Code == 200, "got status %d — the sibling rebuilt the shared settings", rec.Code)
+	rec = do(serving, "GET", "/trap", "203.0.113.94:5000", nil)
+	check("the shared honeypot still works after building divergent siblings",
+		rec.Code == 403, "got status %d", rec.Code)
 
 	// The tile drill-downs. Under Yaegi these are exactly the shapes that fail
 	// silently: a struct reaching a response through an interface{} parameter, or a

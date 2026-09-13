@@ -130,14 +130,32 @@ type UserAgentConfig struct {
 	//
 	//	"ignore" (default) — the list is unused; crawlers are treated like any
 	//	                     other client and can still trip other detectors.
-	//	"ban"              — the list is added to this detector's patterns.
+	//	"ban"              — a matching crawler is banned like any other detection:
+	//	                     a ban record is written, so it is then refused on EVERY
+	//	                     router this instance protects, and it escalates.
+	//	"block"            — a matching crawler is refused on THIS router only, with
+	//	                     rejectStatus. No ban record, no offence, no escalation.
 	//	"exempt"           — the list is added to allowlist.userAgents, so a
 	//	                     matching crawler can never be banned by ANY detector.
 	//
-	// "exempt" is the right answer for a site with content worth crawling, but be
-	// clear about what it costs: a User-Agent is trivially forged, so this hands
-	// anyone who copies the string a free pass past every detector. "ban" carries
-	// no such risk — the worst a forged UA achieves is banning its own author.
+	// THIS SETTING IS PER ROUTER. Unlike every other detector option it is read
+	// from the middleware definition that handled the request, falling back to the
+	// instance-wide value when a definition does not state one. That is what lets a
+	// single instance refuse crawlers on placeholder hosts while serving them on a
+	// content site, without splitting the ban list across two instances.
+	//
+	// Prefer "block" to "ban" when the instance also protects a site you want
+	// crawled. The ban list is keyed by source and shared by the whole instance, so
+	// one "ban" on a placeholder host refuses that crawler everywhere — and setting
+	// "ignore" on the content site does NOT undo it, because the ban is consulted
+	// before any crawler policy is. "block" writes nothing shared, so each router
+	// genuinely decides for itself.
+	//
+	// "exempt" also forgives an existing ban, because the allowlist is checked
+	// before the ban list — but be clear about what it costs: a User-Agent is
+	// trivially forged, so it hands anyone who copies the string a free pass past
+	// every detector. "ban" and "block" carry no such risk; the worst a forged UA
+	// achieves is getting its own author refused.
 	Crawlers string `json:"crawlers,omitempty"`
 }
 
@@ -145,17 +163,22 @@ type UserAgentConfig struct {
 const (
 	crawlersIgnore = "ignore"
 	crawlersBan    = "ban"
+	crawlersBlock  = "block"
 	crawlersExempt = "exempt"
 )
 
 // crawlerPolicy normalises UserAgentConfig.Crawlers. An unrecognised value is
 // returned as-is so the caller that validates can name it in the error.
-func (c *Config) crawlerPolicy() string {
+//
+// declared reports whether THIS middleware definition stated a policy at all,
+// which is what makes the setting per-router: a definition that said nothing
+// inherits the instance-wide value rather than overriding it with the default.
+func (c *Config) crawlerPolicy() (policy string, declared bool) {
 	p := strings.ToLower(strings.TrimSpace(c.Detectors.UserAgent.Crawlers))
 	if p == "" {
-		return crawlersIgnore
+		return crawlersIgnore, false
 	}
-	return p
+	return p, true
 }
 
 // BadPathsConfig is a leaky bucket over DISTINCT paths that produced an error
@@ -552,8 +575,16 @@ type settings struct {
 	geoProvider string
 	geoCacheTTL time.Duration
 
-	// uaCrawlers is the resolved detectors.userAgent.crawlers policy.
+	// uaCrawlers is the instance-wide detectors.userAgent.crawlers policy: the
+	// fallback for a middleware definition that does not state one of its own.
 	uaCrawlers string
+	// uaCrawlersDeclared is THIS definition's own value, or "" if it stated none.
+	// handler.crawlers is captured from it in New(), before a sibling definition
+	// can publish different settings over the top. See handler.effectiveCrawlers.
+	uaCrawlersDeclared string
+	// crawlerMatcher is compiled unconditionally, whatever the policy, because the
+	// policy is now a per-request decision and any router may need it.
+	crawlerMatcher *matcher
 
 	adminEnabled bool
 	// adminServeHere is THIS middleware definition's own answer to "do I serve the
@@ -697,12 +728,11 @@ func (c *Config) parseAllowlist(s *settings) error {
 	if s.allowCIDRs, err = parsePrefixes("allowlist.cidrs", c.Allowlist.CIDRs); err != nil {
 		return err
 	}
-	allowUA := c.Allowlist.UserAgents
-	if c.crawlerPolicy() == crawlersExempt {
-		// Appended, not substituted: an explicit allowlist entry still applies.
-		allowUA = append(append([]string{}, allowUA...), defaultCrawlers...)
-	}
-	if s.allowUA, err = newMatcher("allowlist.userAgents", allowUA); err != nil {
+	// The crawler list is deliberately NOT folded in here for the "exempt" policy.
+	// It used to be, but the policy is per-router now and these settings are shared
+	// by every router on the instance, so baking it in would apply one router's
+	// answer to all of them. exemptFor consults the policy per request instead.
+	if s.allowUA, err = newMatcher("allowlist.userAgents", c.Allowlist.UserAgents); err != nil {
 		return err
 	}
 	if s.allowPaths, err = newMatcher("allowlist.paths", c.Allowlist.Paths); err != nil {
@@ -750,21 +780,29 @@ func (c *Config) parseDetectors(s *settings) error {
 	}
 
 	s.uaEnabled = d.UserAgent.Enabled
-	s.uaCrawlers = c.crawlerPolicy()
-	switch s.uaCrawlers {
-	case crawlersIgnore, crawlersBan, crawlersExempt:
+	policy, declared := c.crawlerPolicy()
+	switch policy {
+	case crawlersIgnore, crawlersBan, crawlersBlock, crawlersExempt:
 	default:
-		return fmt.Errorf("detectors.userAgent.crawlers: %q is not one of %q, %q, %q",
-			d.UserAgent.Crawlers, crawlersIgnore, crawlersBan, crawlersExempt)
+		return fmt.Errorf("detectors.userAgent.crawlers: %q is not one of %q, %q, %q, %q",
+			d.UserAgent.Crawlers, crawlersIgnore, crawlersBan, crawlersBlock, crawlersExempt)
+	}
+	s.uaCrawlers = policy
+	if declared {
+		s.uaCrawlersDeclared = policy
 	}
 	uaPatterns := d.UserAgent.Patterns
 	if d.UserAgent.UseDefaults {
 		uaPatterns = append(append([]string{}, defaultUserAgents...), uaPatterns...)
 	}
-	if s.uaCrawlers == crawlersBan {
-		uaPatterns = append(append([]string{}, uaPatterns...), defaultCrawlers...)
-	}
 	if s.uaMatcher, err = newMatcher("detectors.userAgent.patterns", uaPatterns); err != nil {
+		return err
+	}
+	// Always compiled, never folded into uaMatcher. Kept separate so a crawler hit
+	// reports detector "crawler" rather than "user-agent", and so the scanner
+	// patterns are still tested first — defaultUserAgents has \bsemrushbot-ba\b,
+	// which must keep reporting as a scanner and not as the crawler \bsemrushbot\b.
+	if s.crawlerMatcher, err = newMatcher("detectors.userAgent.crawlers", defaultCrawlers); err != nil {
 		return err
 	}
 	s.uaBanEmpty = d.UserAgent.BanEmptyUA

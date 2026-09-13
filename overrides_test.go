@@ -462,3 +462,53 @@ func TestSavedRulesRestoreWhenConsoleIsBuiltFirst(t *testing.T) {
 		t.Fatalf("the restored honeypot does not block, got %d", got)
 	}
 }
+
+// The crawler list used to be folded into detectors.userAgent.patterns (for
+// "ban") or allowlist.userAgents (for "exempt") at parse time. That could not
+// survive the policy becoming per-router: those matchers are shared by every
+// router on the instance, so baking one router's answer in would apply it to all
+// of them. This is the test that proves the folding is gone, and that the list is
+// still visible to an operator rather than having quietly disappeared.
+func TestCompiledRulesReportTheCrawlerListSeparately(t *testing.T) {
+	for _, policy := range []string{crawlersBan, crawlersBlock, crawlersExempt, crawlersIgnore} {
+		t.Run(policy, func(t *testing.T) {
+			resetRuntime(t.Name())
+			h, _ := consoleHandler(t, func(c *Config) {
+				c.Detectors.UserAgent.Enabled = true
+				c.Detectors.UserAgent.UseDefaults = true
+				c.Detectors.UserAgent.Crawlers = policy
+			})
+			rec := ruleRequestAt(t, h, http.MethodGet, nil, "/__scanguard/api/rules/compiled")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("compiled rules: got %d", rec.Code)
+			}
+			var out struct {
+				UserAgents []string `json:"userAgents"`
+				AllowUA    []string `json:"allowUA"`
+				Crawlers   []string `json:"crawlers"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			const probe = `\bahrefsbot\b`
+			if contains(out.UserAgents, probe) {
+				t.Errorf("%s: the crawler list leaked into detectors.userAgent.patterns", policy)
+			}
+			if contains(out.AllowUA, probe) {
+				t.Errorf("%s: the crawler list leaked into allowlist.userAgents", policy)
+			}
+			if !contains(out.Crawlers, probe) {
+				t.Errorf("%s: the crawler list is not reported at all; the console can no longer show it", policy)
+			}
+		})
+	}
+}
+
+func contains(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
