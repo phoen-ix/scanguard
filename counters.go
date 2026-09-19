@@ -11,6 +11,16 @@ import (
 // it, one source walking a large wordlist would grow this map without limit.
 const maxDistinctPaths = 128
 
+// permanentBanHorizon stands in for "never" in banUntil. A permanent ban has no
+// expiry to record, but both the burst guard in recordOffence and the retention
+// rule in sweep key off banUntil, so a permanent rung records a horizon no request
+// will outlive. Leaving the field alone kept the PREVIOUS rung's expiry there,
+// which by definition had already passed — the source had to serve that ban out
+// to reach this rung — so every request in the burst that earned the permanent
+// ban counted as a fresh offence: duplicate ban records, events and webhooks, and
+// an offence count that climbed once per concurrent connection.
+const permanentBanHorizon = 100 * 365 * 24 * time.Hour
+
 // sourceState is the per-source counter record. It is always process-local, even
 // when the ban list is shared through Redis: counters are high-frequency and
 // disposable, bans are low-frequency and worth agreeing about.
@@ -279,9 +289,11 @@ func (c *counters) recordOffence(key netip.Prefix, now time.Time, decay time.Dur
 	// before the first one had marked the source banned — which is the other half
 	// of the same race.
 	if durationFor != nil {
-		if d := durationFor(st.offences); d != permanent {
-			st.banUntil = now.Add(d)
+		d := durationFor(st.offences)
+		if d == permanent {
+			d = permanentBanHorizon
 		}
+		st.banUntil = now.Add(d)
 	}
 	return st.offences, true
 }
@@ -335,6 +347,10 @@ func (c *counters) seed(key netip.Prefix, offences int, created, expires, now ti
 	if created.After(st.lastOffence) {
 		st.lastOffence = created
 	}
+	if expires.IsZero() {
+		// A persisted permanent ban; see permanentBanHorizon.
+		expires = now.Add(permanentBanHorizon)
+	}
 	if expires.After(st.banUntil) {
 		st.banUntil = expires
 	}
@@ -360,8 +376,27 @@ func (c *counters) forget(key netip.Prefix) {
 	c.mu.Unlock()
 }
 
-// sweep drops records untouched for longer than idle, and returns how many went.
-func (c *counters) sweep(now time.Time, idle time.Duration) int {
+// sweep drops records the detectors no longer need, and returns how many went.
+//
+// A record with no ladder position is pure bucket state and goes once it has been
+// idle for longer than idle. A record that HOLDS a ladder position is different:
+// lastSeen means nothing for it, because a banned source never reaches the
+// counters — ServeHTTP rejects it at the ban lookup, before any detector runs — so
+// it is idle by construction for the whole of its ban. Sweeping on idleness alone
+// deleted the rung while the ban was still being served. Every 24h ban therefore
+// ended with the source back at rung 1, and the longer rungs were reachable only
+// by re-offending inside the single janitor tick between the ban expiring and the
+// sweep noticing. Measured on a live deployment: 86 of 87 sources that came back
+// after a 24h ban came back at offence 1, and the one that reached rung 3 did so
+// by re-offending exactly 24.00h after its previous ban.
+//
+// So a ladder record is kept while its ban runs, and then for as long as the
+// ladder has rungs left to decay: one decay period per rung, measured from the
+// moment the source could start behaving. Past that point decay would have
+// emptied the ladder anyway, and the record goes on the ordinary idle rule. With
+// decay disabled the position is meant to be kept, and it is; the table cap still
+// bounds memory.
+func (c *counters) sweep(now time.Time, idle, decay time.Duration) int {
 	if idle <= 0 {
 		idle = time.Hour
 	}
@@ -372,6 +407,14 @@ func (c *counters) sweep(now time.Time, idle time.Duration) int {
 	cutoff := now.Add(-idle)
 	removed := 0
 	for k, st := range c.tbl {
+		if st.offences > 0 {
+			if st.banUntil.After(now) || decay <= 0 {
+				continue
+			}
+			if now.Before(st.quietSince().Add(time.Duration(st.offences) * decay)) {
+				continue
+			}
+		}
 		if st.lastSeen.Before(cutoff) {
 			delete(c.tbl, k)
 			removed++

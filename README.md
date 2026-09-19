@@ -30,7 +30,7 @@ experimental:
 
 | | |
 |---|---|
-| **Signature probes** | 61 curated paths that only a scanner asks for. Blocked before the request reaches your backend. |
+| **Signature probes** | 84 curated paths that only a scanner asks for. Blocked before the request reaches your backend. |
 | **Distinct-404 floods** | A leaky bucket over *distinct* failing paths — so a scanner walking a wordlist is caught, and a real user hammering one broken link never is. |
 | **Honeypots** | Paths you invent that no legitimate client could know. One hit, instant ban, effectively zero false positives. |
 | **Scanner user-agents** | nikto, sqlmap, nuclei, masscan, zgrab and friends. Generic clients like `curl` and `python-requests` are deliberately *not* in the defaults. |
@@ -338,9 +338,9 @@ observeResponse: true        # wrap ResponseWriter; needed by badPaths and brute
 store:
   backend: memory            # memory | file | redis
   path: /var/lib/scanguard/state.json
-  snapshotInterval: 30s
+  snapshotInterval: 30s      # also the janitor period: expiry sweeps and the Redis refresh run on it (30s minimum)
   failOpen: true
-  maxEntries: 50000          # hard cap on tracked sources; LRU-evicted
+  maxEntries: 50000          # hard cap on tracked sources (LRU) and on bans (soonest-expiring go first)
   redis:
     address: redis:6379
     password: ""
@@ -388,13 +388,24 @@ admin:
   enabled: false             # off by default; no default token
   pathPrefix: /__scanguard
   token: ""                  # 16+ characters, compared in constant time
-  trustForwardedUser: false  # honour X-Forwarded-User from Authelia/Authentik/oauth2-proxy
+  trustForwardedUser: false  # honour X-Forwarded-User from Authelia/Authentik/oauth2-proxy — see the note below
   readOnly: false
   eventLogSize: 500
 ```
 
 Locked out of the console? `SCANGUARD_DISABLE=1` in Traefik's environment turns
 scanguard into a pass-through at startup, no config edit required.
+
+**On `trustForwardedUser`.** When it is on, any request carrying an
+`X-Forwarded-User` header is an authenticated administrator and the token is not
+checked. scanguard cannot tell a header your auth proxy set from one the client
+sent, because by the time a middleware runs the peer is the client, not the
+proxy. Turn it on only when the auth middleware in front of the console
+overwrites that header on every request — with Traefik's `forwardAuth`, list it
+in `authResponseHeaders`, which deletes the client's copy before setting the
+proxy's — and never on a router that skips that middleware. scanguard logs a
+warning at startup to say the same. Failed console logins are counted in
+`stats.authFailures` and logged at most once a minute.
 
 </details>
 

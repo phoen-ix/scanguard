@@ -35,6 +35,12 @@ import (
 type matcher struct {
 	re       *regexp.Regexp
 	patterns []string
+	// each holds one compiled regexp per pattern, in the same order, for which().
+	// Compiled once here. which used to compile them on every call, on the theory
+	// that it only ran once per ban — but the crawler "block" policy refuses a
+	// request without writing a ban, so the same source is re-detected on every
+	// request and which ran, and recompiled a dozen patterns, for every crawler hit.
+	each []*regexp.Regexp
 }
 
 // newMatcher compiles patterns into one case-insensitive alternation. It returns
@@ -45,6 +51,7 @@ type matcher struct {
 // nobody wrote by hand.
 func newMatcher(field string, patterns []string) (*matcher, error) {
 	cleaned := make([]string, 0, len(patterns))
+	each := make([]*regexp.Regexp, 0, len(patterns))
 	seen := make(map[string]struct{}, len(patterns))
 	for _, p := range patterns {
 		p = strings.TrimSpace(p)
@@ -55,10 +62,12 @@ func newMatcher(field string, patterns []string) (*matcher, error) {
 			continue
 		}
 		seen[p] = struct{}{}
-		if _, err := regexp.Compile(p); err != nil {
+		re, err := regexp.Compile("(?i)" + p)
+		if err != nil {
 			return nil, fmt.Errorf("%s: %q is not a valid regular expression: %w", field, p, err)
 		}
 		cleaned = append(cleaned, p)
+		each = append(each, re)
 	}
 	if len(cleaned) == 0 {
 		return nil, nil
@@ -76,7 +85,7 @@ func newMatcher(field string, patterns []string) (*matcher, error) {
 	// anything match", and leftmost-first lets the engine stop at the first hit
 	// and keep its one-pass optimisations. Leftmost-longest would force it to keep
 	// scanning for a longer alternative it has no use for.
-	return &matcher{re: re, patterns: cleaned}, nil
+	return &matcher{re: re, patterns: cleaned, each: each}, nil
 }
 
 // match reports whether s matches any configured pattern. A nil matcher never matches.
@@ -88,19 +97,15 @@ func (m *matcher) match(s string) bool {
 }
 
 // which returns the first individual pattern that matches s, for reporting which
-// rule fired. It is deliberately NOT on the hot path: it recompiles nothing but
-// does walk the pattern list, so it runs only after match has already said yes.
+// rule fired. It walks the pre-compiled per-pattern list, so it costs N native
+// matches rather than one; callers run it only after match has already said yes.
 func (m *matcher) which(s string) string {
 	if m == nil {
 		return ""
 	}
-	for _, p := range m.patterns {
-		re, err := regexp.Compile("(?i)" + p)
-		if err != nil {
-			continue
-		}
+	for i, re := range m.each {
 		if re.MatchString(s) {
-			return p
+			return m.patterns[i]
 		}
 	}
 	return ""

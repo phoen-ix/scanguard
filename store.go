@@ -71,6 +71,13 @@ type banStore interface {
 	loadOverrides() *Overrides
 	// saveOverrides records the console's rule edits.
 	saveOverrides(ov *Overrides) error
+	// refresh re-reads shared state, where the backend has any. The janitor calls
+	// it every tick; a local backend has nothing to re-read and returns nil.
+	//
+	// On the interface for the same reason setKeyWidths is: the janitor used to
+	// reach it through an assertion to an anonymous interface type, the construct
+	// documented just above as segfaulting the plugin under Yaegi.
+	refresh() error
 }
 
 // newBanStore builds the configured backend.
@@ -132,6 +139,9 @@ func newMemStore(max int) *memStore {
 }
 
 func (m *memStore) backend() string { return "memory" }
+
+// refresh is a no-op: local state has nothing to re-read.
+func (m *memStore) refresh() error { return nil }
 
 // setKeyWidths tells the store how wide the detector's own ban keys are, so it
 // can tell an operator's range ban apart from an ordinary one. Called on every
@@ -361,7 +371,9 @@ func (m *memStore) snapshot() []Ban {
 	return out
 }
 
-// restore replaces the ban table, dropping entries that already expired.
+// restore loads bans into the table at startup, dropping entries that already
+// expired. The cap applies here too: a snapshot is normally under it because it
+// was written under it, but nothing else guarantees that.
 func (m *memStore) restore(bans []Ban, now time.Time) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -380,11 +392,53 @@ func (m *memStore) restore(bans []Ban, now time.Time) int {
 		m.bans[key] = &stored
 		loaded++
 	}
+	m.evictLocked()
 	// The map was written behind put()'s back, so the range-ban index has to be
 	// derived again rather than maintained incrementally.
 	m.rebuildWideLocked()
 	m.dirty = false
 	return loaded
+}
+
+// replaceAll swaps the whole table for bans in ONE critical section, and returns
+// how many were kept. The Redis backend uses it on every refresh.
+//
+// It used to empty the map under the lock and then restore into it under a
+// second lock. Between the two, get() found nothing: every banned source was
+// served normally for the duration of the rebuild, on every janitor tick, for the
+// life of the process. The new table is built outside the lock and swapped in
+// whole. Hit counters survive the swap for bans that persist across it, because
+// hits are per-replica and never published to the shared store.
+func (m *memStore) replaceAll(bans []Ban, now time.Time) int {
+	fresh := make(map[netip.Prefix]*Ban, len(bans))
+	for i := range bans {
+		b := bans[i]
+		if !b.active(now) {
+			continue
+		}
+		key, err := netip.ParsePrefix(b.Key)
+		if err != nil {
+			continue
+		}
+		stored := b
+		fresh[key] = &stored
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for key, nb := range fresh {
+		if old, ok := m.bans[key]; ok && old.Hits > nb.Hits {
+			nb.Hits = old.Hits
+		}
+	}
+	m.bans = fresh
+	// The cap applies to what a shared store hands back as much as to what this
+	// process put in. Redis holds the union of every replica's bans plus every
+	// permanent one, and a quiet replica may never call put() to prune it.
+	m.evictLocked()
+	m.rebuildWideLocked()
+	m.dirty = false
+	return len(m.bans)
 }
 
 func (m *memStore) isDirty() bool {
@@ -396,6 +450,22 @@ func (m *memStore) isDirty() bool {
 func (m *memStore) clearDirty() {
 	m.mu.Lock()
 	m.dirty = false
+	m.mu.Unlock()
+}
+
+// clearDirtyIfSet clears the dirty flag and reports whether it was set, in one
+// step, so a writer can claim the pending changes before copying the table.
+func (m *memStore) clearDirtyIfSet() bool {
+	m.mu.Lock()
+	was := m.dirty
+	m.dirty = false
+	m.mu.Unlock()
+	return was
+}
+
+func (m *memStore) markDirty() {
+	m.mu.Lock()
+	m.dirty = true
 	m.mu.Unlock()
 }
 

@@ -53,6 +53,16 @@ const abuseIPDBBase = "https://api.abuseipdb.com"
 type abuseScore struct {
 	confidence int
 	fetched    time.Time
+	// failed marks a negative-cache entry: the lookup did not succeed, and the
+	// address is not asked about again until abuseFailureTTL has passed.
+	failed bool
+}
+
+// rememberFailure records that a lookup for ip did not produce a score.
+func (n *notifier) rememberFailure(ip string) {
+	n.mu.Lock()
+	n.scores[ip] = abuseScore{fetched: time.Now(), failed: true}
+	n.mu.Unlock()
 }
 
 func newNotifier(s *settings) *notifier {
@@ -147,7 +157,7 @@ func (n *notifier) sendWebhook(w WebhookConfig, e Event) {
 	}
 	req, err := http.NewRequest(method, w.URL, bytes.NewReader(payload))
 	if err != nil {
-		logWarn(n.instance, "webhook request could not be built", map[string]interface{}{"url": w.URL, "error": err.Error()})
+		logWarn(n.instance, "webhook request could not be built", map[string]interface{}{"url": redactURL(w.URL), "error": err.Error()})
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -158,14 +168,14 @@ func (n *notifier) sendWebhook(w WebhookConfig, e Event) {
 
 	resp, err := n.client.Do(req)
 	if err != nil {
-		logWarn(n.instance, "webhook delivery failed", map[string]interface{}{"url": w.URL, "error": err.Error()})
+		logWarn(n.instance, "webhook delivery failed", map[string]interface{}{"url": redactURL(w.URL), "error": err.Error()})
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		logWarn(n.instance, "webhook rejected the event", map[string]interface{}{
-			"url":    w.URL,
+			"url":    redactURL(w.URL),
 			"status": resp.StatusCode,
 		})
 	}
@@ -309,6 +319,29 @@ func (n *notifier) reportAbuse(e Event) {
 	}
 }
 
+// redactURL reduces a webhook URL to scheme and host for logging. Discord and
+// Slack webhook URLs carry their credential in the path, and a transient outage
+// used to write it to the Traefik log stream on every failed delivery.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "(unparseable url)"
+	}
+	return u.Scheme + "://" + u.Host + "/…"
+}
+
+// abuseInflightMax bounds concurrent reputation lookups, exactly as geoInflightMax
+// does for country lookups. Without it every unseen source spawned its own
+// outbound request: a distributed scan across ten thousand addresses meant ten
+// thousand concurrent HTTPS calls from inside the reverse proxy.
+const abuseInflightMax = 4
+
+// abuseFailureTTL is how long a failed lookup is remembered as "unknown". The free
+// tier allows a thousand checks a day, so once it starts answering 429 every later
+// request from that address would otherwise retry — a storm that never converges
+// because nothing was ever cached.
+const abuseFailureTTL = time.Hour
+
 // score returns a cached AbuseIPDB confidence for an address.
 //
 // It never blocks. On a cache miss it schedules a background fetch and reports
@@ -321,9 +354,13 @@ func (n *notifier) score(ip string) (int, bool) {
 
 	n.mu.Lock()
 	entry, ok := n.scores[ip]
-	fresh := ok && time.Since(entry.fetched) < n.cacheTTL
+	ttl := n.cacheTTL
+	if ok && entry.failed {
+		ttl = abuseFailureTTL
+	}
+	fresh := ok && time.Since(entry.fetched) < ttl
 	if !fresh {
-		if _, busy := n.inflight[ip]; !busy {
+		if _, busy := n.inflight[ip]; !busy && len(n.inflight) < abuseInflightMax {
 			n.inflight[ip] = struct{}{}
 			go func() {
 				defer recoverPanic(n.instance, "abuseipdb check")
@@ -333,7 +370,7 @@ func (n *notifier) score(ip string) (int, bool) {
 	}
 	n.mu.Unlock()
 
-	if fresh {
+	if fresh && !entry.failed {
 		return entry.confidence, true
 	}
 	return 0, false
@@ -356,10 +393,12 @@ func (n *notifier) fetchScore(ip string) {
 
 	resp, err := n.client.Do(req)
 	if err != nil {
+		n.rememberFailure(ip)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
+		n.rememberFailure(ip)
 		return
 	}
 

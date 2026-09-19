@@ -282,7 +282,7 @@ main { padding: 20px; display: grid; gap: 16px; max-width: 1400px; margin: 0 aut
   border: 1px solid var(--line); border-radius: 999px;
   background: transparent; color: var(--muted);
 }
-.chip:hover { color: var(--fg); }
+.chip:hover { color: var(--ink); }
 .chip.on { background: var(--accent); border-color: var(--accent); color: var(--bg); }
 .panel-head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -315,11 +315,14 @@ td.wrap { max-width: 420px; word-break: break-all; }
 .k-detect { color: var(--accent); }
 
 .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 16px; }
-.chip {
+/* Detector chips. A different class from the event-filter .chip above: sharing
+   the name let these rules win the cascade and repaint the SELECTED filter chip
+   green-on-blue. */
+.dchip {
   font-size: 12px; padding: 3px 9px; border-radius: 999px;
   border: 1px solid var(--line); color: var(--muted);
 }
-.chip.on { color: var(--ok); border-color: currentColor; }
+.dchip.on { color: var(--ok); border-color: currentColor; }
 .kv { padding: 4px 16px 14px; display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 12px; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; font-family: var(--mono); }
@@ -427,6 +430,12 @@ function lock(message) {
   openTile = null;
   lastState = null;
   sourcesData = { sources: [], total: 0, truncated: false };
+  // And the tables: #app is only hidden, so without this a second session
+  // unlocked with a different token saw the first one's events and bans.
+  $("events").tBodies[0].textContent = "";
+  $("bans").tBodies[0].textContent = "";
+  eventsPainted = false;
+  lastSeq = 0;
   $("tile-detail").hidden = true;
   $("app").hidden = true;
   $("gate").hidden = false;
@@ -498,7 +507,7 @@ function renderTiles(s) {
   tile(tiles, "requests seen", s.stats.requests, false, "requests");
   tile(tiles, "blocked", s.stats.rejected, s.stats.rejected > 0, "blocked");
   tile(tiles, "detections", s.stats.detections, false, "detections");
-  tile(tiles, "active bans", s.bans.length, false, "bans");
+  tile(tiles, "active bans", s.bansTotal || s.bans.length, false, "bans");
   tile(tiles, "tracked sources", s.trackedSources, false, "sources");
   tile(tiles, "exempt", s.stats.exempt, false, "exempt");
 }
@@ -661,7 +670,7 @@ function renderState(s) {
   renderTiles(s);
   if (openTile) { renderDetail(); }
 
-  renderBans(s.bans);
+  renderBans(s.bans, s.bansTotal);
   renderTop("top-rules", s.topRules);
   $("top-rules-empty").hidden = !!(s.topRules && s.topRules.length);
   renderTop("top-paths", s.topPaths);
@@ -682,10 +691,12 @@ function renderState(s) {
   $("events-empty").hidden = $("events").tBodies[0].rows.length > 0;
 }
 
-function renderBans(bans) {
+function renderBans(bans, total) {
   var body = $("bans").tBodies[0];
   body.textContent = "";
-  $("ban-count").textContent = bans.length ? "(" + bans.length + ")" : "";
+  total = total || bans.length;
+  $("ban-count").textContent = !bans.length ? "" :
+    total > bans.length ? "(newest " + bans.length + " of " + total + ")" : "(" + bans.length + ")";
   $("bans-empty").hidden = bans.length > 0;
 
   bans.forEach(function (b) {
@@ -729,7 +740,7 @@ function renderDetectors(detectors, top) {
   box.textContent = "";
   Object.keys(detectors || {}).sort().forEach(function (name) {
     var chip = document.createElement("span");
-    chip.className = detectors[name] ? "chip on" : "chip";
+    chip.className = detectors[name] ? "dchip on" : "dchip";
     chip.textContent = name + (counts[name] ? " · " + counts[name] : "");
     chip.title = detectors[name] ? "enabled" : "disabled";
     box.appendChild(chip);
@@ -748,6 +759,9 @@ function renderConfig(cfg) {
     ["escalation", (cfg.escalation || []).join(" → ")],
     ["decay", cfg.decay],
     ["tarpit", cfg.tarpit ? "on" : "off"],
+    // The instance-wide value. A router that states its own policy in its
+    // middleware definition overrides this for its requests only.
+    ["crawler policy", cfg.crawlers || "ignore"],
     // Read-only: admin.* is not console-editable, and this one decides where the
     // console is reachable from. Change it in the plugin configuration.
     ["console on detection routes",
@@ -772,11 +786,14 @@ function renderRules(rules) {
   box.textContent = "";
   var groups = [
     ["Signatures", rules.signatures],
+    ["Excluded from signatures", rules.exclude],
     ["Honeypots", rules.honeypots],
     ["User agents", rules.userAgents],
     ["SEO crawlers", rules.crawlers],
     ["Payload", rules.payload],
     ["Allowlisted CIDRs", rules.allowCIDRs],
+    ["Allowlisted user agents", rules.allowUA],
+    ["Allowlisted paths", rules.allowPaths],
     ["Trusted proxies", rules.trusted]
   ];
   groups.forEach(function (g) {
@@ -1200,8 +1217,18 @@ document.addEventListener("DOMContentLoaded", function () {
   $("gate-form").addEventListener("submit", function (ev) {
     ev.preventDefault();
     token = $("token").value.trim();
-    sessionStorage.setItem(TOKEN_KEY, token);
-    api("api/health").then(unlock).catch(function () { /* lock() already reported it */ });
+    // Stored only once it has been accepted. Storing first meant a token typed
+    // against a broken backend was persisted, and every reload replayed the
+    // failure.
+    api("api/health").then(function () {
+      sessionStorage.setItem(TOKEN_KEY, token);
+      unlock();
+    }).catch(function (err) {
+      // A 401 has already called lock() with its own message. Anything else — a
+      // 404 from a misrouted prefix, a 502, a network error — used to be
+      // swallowed here, leaving both the gate and the app hidden: a blank page.
+      if (err.message !== "unauthorized") { lock(err.message); }
+    });
   });
 
   $("lock").addEventListener("click", function () { lock(""); });
@@ -1246,7 +1273,9 @@ document.addEventListener("DOMContentLoaded", function () {
   });
 
   if (token) {
-    api("api/health").then(unlock).catch(function () { /* lock() already reported it */ });
+    api("api/health").then(unlock).catch(function (err) {
+      if (err.message !== "unauthorized") { lock(err.message); }
+    });
   } else {
     lock("");
   }

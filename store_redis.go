@@ -128,34 +128,35 @@ func (r *redisStore) refresh() error {
 	if err != nil {
 		return err
 	}
-	if len(keys) == 0 {
-		return nil
-	}
-
-	values, err := r.client.mget(keys)
-	if err != nil {
-		return err
-	}
 
 	now := time.Now()
-	bans := make([]Ban, 0, len(values))
-	for _, raw := range values {
-		if raw == "" {
-			continue
+	var bans []Ban
+	// An empty keyspace is an answer, not a condition to skip: the last ban was
+	// unbanned on another replica, or expired, and this replica must stop
+	// enforcing it. Returning early here kept the local cache as it was, so an
+	// unban never propagated once it emptied the keyspace.
+	if len(keys) > 0 {
+		values, err := r.client.mget(keys)
+		if err != nil {
+			return err
 		}
-		var b Ban
-		if err := json.Unmarshal([]byte(raw), &b); err != nil {
-			continue
-		}
-		if b.active(now) {
-			bans = append(bans, b)
+		bans = make([]Ban, 0, len(values))
+		for _, raw := range values {
+			if raw == "" {
+				continue
+			}
+			var b Ban
+			if err := json.Unmarshal([]byte(raw), &b); err != nil {
+				continue
+			}
+			if b.active(now) {
+				bans = append(bans, b)
+			}
 		}
 	}
 
-	r.mu.Lock()
-	r.bans = make(map[netip.Prefix]*Ban, len(bans))
-	r.mu.Unlock()
-	r.restore(bans, now)
+	// One atomic swap; see memStore.replaceAll for why not empty-then-restore.
+	r.replaceAll(bans, now)
 	return nil
 }
 

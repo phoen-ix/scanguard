@@ -36,21 +36,66 @@ type Event struct {
 	Country  string    `json:"country,omitempty"`
 }
 
-// eventLog is a fixed-size ring buffer of recent events. Fixed size is the point:
-// an event log that grows with attack volume is a memory leak with a friendly name.
+// eventLog holds the recent activity shown by the admin UI. Fixed size is the
+// point: an event log that grows with attack volume is a memory leak with a
+// friendly name.
+//
+// It is TWO rings, not one. Rejections of already-banned sources are recorded per
+// request, and a banned scanner keeps hammering: measured on a live deployment,
+// one source sent 433 requests a minute for days, and the single 500-entry ring
+// held ten seconds of history, all of it rejects. Every ban had been pushed out
+// within a minute of being issued, so the console's Bans filter was empty on open
+// and there was no way to review what had been banned, or why. The second ring
+// holds only bans and unbans — the events that carry a rule, a path and a
+// user-agent worth acting on — so they survive any volume of rejects. Both rings
+// share one sequence counter, so incremental polling works across them.
 type eventLog struct {
-	mu     sync.Mutex
+	mu   sync.Mutex
+	all  eventRing
+	bans eventRing
+	seq  uint64
+}
+
+// eventRing is one fixed-size buffer. The caller holds eventLog.mu.
+type eventRing struct {
 	buf    []Event
 	next   int
 	filled bool
-	seq    uint64
 }
 
 func newEventLog(size int) *eventLog {
 	if size <= 0 {
 		size = 500
 	}
-	return &eventLog{buf: make([]Event, size)}
+	return &eventLog{
+		all:  eventRing{buf: make([]Event, size)},
+		bans: eventRing{buf: make([]Event, size)},
+	}
+}
+
+func (r *eventRing) add(e Event) {
+	r.buf[r.next] = e
+	r.next = (r.next + 1) % len(r.buf)
+	if r.next == 0 {
+		r.filled = true
+	}
+}
+
+// count reports how many events the ring holds.
+func (r *eventRing) count() int {
+	if r.filled {
+		return len(r.buf)
+	}
+	return r.next
+}
+
+// at returns the i-th newest event, 0 being the newest. The caller bounds i by count.
+func (r *eventRing) at(i int) Event {
+	idx := r.next - 1 - i
+	for idx < 0 {
+		idx += len(r.buf)
+	}
+	return r.buf[idx]
 }
 
 // add stamps and stores an event, returning it with its sequence number set.
@@ -70,34 +115,25 @@ func (l *eventLog) add(e Event) Event {
 	e.Host = truncate(e.Host, 253)
 	e.Rule = truncate(e.Rule, 256)
 
-	l.buf[l.next] = e
-	l.next = (l.next + 1) % len(l.buf)
-	if l.next == 0 {
-		l.filled = true
+	l.all.add(e)
+	if e.Kind != eventReject {
+		l.bans.add(e)
 	}
 	return e
 }
 
-// recent returns up to n events, newest first.
+// recent returns up to n events of every kind, newest first.
 func (l *eventLog) recent(n int) []Event {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	total := l.next
-	if l.filled {
-		total = len(l.buf)
-	}
+	total := l.all.count()
 	if n <= 0 || n > total {
 		n = total
 	}
-
 	out := make([]Event, 0, n)
 	for i := 0; i < n; i++ {
-		idx := l.next - 1 - i
-		for idx < 0 {
-			idx += len(l.buf)
-		}
-		out = append(out, l.buf[idx])
+		out = append(out, l.all.at(i))
 	}
 	return out
 }
@@ -112,30 +148,27 @@ func (l *eventLog) since(seq uint64, limit int) []Event {
 // sinceKind is since restricted to one event kind, or every kind when kind is
 // empty.
 //
-// The filter belongs here rather than in the caller because the limit has to be
-// applied AFTER it. On a busy instance the ring is overwhelmingly "reject" —
-// measured at 92% on a live deployment — so filtering a limited page would
-// return a page of rejects with the handful of bans in it dropped, which is the
-// exact opposite of what somebody asking for kind=ban wants.
+// Bans and unbans are read from their own ring, which is what makes the filter
+// useful: on a busy instance the shared ring is overwhelmingly rejects — 92% when
+// this was first measured, 100% on a later reading — and a ban filter over it
+// returned whichever bans happened to fall inside the last few seconds. The limit
+// is applied AFTER the kind filter for the same reason: filtering a limited page
+// would return a page of rejects with the handful of bans in it dropped.
 func (l *eventLog) sinceKind(seq uint64, limit int, kind string) []Event {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	total := l.next
-	if l.filled {
-		total = len(l.buf)
+	ring := &l.all
+	if kind == eventBan || kind == eventUnban {
+		ring = &l.bans
 	}
 	if limit <= 0 {
-		limit = len(l.buf)
+		limit = len(ring.buf)
 	}
 
 	out := make([]Event, 0, 32)
-	for i := total - 1; i >= 0; i-- {
-		idx := l.next - 1 - i
-		for idx < 0 {
-			idx += len(l.buf)
-		}
-		e := l.buf[idx]
+	for i := ring.count() - 1; i >= 0; i-- {
+		e := ring.at(i)
 		if e.Seq > seq && (kind == "" || e.Kind == kind) {
 			out = append(out, e)
 		}

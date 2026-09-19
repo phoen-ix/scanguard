@@ -22,6 +22,9 @@ import (
 // a section, edits it, and writes the same shape back — a partial merge would
 // make "I unticked this box" indistinguishable from "I did not send that field".
 type Overrides struct {
+	// Version is the editable schema this set was written against; see
+	// overridesVersion.
+	Version int       `json:"version"`
 	Updated time.Time `json:"updated"`
 	Actor   string    `json:"actor,omitempty"`
 
@@ -29,6 +32,29 @@ type Overrides struct {
 	Detectors   *DetectorsConfig   `json:"detectors,omitempty"`
 	Allowlist   *AllowlistConfig   `json:"allowlist,omitempty"`
 	Enforcement *EnforcementConfig `json:"enforcement,omitempty"`
+}
+
+// overridesVersion is the schema version written into every saved override set.
+//
+// Sections are replaced wholesale, so a blob saved by an older build layers the
+// zero value of every field added since over the file configuration, silently.
+// That already happened once: userAgent.crawlers arrived inside the detectors
+// section, and any detectors edit saved before it turned a configured "block"
+// policy into "" — which reads as "ignore" — with no log line. Bump this whenever
+// a field is added to an editable section. A mismatch is refused loudly and the
+// file configuration runs; see runtime.loadStoredOverridesLocked.
+const overridesVersion = 1
+
+// compatible reports whether this override set was written against the editable
+// schema this build understands.
+func (o *Overrides) compatible() error {
+	if o == nil {
+		return nil
+	}
+	if o.Version != overridesVersion {
+		return fmt.Errorf("rule overrides carry schema version %d; this build writes version %d", o.Version, overridesVersion)
+	}
+	return nil
 }
 
 // What is deliberately NOT editable from the console, and why:
@@ -200,6 +226,7 @@ func (e *editableConfig) toOverrides() *Overrides {
 	allowlist := e.Allowlist
 	enforcement := e.Enforcement
 	return &Overrides{
+		Version:     overridesVersion,
 		DryRun:      &dryRun,
 		Detectors:   &detectors,
 		Allowlist:   &allowlist,

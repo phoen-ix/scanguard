@@ -127,7 +127,7 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	// Admin surface. In uiMode this instance serves only the console and never
 	// calls next, so it belongs on its own router.
 	if s.adminEnabled && (h.servePrefix || s.adminServeShared) {
-		if h.uiMode || strings.HasPrefix(req.URL.Path, s.adminPrefix) {
+		if h.uiMode || underPrefix(req.URL.Path, s.adminPrefix) {
 			h.rt.serveAdmin(s, h.uiMode, rw, req)
 			return
 		}
@@ -189,7 +189,12 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		}
 	}
 	if banned {
-		h.rt.stats.Rejected.Add(1)
+		// Counted only when a request is actually refused. A dry run passes it to
+		// the backend, and a "Rejected" tile that counts passes is the same lie
+		// the shadow list exists to prevent (see runtime.shadow).
+		if !s.dryRun {
+			h.rt.stats.Rejected.Add(1)
+		}
 		h.rt.events.add(Event{
 			Kind:     eventReject,
 			Key:      ban.Key,
@@ -237,7 +242,9 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			// the ban list is shared, so a crawler banned on a placeholder host
 			// would otherwise be refused on the content site too — and no policy
 			// set there could undo it, because the ban list is consulted first.
-			h.rt.stats.Rejected.Add(1)
+			if !s.dryRun {
+				h.rt.stats.Rejected.Add(1)
+			}
 			h.rt.events.add(Event{
 				Kind:     eventReject,
 				Key:      res.key.String(),

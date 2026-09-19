@@ -130,8 +130,16 @@ func (f *fileStore) load() (int, error) {
 
 // flush writes the snapshot if anything changed. Callers may invoke it on every
 // ban-list change and on a timer; an unchanged table costs one atomic bool read.
+//
+// The dirty flag is cleared BEFORE the table is copied, not after the file is
+// written. Clearing it afterwards lost updates: a ban recorded between the copy
+// and the clear was in memory, marked dirty, and then un-marked by a flush that
+// had never seen it — so it stayed off disk until something else changed the
+// table, and a restart in that window forgot it. Clearing first means such a ban
+// re-dirties the table and the next flush carries it. A failed write puts the
+// flag back so nothing is lost on the error path either.
 func (f *fileStore) flush() error {
-	if !f.writable || !f.isDirty() {
+	if !f.writable || !f.clearDirtyIfSet() {
 		return nil
 	}
 
@@ -146,18 +154,19 @@ func (f *fileStore) flush() error {
 	}
 	buf, err := json.Marshal(snap)
 	if err != nil {
+		f.markDirty()
 		return fmt.Errorf("could not encode snapshot: %w", err)
 	}
 
 	tmp := f.path + ".tmp"
 	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
+		f.markDirty()
 		return fmt.Errorf("could not write %s: %w", tmp, err)
 	}
 	if err := os.Rename(tmp, f.path); err != nil {
 		_ = os.Remove(tmp)
+		f.markDirty()
 		return fmt.Errorf("could not replace %s: %w", f.path, err)
 	}
-
-	f.clearDirty()
 	return nil
 }

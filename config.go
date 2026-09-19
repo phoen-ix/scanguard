@@ -906,7 +906,15 @@ func (c *Config) parseEnforcement(s *settings) error {
 	}
 	s.escalation = make([]time.Duration, 0, len(raw))
 	for i, entry := range raw {
-		d, err := parseDuration("enforcement.escalation["+strconv.Itoa(i)+"]", entry, 0)
+		field := "enforcement.escalation[" + strconv.Itoa(i) + "]"
+		if strings.TrimSpace(entry) == "" {
+			// parseDuration returns its default for an empty string, and the only
+			// sensible default here is "no such rung" — which does not exist as a
+			// duration. Passing 0 made an empty entry a PERMANENT ban, and Traefik's
+			// comma-split of "1h,,24h" produces exactly that from a typo.
+			return fmt.Errorf("%s: empty entry; every rung needs a duration, or \"0\" for permanent", field)
+		}
+		d, err := parseDuration(field, entry, 0)
 		if err != nil {
 			return err
 		}
@@ -1001,6 +1009,20 @@ func (c *Config) parseAdmin(s *settings) error {
 		s.eventLogSize = 500
 	}
 
+	if s.adminEnabled && s.adminSSO {
+		// The header is believed from whoever sends it: at this point in the chain
+		// the peer is the client, not an auth proxy, so there is nothing to check
+		// it against. Safe only when the auth middleware in front of this router
+		// overwrites the header on every request, and Traefik's forwardAuth does
+		// that only for names listed in authResponseHeaders. Said once per
+		// process rather than once per request, but said.
+		warnOnce(s.instanceName, "admin-trust-forwarded-user",
+			"admin.trustForwardedUser is on: any request carrying X-Forwarded-User is treated as "+
+				"an authenticated administrator and the token is not checked; make sure the auth "+
+				"middleware in front of the console overwrites that header (Traefik forwardAuth: "+
+				"list it in authResponseHeaders) and that no other route reaches this instance's console",
+			nil)
+	}
 	if s.adminEnabled && s.adminToken == "" && !s.adminSSO {
 		// This page can unban IPs and edit detection rules from inside the reverse
 		// proxy, and Traefik contributes no authentication to it whatsoever.

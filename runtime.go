@@ -102,6 +102,11 @@ type runtime struct {
 
 	stats stats
 
+	// authLogMu and authLogAt throttle the "admin authentication failed" log line
+	// to one a minute; the count itself is in stats.AuthFailures.
+	authLogMu sync.Mutex
+	authLogAt time.Time
+
 	// mu guards baseConfig and overrides. It is never taken on the request path:
 	// readers there go through cfg, which is atomic.
 	mu sync.Mutex
@@ -147,7 +152,11 @@ type stats struct {
 	Unbans     atomic.Int64
 	Expired    atomic.Int64
 	Skipped    atomic.Int64
-	StartedAt  time.Time
+	// AuthFailures counts rejected admin credentials. Every mutation the console
+	// performs is logged; the attempts to reach it were not, so token guessing
+	// against the gate was invisible.
+	AuthFailures atomic.Int64
+	StartedAt    time.Time
 }
 
 // acquireRuntime returns the shared runtime for this instance name, creating it
@@ -221,6 +230,10 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 		merged.adminSSO = s.adminSSO
 		merged.adminReadOnly = s.adminReadOnly
 		merged.eventLogSize = s.eventLogSize
+		// The console's block is where serveOnDetectionRoutes is documented to be
+		// declared. Not carrying it here meant the flag worked only when Traefik
+		// happened to build the console before the detector.
+		merged.adminServeShared = s.adminServeShared
 		rt.uiFP = fp
 		rt.applySettings(&merged)
 		logInfo(s.instanceName, "admin console configuration applied", nil)
@@ -251,6 +264,12 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 		})
 		rt.setDeps(store, rt.notifier(), rt.geo())
 		rt.storeFingerprint = newFP
+		// The new backend may have brought persisted bans with it — this is the
+		// ordinary startup path whenever Traefik builds the console (memory store,
+		// no store block of its own) before the detector (file or Redis). The
+		// ladder was seeded only on the creation path, from the console's empty
+		// store, so on those restarts every persisted offence count was lost.
+		rt.seedLadder(store, time.Now())
 	}
 
 	rt.detectFP = fp
@@ -398,6 +417,17 @@ func (rt *runtime) loadStoredOverridesLocked() *settings {
 
 	stored := rt.store().loadOverrides()
 	if stored.empty() {
+		return nil
+	}
+	if err := stored.compatible(); err != nil {
+		// Sections are replaced wholesale, so a blob from a build with a different
+		// editable schema would layer zero values over the file for every field
+		// added since. Refused rather than applied; the operator can replace it by
+		// saving from the console, or drop it with DELETE /api/rules.
+		logWarn(rt.name, "saved console rule changes were written by a different version of the rule "+
+			"schema and have been ignored; the file configuration is in force. Save the rules again "+
+			"from the console to replace them, or DELETE /api/rules to discard them",
+			map[string]interface{}{"error": err.Error(), "savedAt": stored.Updated, "sections": stored.sections()})
 		return nil
 	}
 
@@ -570,15 +600,15 @@ func (rt *runtime) tick() {
 	if idle < time.Hour {
 		idle = time.Hour
 	}
-	rt.counters.sweep(now, idle)
+	rt.counters.sweep(now, idle, s.decay)
 
 	if err := rt.store().flush(); err != nil {
 		logWarn(rt.name, "could not persist state", map[string]interface{}{"error": err.Error()})
 	}
-	if r, ok := rt.store().(interface{ refresh() error }); ok {
-		if err := r.refresh(); err != nil {
-			logWarn(rt.name, "could not refresh shared ban list", map[string]interface{}{"error": err.Error()})
-		}
+	if err := rt.store().refresh(); err != nil {
+		logWarn(rt.name, "could not refresh shared ban list", map[string]interface{}{"error": err.Error()})
+	}
+	if rt.store().backend() == "redis" {
 		// Only after a refresh can the store hold a rule set this replica has not
 		// seen, so this is where a rule change made on another replica lands.
 		rt.syncOverrides()
@@ -698,6 +728,16 @@ func (rt *runtime) syncOverrides() {
 	defer rt.mu.Unlock()
 
 	if sameOverrideStamp(rt.overrides, stored) {
+		return
+	}
+	if err := stored.compatible(); err != nil {
+		// Another replica runs a different build. Its rule set is neither applied
+		// nor touched — it is that replica's to own — and this is said once per
+		// saved version rather than once per janitor tick.
+		warnOnce(rt.name, "overrides-schema:"+stored.Updated.UTC().Format(time.RFC3339Nano),
+			"the shared rule set was written by a different version of the rule schema and is "+
+				"ignored on this replica; the file configuration is in force here",
+			map[string]interface{}{"error": err.Error(), "savedAt": stored.Updated})
 		return
 	}
 	s, err := rt.rebuildLocked(stored)

@@ -3,6 +3,7 @@ package scanguard
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/netip"
 	"sort"
@@ -41,6 +42,42 @@ const (
 	headerAction  = "X-Scanguard-Action"
 	headerSSOUser = "X-Forwarded-User"
 )
+
+// underPrefix reports whether path is prefix itself or something below it. A bare
+// HasPrefix let admin.pathPrefix "/admin" capture "/administrator" and
+// "/admin-api/..." on every route the detector protects.
+func underPrefix(path, prefix string) bool {
+	return path == prefix || strings.HasPrefix(path, prefix+"/")
+}
+
+// noteAuthFailure counts a rejected admin credential and logs it, throttled to one
+// line a minute per instance so a token-guessing loop cannot turn the log into its
+// own flood. The running count is stats.authFailures, so a rising number is
+// visible from the console between log lines.
+func (rt *runtime) noteAuthFailure(req *http.Request) {
+	total := rt.stats.AuthFailures.Add(1)
+
+	now := time.Now()
+	rt.authLogMu.Lock()
+	throttled := now.Sub(rt.authLogAt) < time.Minute
+	if !throttled {
+		rt.authLogAt = now
+	}
+	rt.authLogMu.Unlock()
+	if throttled {
+		return
+	}
+
+	peer := ""
+	if addr, ok := parsePeer(req.RemoteAddr); ok {
+		peer = addr.String()
+	}
+	logWarn(rt.name, "admin authentication failed", map[string]interface{}{
+		"peer":  peer,
+		"path":  req.URL.Path,
+		"total": total,
+	})
+}
 
 // serveAdmin routes an admin request. uiMode comes from the handler rather than
 // from settings, because the console and the detector share one settings value.
@@ -83,6 +120,7 @@ func (rt *runtime) serveAdmin(s *settings, uiMode bool, rw http.ResponseWriter, 
 
 	actor, ok := rt.authenticate(s, req)
 	if !ok {
+		rt.noteAuthFailure(req)
 		rw.Header().Set("WWW-Authenticate", `Bearer realm="scanguard"`)
 		writeJSON(rw, http.StatusUnauthorized, map[string]string{
 			"error": "authentication required: send the configured token in the " + headerToken + " header",
@@ -205,15 +243,17 @@ type EventsResponse struct {
 
 // StateResponse is the payload backing the dashboard's first paint.
 type StateResponse struct {
-	Instance   string                 `json:"instance"`
-	Backend    string                 `json:"backend"`
-	DryRun     bool                   `json:"dryRun"`
-	ReadOnly   bool                   `json:"readOnly"`
-	Uptime     string                 `json:"uptime"`
-	Stats      map[string]int64       `json:"stats"`
-	Tracked    int                    `json:"trackedSources"`
-	Evicted    int64                  `json:"evictedSources"`
+	Instance string           `json:"instance"`
+	Backend  string           `json:"backend"`
+	DryRun   bool             `json:"dryRun"`
+	ReadOnly bool             `json:"readOnly"`
+	Uptime   string           `json:"uptime"`
+	Stats    map[string]int64 `json:"stats"`
+	Tracked  int              `json:"trackedSources"`
+	Evicted  int64            `json:"evictedSources"`
+	// Bans is capped at maxStateBans; BansTotal is the real count.
 	Bans       []Ban                  `json:"bans"`
+	BansTotal  int                    `json:"bansTotal"`
 	Events     []Event                `json:"events"`
 	LastSeq    uint64                 `json:"lastSeq"`
 	TopPaths   []TopEntry             `json:"topPaths"`
@@ -225,12 +265,24 @@ type StateResponse struct {
 	Config     map[string]interface{} `json:"config"`
 }
 
+// maxStateBans caps the ban list carried by /api/state. The console polls that
+// endpoint every three seconds; the ban table is capped at 50000, and shipping,
+// sorting and re-rendering all of it on every poll is the cost apiSources was
+// split out to avoid.
+const maxStateBans = 500
+
 func (rt *runtime) apiState(s *settings, rw http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodGet {
 		writeJSON(rw, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
 		return
 	}
 	now := time.Now()
+
+	bans := rt.store().list(now)
+	bansTotal := len(bans)
+	if len(bans) > maxStateBans {
+		bans = bans[:maxStateBans]
+	}
 
 	writeJSON(rw, http.StatusOK, StateResponse{
 		Instance: rt.name,
@@ -239,18 +291,20 @@ func (rt *runtime) apiState(s *settings, rw http.ResponseWriter, req *http.Reque
 		ReadOnly: s.adminReadOnly,
 		Uptime:   now.Sub(rt.stats.StartedAt).Truncate(time.Second).String(),
 		Stats: map[string]int64{
-			"requests":   rt.stats.Requests.Load(),
-			"rejected":   rt.stats.Rejected.Load(),
-			"detections": rt.stats.Detections.Load(),
-			"bansIssued": rt.stats.BansIssued.Load(),
-			"bansManual": rt.stats.BansManual.Load(),
-			"unbans":     rt.stats.Unbans.Load(),
-			"expired":    rt.stats.Expired.Load(),
-			"exempt":     rt.stats.Skipped.Load(),
+			"requests":     rt.stats.Requests.Load(),
+			"rejected":     rt.stats.Rejected.Load(),
+			"detections":   rt.stats.Detections.Load(),
+			"bansIssued":   rt.stats.BansIssued.Load(),
+			"bansManual":   rt.stats.BansManual.Load(),
+			"unbans":       rt.stats.Unbans.Load(),
+			"expired":      rt.stats.Expired.Load(),
+			"exempt":       rt.stats.Skipped.Load(),
+			"authFailures": rt.stats.AuthFailures.Load(),
 		},
 		Tracked:    rt.counters.size(),
 		Evicted:    rt.counters.evicted(),
-		Bans:       rt.store().list(now),
+		Bans:       bans,
+		BansTotal:  bansTotal,
 		Events:     rt.events.recent(100),
 		LastSeq:    rt.events.lastSeq(),
 		TopPaths:   rt.topPaths.top(10),
@@ -330,7 +384,7 @@ func (rt *runtime) apiEvents(rw http.ResponseWriter, req *http.Request) {
 	case "", eventBan, eventUnban, eventReject:
 	default:
 		writeJSON(rw, http.StatusBadRequest, map[string]string{
-			"error": "kind must be one of detect, ban, unban, reject",
+			"error": "kind must be one of ban, unban, reject",
 		})
 		return
 	}
@@ -368,12 +422,11 @@ func (rt *runtime) apiBans(s *settings, rw http.ResponseWriter, req *http.Reques
 			return
 		}
 		// An operator can still hurt themselves, but not with a single click and
-		// not silently: banning something that is explicitly allowlisted, or the
-		// proxy in front of Traefik, is refused outright.
-		if containsAddr(s.trustedProxies, key.Addr()) || containsAddr(s.allowCIDRs, key.Addr()) {
-			writeJSON(rw, http.StatusConflict, map[string]string{
-				"error": "refusing to ban " + key.String() + ": it is in trustedProxies or the allowlist",
-			})
+		// not silently: a range that so much as overlaps the allowlist or the proxy
+		// in front of Traefik is refused outright, and so is one wide enough to be
+		// a typo for the whole internet.
+		if status, msg := refuseDangerousBan(s, key); status != 0 {
+			writeJSON(rw, status, map[string]string{"error": msg})
 			return
 		}
 		duration, err := parseDuration("duration", body.Duration, time.Hour)
@@ -548,6 +601,38 @@ func (rt *runtime) apiCompiledRules(s *settings, rw http.ResponseWriter, req *ht
 		"allowCIDRs": prefixStrings(s.allowCIDRs),
 		"trusted":    prefixStrings(s.trustedProxies),
 	})
+}
+
+// refuseDangerousBan returns a non-zero status and a reason when a manual ban
+// must not be recorded.
+//
+// The check used to test only the range's NETWORK address against the protected
+// lists, so 0.0.0.0/0 — whose network address is in nobody's allowlist — went
+// straight through, and a permanent one refused every IPv4 client on earth. The
+// same went for 10.0.0.0/8 with the proxy at 10.0.0.5. Now a range is refused if
+// it overlaps anything protected in either direction, and if it is wider than the
+// narrowest key width the configuration itself allows (/8 and /16, see
+// parseClientIP), because nobody bans a /6 on purpose.
+func refuseDangerousBan(s *settings, key netip.Prefix) (int, string) {
+	minBits := 8
+	if key.Addr().Is6() {
+		minBits = 16
+	}
+	if key.Bits() < minBits {
+		return http.StatusBadRequest, fmt.Sprintf(
+			"refusing to ban %s: wider than /%d, which is more of the internet than a ban is for", key, minBits)
+	}
+	for _, p := range s.trustedProxies {
+		if p.Overlaps(key) {
+			return http.StatusConflict, "refusing to ban " + key.String() + ": it overlaps trusted proxy " + p.String()
+		}
+	}
+	for _, p := range s.allowCIDRs {
+		if p.Overlaps(key) {
+			return http.StatusConflict, "refusing to ban " + key.String() + ": it overlaps allowlisted " + p.String()
+		}
+	}
+	return 0, ""
 }
 
 // parseBanKey accepts an address or a CIDR and normalises it to the configured

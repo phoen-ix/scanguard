@@ -367,7 +367,7 @@ func TestUnusableSavedRulesAreIgnoredNotFatal(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
 
-	broken := `{"version":1,"bans":[],"overrides":{"updated":"2026-01-01T00:00:00Z",` +
+	broken := `{"version":1,"bans":[],"overrides":{"version":1,"updated":"2026-01-01T00:00:00Z",` +
 		`"detectors":{"signatures":{"enabled":true,"patterns":["([unclosed"]}}}}`
 	if err := writeFile(path, broken); err != nil {
 		t.Fatal(err)

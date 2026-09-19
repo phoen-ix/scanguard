@@ -61,7 +61,13 @@ var defaultSignatures = []string{
 	`/\.ssh/(?:id_[a-z0-9_]+|authorized_keys)`,
 	`/\.npmrc$`,
 	`/\.htpasswd$`,
-	`/(?:credentials|secrets|id_rsa)(?:\.txt|\.json|\.yml|\.yaml)?$`,
+	// A bare "credentials" or "secrets" is only a probe at the webroot or inside a
+	// dot-directory; anywhere else it is an API route — /api/v1/credentials,
+	// /vault/secrets — and the unanchored form banned that application's own
+	// logged-in users on first visit. With an extension it is a file, and a file
+	// by that name is a probe wherever it sits.
+	`(?:^/|/\.[^/]+/)(?:credentials|secrets|id_rsa)(?:\.txt|\.json|\.yml|\.yaml)?$`,
+	`/(?:credentials|secrets|id_rsa)\.(?:txt|json|yml|yaml)$`,
 	// Cloud, container and mail credentials, all dotfiles a webroot never serves.
 	// Seen probed as one set by the same wordlists that ask for /.env: 1,616
 	// requests from 108 addresses in nine days at one small deployment.
@@ -85,7 +91,10 @@ var defaultSignatures = []string{
 	// Database and admin panels.
 	`/(?:phpmyadmin|phpmyadm1n|pma|myadmin|mysqladmin)(?:/|$)`,
 	`/adminer(?:\.php|/|$)`,
-	`/(?:db|database|backup|dump|www|site|web)\.(?:sql|zip|tar\.gz|tgz|rar|7z)$`,
+	// Webroot only. Every one of the 19 hits this produced on a live deployment
+	// was at the top level; unanchored it also matched /downloads/site.zip and
+	// /releases/web.zip, which are ordinary assets.
+	`^/(?:db|database|backup|dump|www|site|web)\.(?:sql|zip|tar\.gz|tgz|rar|7z)$`,
 
 	// PHP webshells and known RCE entrypoints.
 	`/(?:shell|c99|r57|wso|alfa|b374k|indoxploit|mini)\.php`,
@@ -161,7 +170,32 @@ var defaultSignatures = []string{
 	`/console/login/loginform\.jsp`,
 	`/telescope/requests`,
 	`/server-status$`,
-	`/\.well-known/traffic-advice`,
+	// NOT /.well-known/traffic-advice: Chrome's Private Prefetch Proxy fetches it
+	// from ordinary sites, and on a live deployment it matched six of Google's
+	// proxy addresses in two weeks and nothing else. .well-known paths are
+	// excluded on principle for exactly this reason.
+
+	// Configuration and credential files aimed at developer machines and AI
+	// tooling, measured over 14 days of live traffic: each was requested by
+	// sources that were caught later on a different path, so matching them cuts
+	// the time to ban, and none matched a real endpoint on any of nine real
+	// services in the same window. All are dotfiles or configuration files that
+	// no webroot serves.
+	`/\.aws/config$`,
+	`/\.(?:anthropic|claude)/`,
+	`/\.config/(?:gcloud|anthropic)/`,
+	`/(?:litellm_config|openai-proxy(?:/config)?|bedrock/config)\.(?:ya?ml|json|toml)$`,
+	`/\.git-credentials$`,
+	`/\.(?:bashrc|zshrc|bash_profile|bash_history|profile)$`,
+	`/\.(?:travis|gitlab-ci)\.ya?ml$`,
+	`/\.circleci/config\.ya?ml$`,
+	`/\.github/workflows/`,
+	`/secrets\.env$`,
+	`/serverless\.ya?ml$`,
+	// elFinder's PHP connector (CVE-2019-9194, CVE-2021-32682) and the Hikvision
+	// command-injection endpoint (CVE-2021-36260), both probed as single requests.
+	`/filemanager/php/connector(?:\.minimal)?\.php`,
+	`/SDK/webLanguage`,
 }
 
 // defaultUserAgents matches security tooling that identifies itself.
@@ -281,7 +315,6 @@ var defaultPayloadPatterns = []string{
 
 	// Path traversal and local file inclusion.
 	`(?:(?:\.\.|%2e%2e)(?:[\\/]|%2f|%5c)){2,}`,
-	`(?:%2e%2e(?:%2f|%5c)){2,}`,
 	`/etc/(?:passwd|shadow)\b`,
 	`/proc/self/environ`,
 	`\bphp://(?:input|filter)`,

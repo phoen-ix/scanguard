@@ -81,26 +81,41 @@ func (s *settings) resolve(req *http.Request) resolution {
 	// Note that at middleware time XFF does NOT yet contain Traefik's own hop —
 	// Traefik appends that during proxying — so depth-counting logic borrowed from
 	// backend-side reasoning counts a different chain than the backend sees.
+	//
+	// The header can arrive as several LINES as well as comma-separated values:
+	// HAProxy adds a line of its own rather than appending, and net/http keeps the
+	// lines in wire order, so a line the client sent sits before the one the proxy
+	// added. The chain is therefore flattened in order and walked once from the far
+	// end. Walking it line by line and returning on the first untrusted address
+	// picked the client's forgery over the proxy's truth.
 	sawHeader := false
+	var hops []string
 	for _, raw := range req.Header.Values(headerXFF) {
 		if raw != "" {
 			sawHeader = true
 		}
-		parts := strings.Split(raw, ",")
-		for i := len(parts) - 1; i >= 0; i-- {
-			addr, err := netip.ParseAddr(strings.TrimSpace(parts[i]))
-			if err != nil {
-				continue
-			}
-			addr = addr.Unmap().WithZone("")
-			if containsAddr(s.trustedProxies, addr) {
-				continue
-			}
-			res.client = addr
-			res.key = banKey(addr, s.ipv4Prefix, s.ipv6Prefix)
-			res.source = headerXFF
-			return res
+		hops = append(hops, strings.Split(raw, ",")...)
+	}
+	for i := len(hops) - 1; i >= 0; i-- {
+		hop := strings.TrimSpace(hops[i])
+		if hop == "" {
+			continue
 		}
+		addr, ok := parsePeer(hop)
+		if !ok {
+			// An entry that cannot be read is where the chain stops being
+			// trustworthy. Skipping it and reading on would move LEFT, toward the
+			// entries the client wrote — the one direction this walk must never
+			// take. The request falls through to "unattributable" below.
+			break
+		}
+		if containsAddr(s.trustedProxies, addr) {
+			continue
+		}
+		res.client = addr
+		res.key = banKey(addr, s.ipv4Prefix, s.ipv6Prefix)
+		res.source = headerXFF
+		return res
 	}
 
 	if !sawHeader && s.clientIPHeader == "" {
@@ -128,7 +143,9 @@ func (s *settings) resolve(req *http.Request) resolution {
 
 // parsePeer extracts the address from a net/http RemoteAddr. It accepts
 // "1.2.3.4:5678", "[::1]:5678" and a bare address, and drops any zone so that
-// two connections from the same host compare equal.
+// two connections from the same host compare equal. The forwarded-chain walk uses
+// it too, because proxies write the same shapes there: Azure Application Gateway
+// appends "ip:port" to X-Forwarded-For, and several proxies bracket IPv6.
 func parsePeer(remoteAddr string) (netip.Addr, bool) {
 	if remoteAddr == "" {
 		return netip.Addr{}, false

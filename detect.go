@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"time"
 )
 
@@ -143,7 +142,7 @@ func (rt *runtime) detectRequest(s *settings, crawlers string, req *http.Request
 				if s.payloadMatch.match(q) {
 					return &detection{detector: detectorPayload, rule: s.payloadMatch.which(q)}
 				}
-				if decoded, err := url.QueryUnescape(q); err == nil && decoded != q && s.payloadMatch.match(decoded) {
+				if decoded := unescapeLenient(q); decoded != q && s.payloadMatch.match(decoded) {
 					return &detection{detector: detectorPayload, rule: s.payloadMatch.which(decoded)}
 				}
 			}
@@ -204,6 +203,48 @@ func (rt *runtime) detectResponse(s *settings, req *http.Request, res resolution
 	}
 
 	return nil
+}
+
+// unescapeLenient percent-decodes a query string the way a permissive backend
+// would: every valid %XX escape and every '+' is decoded, and anything malformed
+// is left exactly as it was.
+//
+// url.QueryUnescape refuses the WHOLE string at the first malformed escape, and
+// net/url never validates RawQuery, so "?z=%zz&id=1%20UNION%20SELECT..." switched
+// the decoded check off with three characters: the raw form does not match because
+// %20 is not whitespace, and the decoded form was never looked at. The comment
+// above the call says checking only one form is trivially evaded; a strict decoder
+// collapsed both checks into one. Decoding leniently keeps both in force.
+func unescapeLenient(s string) string {
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '+':
+			out = append(out, ' ')
+		case c == '%' && i+2 < len(s) && isHex(s[i+1]) && isHex(s[i+2]):
+			out = append(out, unHex(s[i+1])<<4|unHex(s[i+2]))
+			i += 2
+		default:
+			out = append(out, c)
+		}
+	}
+	return string(out)
+}
+
+func isHex(c byte) bool {
+	return ('0' <= c && c <= '9') || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F')
+}
+
+func unHex(c byte) byte {
+	switch {
+	case '0' <= c && c <= '9':
+		return c - '0'
+	case 'a' <= c && c <= 'f':
+		return c - 'a' + 10
+	default:
+		return c - 'A' + 10
+	}
 }
 
 // peekBody reads up to max bytes of the request body for payload inspection and
