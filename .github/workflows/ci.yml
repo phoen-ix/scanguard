@@ -73,14 +73,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        traefik: ["v3.7.10", "v3.7", "v3.6"]
+        traefik: ["v3.7.13", "v3.7", "v3.6"]
     steps:
       - uses: actions/checkout@v4
 
       - name: start the harness
         working-directory: examples
         run: |
-          sed -i "s|image: traefik:v3.7.10|image: traefik:${{ matrix.traefik }}|" docker-compose.yml
+          sed -i "s|image: traefik:v3.7.13|image: traefik:${{ matrix.traefik }}|" docker-compose.yml
           docker compose up -d
           for i in $(seq 1 30); do
             curl -sf http://localhost:18081/api/overview >/dev/null && break

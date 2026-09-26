@@ -17,7 +17,7 @@ services:
   traefik:
     # Pinned deliberately. Yaegi plugins have broken on Traefik PATCH releases
     # before, silently — routes using the plugin simply start returning 404.
-    image: traefik:v3.7.10
+    image: traefik:v3.7.13
     command:
       - --configFile=/etc/traefik/traefik.yml
     ports:

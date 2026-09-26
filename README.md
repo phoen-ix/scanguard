@@ -292,7 +292,7 @@ it surfaces weeks later as "the chat stopped working", never as an error.
 scanguard forwards `Flush`, `Hijack`, `ReadFrom` and `Push`, skips wrapping
 protocol-upgrade requests entirely, and does not wrap at all when no
 response-status detector is enabled. `examples/streaming-check.sh` is the release
-gate, and it passes against Traefik v3.7.10. **Re-run it after every Traefik
+gate, and it passes against Traefik v3.7.13. **Re-run it after every Traefik
 upgrade** — and if you ever see a `flusher-unavailable` warning in the log, set
 `observeResponse: false` on that route.
 
