@@ -39,7 +39,7 @@ services:
   # every path — with no 404s anywhere, the distinct-bad-path detector has nothing
   # to observe and the harness silently proves nothing.
   site:
-    image: nginx:1.27-alpine
+    image: nginx:1.30-alpine
     expose: ["80"]
 
   # Kept for debugging: it echoes exactly which headers reached the backend, which
