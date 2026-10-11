@@ -17,7 +17,7 @@ services:
   traefik:
     # Pinned deliberately. Yaegi plugins have broken on Traefik PATCH releases
     # before, silently — routes using the plugin simply start returning 404.
-    image: traefik:v3.7.13
+    image: traefik:v3.7.14
     command:
       - --configFile=/etc/traefik/traefik.yml
     ports:
@@ -45,7 +45,7 @@ services:
   # Kept for debugging: it echoes exactly which headers reached the backend, which
   # is the fastest way to see what Traefik's forwardedHeaders did to a request.
   whoami:
-    image: traefik/whoami:v1.10
+    image: traefik/whoami:v1.12.0
     expose: ["80"]
 
   # WebSocket echo, for the upgrade half of the streaming gate.
@@ -56,7 +56,7 @@ services:
   # Webhook sink, so the notification path can be verified end to end: interpreted
   # plugin code spawning a goroutine and making an outbound call out of Traefik.
   hookrecv:
-    image: python:3.14.7-alpine3.24
+    image: python:3.14.8-alpine3.24
     expose: ["8080"]
     ports:
       - "${SG_HOOKS:-8899}:8080"
@@ -67,7 +67,7 @@ services:
   # Server-Sent Events, for the flush half. Ticks every 400ms; if the middleware
   # has swallowed http.Flusher they all arrive at once at the end instead.
   sse:
-    image: python:3.14.7-alpine3.24
+    image: python:3.14.8-alpine3.24
     expose: ["80"]
     working_dir: /srv
     command: ["python", "/srv/sse.py"]
