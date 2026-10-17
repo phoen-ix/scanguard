@@ -17,7 +17,7 @@ services:
   traefik:
     # Pinned deliberately. Yaegi plugins have broken on Traefik PATCH releases
     # before, silently — routes using the plugin simply start returning 404.
-    image: traefik:v3.7.14
+    image: traefik:v3.7.15
     command:
       - --configFile=/etc/traefik/traefik.yml
     ports:
@@ -39,7 +39,7 @@ services:
   # every path — with no 404s anywhere, the distinct-bad-path detector has nothing
   # to observe and the harness silently proves nothing.
   site:
-    image: nginx:1.31.6-alpine3.24
+    image: nginx:1.31.7-alpine3.24
     expose: ["80"]
 
   # Kept for debugging: it echoes exactly which headers reached the backend, which
