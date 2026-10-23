@@ -231,7 +231,7 @@ http:
       rule: PathPrefix(`/`)
       entryPoints: [admin]          # bind this entrypoint to 127.0.0.1 in production
       service: your-dummy-service   # never reached; the middleware terminates
-      middlewares: [scanguard-ui, your-basic-auth]
+      middlewares: [your-basic-auth, scanguard-ui]   # auth first: scanguard-ui never calls the next one
 
   middlewares:
     scanguard-ui:
@@ -334,6 +334,7 @@ enabled: true
 instanceName: default        # keys the shared state; instances sharing a name share bans
 dryRun: false                # detect and log, never block
 observeResponse: true        # wrap ResponseWriter; needed by badPaths and bruteForce
+uiMode: false                # serve only the console on this router (see "Turn on the console")
 
 store:
   backend: memory            # memory | file | redis
@@ -342,7 +343,7 @@ store:
   failOpen: true
   maxEntries: 50000          # hard cap on tracked sources (LRU) and on bans (soonest-expiring go first)
   redis:
-    address: redis:6379
+    address: ""              # required for the redis backend, e.g. redis:6379
     password: ""
     db: 0
     keyPrefix: "scanguard:"
@@ -391,6 +392,7 @@ admin:
   trustForwardedUser: false  # honour X-Forwarded-User from Authelia/Authentik/oauth2-proxy — see the note below
   readOnly: false
   eventLogSize: 500
+  serveOnDetectionRoutes: false   # also answer pathPrefix on every route the detector protects; leave it off
 ```
 
 Locked out of the console? `SCANGUARD_DISABLE=1` in Traefik's environment turns
@@ -426,10 +428,13 @@ detectors:
 ## Development
 
 ```bash
-go test ./...                                  # unit tests, ~0.5s
-(cd tools/yaegi-smoke && go run .)             # run the plugin under the real interpreter
+go test ./...                                  # unit tests
+# Run the plugin under the real interpreter. Yaegi loads it from a GOPATH tree
+# at its import path (default /go), so give it one:
+gp=$(mktemp -d); mkdir -p "$gp/src/github.com/phoen-ix"; ln -s "$PWD" "$gp/src/github.com/phoen-ix/scanguard"
+(cd tools/yaegi-smoke && SMOKE_GOPATH="$gp" go run .)
 cd examples && docker compose up -d
-./scanner-sim.sh                               # 20 end-to-end checks against live Traefik
+./scanner-sim.sh                               # end-to-end detection checks against live Traefik
 ./streaming-check.sh                           # the WebSocket + SSE release gate
 ./rules-check.sh                               # the rule editor, including restart survival
 ./notify-check.sh                              # webhooks and chat, delivered for real
@@ -441,8 +446,9 @@ does not compile plugins, it interprets them with
 only the **Go 1.22** standard library. Two whole classes of bug are invisible to
 `go build` and `go test`:
 
-- Using a newer stdlib API (`slices.Sort`, `sync.OnceFunc`, `atomic.Pointer`,
-  `min`/`max`, `os/exec`). Compiles locally, fails at plugin load.
+- Using a stdlib API the interpreter does not expose: generic ones such as
+  `slices.Sort` and `atomic.Pointer`, the `min`/`max` builtins, `os/exec`.
+  Compiles locally, fails at plugin load.
 - `//go:embed`, which does not work under Yaegi and **fails silently** — the
   variable is empty, the tests pass, and the page is blank only inside Traefik.
   That is why the console is a string constant, and why the smoke test asserts
@@ -462,9 +468,11 @@ now asserted by the smoke test:
   `defaultBadPathStatuses` and friends, applied after decoding, never in
   `CreateConfig`.
 
-`go.mod` declares `go 1.22` so your local toolchain refuses the newer APIs for
-you. Keep the module dependency-free: anything using cgo, assembly, `//go:embed`
-or heavy reflection fails at plugin import.
+`go.mod` declares `go 1.22`, Yaegi's stdlib level, so CI's Go 1.22 toolchain
+(and `go vet` locally) refuses anything newer. The generic APIs above are older
+than that; only the smoke test catches them. Keep the module dependency-free:
+anything using cgo, assembly, `//go:embed` or heavy reflection fails at plugin
+import.
 
 ## Performance
 
@@ -487,8 +495,8 @@ Where the time goes, from `go test -bench .`:
 |---|---|---|
 | Already-banned request | **881 ns**, 4 allocs | resolve, one map lookup, write a status |
 | Client-IP resolution | 208 ns, 0 allocs | with four trusted-proxy CIDRs |
-| Signature match (71 patterns) | 5.3 µs | short subject, so cheap |
-| User-agent match (30 patterns) | 26 µs | **the dominant cost** |
+| Signature match | 5.3 µs | short subject, so cheap |
+| User-agent match | 26 µs | **the dominant cost** |
 | Clean request, end to end | 52 µs, 3 allocs | almost entirely the two matches |
 
 An alternation with no literal prefix must attempt a match at every position, so
