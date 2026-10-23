@@ -357,6 +357,7 @@ td.wrap { max-width: 420px; word-break: break-all; }
 .rule-row.inline { grid-template-columns: auto 1fr; align-items: center; gap: 8px; }
 .rule-row label { font-size: 12.5px; }
 .rule-row .hint { font-size: 11px; color: var(--muted); line-height: 1.35; }
+.rule-row.inline .hint { grid-column: 1 / -1; }
 .panel-head .hint { font-size: 11px; color: var(--muted); }
 .rule-row input[type="text"], .rule-row input[type="number"], .rule-row textarea {
   width: 100%; font-family: var(--mono); font-size: 12px;
