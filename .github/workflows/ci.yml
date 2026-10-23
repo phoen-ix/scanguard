@@ -102,6 +102,27 @@ jobs:
         working-directory: examples
         run: ./scanner-sim.sh
 
+      # The docs tour (e2e/docs/) as a render check of the console, while
+      # scanner-sim.sh's bans are there to render. Once, on the pinned Traefik.
+      - uses: actions/setup-node@v7
+        if: matrix.traefik == 'v3.7.16'
+        with:
+          node-version: "26"
+      - name: console render check (docs tour)
+        if: matrix.traefik == 'v3.7.16'
+        working-directory: e2e
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          DOCS_SCREENSHOT_DIR="$RUNNER_TEMP/screenshots" \
+            npx playwright test -c playwright.docs.config.ts --output "$RUNNER_TEMP/docs-run"
+      - uses: actions/upload-artifact@v7
+        if: failure() && matrix.traefik == 'v3.7.16'
+        with:
+          name: docs-run
+          path: ${{ runner.temp }}/docs-run/
+          retention-days: 7
+
       - name: streaming gate (websocket + sse)
         working-directory: examples
         run: ./streaming-check.sh

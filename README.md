@@ -8,6 +8,8 @@
 
 One artifact. No sidecar, no database, no agent. MIT.
 
+<img src="docs/screenshots/console-overview.png" alt="The scanguard console: request and ban counters, then the active ban list with the detector and rule behind each ban" width="800">
+
 </div>
 
 ---
@@ -52,6 +54,14 @@ AbuseIPDB.
 Active bans with the rule that caught them, one-click unblock, manual ban by IP or
 CIDR, a live activity feed, most-probed paths, top sources, and a **full rule
 editor**. It is one self-contained page: no build step, no npm, no CDN.
+
+<img src="docs/screenshots/console-activity.png" alt="The live activity feed filtered to bans: time, source, detector, method, path and the rule that fired" width="800">
+
+<img src="docs/screenshots/console-tile-detail.png" alt="The detections tile opened: each ban with its time, source, detector and path" width="800">
+
+<img src="docs/screenshots/console-rule-editor.png" alt="The rule editor with an unsaved honeypot path: one form group per detector, the changed field marked" width="800">
+
+Every screen, with a sentence on each: [docs/screenshots](docs/screenshots/README.md).
 
 ### Editing rules from the browser
 
@@ -473,6 +483,22 @@ now asserted by the smoke test:
 than that; only the smoke test catches them. Keep the module dependency-free:
 anything using cgo, assembly, `//go:embed` or heavy reflection fails at plugin
 import.
+
+### Screenshots
+
+The images in this README and in [docs/screenshots](docs/screenshots/README.md)
+come from a Playwright tour of the console (`e2e/docs/tour.spec.ts`), which
+`scripts/docs-screenshots.sh` runs against the examples harness: once on the
+empty console, once after `scanner-sim.sh` has produced bans. It uses the
+harness's fixed ports, so stop any other harness first.
+
+```bash
+(cd e2e && npm ci && npx playwright install chromium)
+scripts/docs-screenshots.sh                    # rewrites docs/screenshots/*.png
+```
+
+CI runs the same tour as a render check after `scanner-sim.sh`; the manual
+"Docs screenshots" workflow returns the PNGs as an artifact.
 
 ## Performance
 
