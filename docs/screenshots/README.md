@@ -20,12 +20,13 @@ The form above the table bans an address or CIDR by hand.
 
 <img src="console-overview.png" alt="The console overview: six counter tiles and the active ban list with detector, rule and expiry" width="800">
 
-The same page in a dark colour scheme (it follows the browser's), and on a
-phone, where the tiles stack and the ban table scrolls sideways:
+The same page in a dark colour scheme (it follows the browser's), and the top
+of it on a phone, where the tiles and the ban form stack (the ban table scrolls
+sideways there and reads better on a wider screen):
 
 <img src="console-overview.dark.png" alt="The console overview in dark mode" width="800">
 
-<img src="console-overview.mobile.png" alt="The console overview at phone width" width="300">
+<img src="console-overview.mobile.png" alt="The console header, stacked counter tiles and the ban form at phone width" width="300">
 
 ## Empty console
 

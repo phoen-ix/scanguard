@@ -87,11 +87,11 @@ async function shoot(page: Page, name: string, els: Locator[] = []): Promise<voi
   if (els.length) {
     const boxes = await Promise.all(els.map((el) => el.boundingBox()))
     if (boxes.some((b) => !b)) throw new Error(`[docs] ${name}: an element is not on the page`)
-    const x = Math.min(...boxes.map((b) => b!.x)) - 12
-    const y = Math.min(...boxes.map((b) => b!.y)) - 12
+    const x = Math.max(0, Math.min(...boxes.map((b) => b!.x)) - 12)
+    const y = Math.max(0, Math.min(...boxes.map((b) => b!.y)) - 12)
     const bottom = Math.max(...boxes.map((b) => b!.y + b!.height)) + 12
     const right = Math.max(...boxes.map((b) => b!.x + b!.width)) + 12
-    clip = { x: Math.max(0, x), y: Math.max(0, y), width: right - Math.max(0, x), height: Math.min(2400, bottom - y) }
+    clip = { x, y, width: right - x, height: Math.min(2400, bottom - y) }
   }
   await page.screenshot({
     path: path.join(OUT, `${name}.png`),
@@ -108,7 +108,10 @@ test('empty console @empty', async ({ page }) => {
   await open(page)
   await expect(page.locator('#bans-empty')).toBeVisible()
   await expect(page.locator('#events-empty')).toBeVisible()
-  await shoot(page, 'console-empty')
+  await shoot(page, 'console-empty', [
+    page.locator('header.topbar'),
+    page.locator('section.panel', { has: page.locator('#events') }),
+  ])
 })
 
 test('access gate', async ({ page }) => {
@@ -145,7 +148,12 @@ test.describe('with bans', () => {
   test('overview, mobile', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
     await overview(page)
-    await shoot(page, 'console-overview.mobile')
+    // The header, the stacked tiles and the ban form; at this width the ban
+    // table squeezes its columns (it scrolls sideways), so it is left out.
+    await shoot(page, 'console-overview.mobile', [
+      page.locator('header.topbar'),
+      page.locator('#ban-form'),
+    ])
   })
 
   test('tile drill-down', async ({ page }) => {

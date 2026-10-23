@@ -16,6 +16,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="$(mkdir -p "${1:-$ROOT/docs/screenshots}" && cd "${1:-$ROOT/docs/screenshots}" && pwd)"
 ARTIFACTS="${ARTIFACTS:-$(mktemp -d)}"
+mkdir -p "$ARTIFACTS"
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-scanguard_docs}"
 
 case "$COMPOSE_PROJECT_NAME" in
