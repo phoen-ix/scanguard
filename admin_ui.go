@@ -307,6 +307,9 @@ tbody tr:last-child td { border-bottom: none; }
 td.mono, .mono { font-family: var(--mono); font-size: 12px; }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.wrap { max-width: 420px; word-break: break-all; }
+/* Wide tables scroll sideways in their .scroll box on a phone instead of
+   squeezing every column to a few characters. */
+#bans, #events { min-width: 720px; }
 .empty { padding: 16px; color: var(--muted); font-size: 13px; margin: 0; }
 
 .k-ban { color: var(--danger); font-weight: 650; }

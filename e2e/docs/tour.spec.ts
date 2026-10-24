@@ -148,8 +148,10 @@ test.describe('with bans', () => {
   test('overview, mobile', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
     await overview(page)
-    // The header, the stacked tiles and the ban form; at this width the ban
-    // table squeezes its columns (it scrolls sideways), so it is left out.
+    // The ban table keeps its width and scrolls sideways instead of squeezing
+    // its columns to a few characters each.
+    expect((await page.locator('#bans').boundingBox())!.width).toBeGreaterThanOrEqual(720)
+    // The header, the stacked tiles and the ban form; the table is left out.
     await shoot(page, 'console-overview.mobile', [
       page.locator('header.topbar'),
       page.locator('#ban-form'),
