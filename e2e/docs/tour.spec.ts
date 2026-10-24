@@ -154,6 +154,8 @@ test.describe('with bans', () => {
     // The ban table keeps its width and scrolls sideways instead of squeezing
     // its columns to a few characters each.
     expect((await page.locator('#bans').boundingBox())!.width).toBeGreaterThanOrEqual(720)
+    // ...inside its own box: the page itself does not scroll sideways.
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
     // The header, the stacked tiles and the ban form; the table is left out.
     await shoot(page, 'console-overview.mobile', [
       page.locator('header.topbar'),
@@ -163,6 +165,7 @@ test.describe('with bans', () => {
 
   test('tile drill-down', async ({ page }) => {
     const { stats } = await api<{ stats: { detections: number } }>('/api/state')
+    expect(stats.detections).toBeGreaterThan(0)
     await open(page)
     await page.click('.tile[data-kind=detections]')
     await expect(page.locator('#tile-detail-title')).toHaveText('Detections')
