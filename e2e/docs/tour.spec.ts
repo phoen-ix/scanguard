@@ -162,10 +162,13 @@ test.describe('with bans', () => {
   })
 
   test('tile drill-down', async ({ page }) => {
+    const { stats } = await api<{ stats: { detections: number } }>('/api/state')
     await open(page)
     await page.click('.tile[data-kind=detections]')
     await expect(page.locator('#tile-detail-title')).toHaveText('Detections')
-    await expect(page.locator('#tile-detail-body tbody tr').first()).toBeVisible()
+    // The list matches its counter: manual bans are not detections.
+    await expect(page.locator('#tile-detail-note')).toHaveText(`All ${stats.detections} so far.`)
+    await expect(page.locator('#tile-detail-body tbody tr')).toHaveCount(stats.detections)
     await shoot(page, 'console-tile-detail', [page.locator('#tiles'), page.locator('#tile-detail')])
   })
 

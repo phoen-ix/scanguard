@@ -57,7 +57,7 @@ editor**. It is one self-contained page: no build step, no npm, no CDN.
 
 <img src="docs/screenshots/console-activity.png" alt="The live activity feed filtered to bans: time, source, detector, method, path and the rule that fired" width="800">
 
-<img src="docs/screenshots/console-tile-detail.png" alt="The detections tile opened: each ban with its time, source, detector and path" width="800">
+<img src="docs/screenshots/console-tile-detail.png" alt="The detections tile opened: each detection with its time, source, detector and path" width="800">
 
 <img src="docs/screenshots/console-rule-editor.png" alt="The rule editor with an unsaved honeypot path: one form group per detector, the changed field marked" width="800">
 

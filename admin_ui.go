@@ -543,7 +543,9 @@ var TILE_DETAIL = {
     cols: ["time", "source", "detector", "path"],
     events: "ban",
     rows: function (s) {
-      return (s.events || []).filter(function (e) { return e.kind === "ban"; })
+      // Manual bans are ban events too, but not detections: the tile's counter
+      // leaves them out, so the list does as well.
+      return (s.events || []).filter(function (e) { return e.kind === "ban" && e.detector !== "manual"; })
         .slice().reverse().map(function (e) {
           return [fmtTime(e.time) + (e.dryRun ? " (dry)" : ""), e.client || e.key, e.detector, e.path];
         });

@@ -36,10 +36,10 @@ A fresh instance before anything has been probed.
 
 ## Counter drill-down
 
-Each counter opens the records behind it; here, every ban the event log holds,
-manual ones included.
+Each counter opens the records behind it; here, every detection the event log
+holds (manual bans are not detections, so they are not listed).
 
-<img src="console-tile-detail.png" alt="The detections tile opened: time, source, detector and path for each ban, manual bans last" width="800">
+<img src="console-tile-detail.png" alt="The detections tile opened: time, source, detector and path for each detection" width="800">
 
 ## Live activity
 
