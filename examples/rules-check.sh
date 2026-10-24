@@ -79,7 +79,11 @@ code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X PUT \
 expect "no anti-CSRF header is refused" 403 "$code"
 
 say "Edits survive a Traefik restart"
-if docker compose restart traefik >/dev/null 2>&1; then
+# Restart the Traefik that serves $CONSOLE, under whatever compose project
+# started it (CI's default, fleet's -p fleet-scanguard, scanguard_docs): a bare
+# `docker compose restart` only reaches the project named after this directory.
+project=$(docker ps --filter "publish=${CONSOLE##*:}" --format '{{.Label "com.docker.compose.project"}}' | head -n1)
+if [[ -n "$project" ]] && docker compose -p "$project" restart traefik >/dev/null 2>&1; then
   # Give the old container time to actually go away first. Polling immediately can
   # succeed against a Traefik that is still shutting down, which would make this
   # check pass while measuring nothing.
@@ -92,7 +96,7 @@ if docker compose restart traefik >/dev/null 2>&1; then
     "$(get_rules | jqp 'print(json.dumps(d["overridden"]))')"
   expect "the honeypot added from the console still blocks" 403 "$(hit 198.51.100.64 /rules-check-trap)"
 else
-  bad "could not restart traefik (run this from examples/)"
+  bad "could not restart the traefik behind $CONSOLE (run this from examples/)"
 fi
 
 say "Revert hands control back to the file"

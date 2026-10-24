@@ -14,7 +14,7 @@ gofmt -l .                                     # must print nothing
 gp=$(mktemp -d); mkdir -p "$gp/src/github.com/phoen-ix"; ln -s "$PWD" "$gp/src/github.com/phoen-ix/scanguard"
 (cd tools/yaegi-smoke && SMOKE_GOPATH="$gp" go run .)
 # e2e: the examples/ harness (Traefik + nginx + webhook sink), fixed ports
-# (exported: rules-check.sh runs `docker compose restart traefik` itself)
+# (rules-check.sh restarts Traefik itself, under the project that serves :9900)
 cd examples && export COMPOSE_PROJECT_NAME=scanguard_e2e && docker compose up -d
 ./scanner-sim.sh && ./streaming-check.sh && ./rules-check.sh && ./notify-check.sh
 docker compose down -v --remove-orphans
