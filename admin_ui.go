@@ -706,7 +706,7 @@ function renderBans(bans, total) {
   bans.forEach(function (b) {
     var row = document.createElement("tr");
     cell(row, b.key, "mono");
-    cell(row, b.detector + (b.manual ? " (manual)" : ""));
+    cell(row, b.detector);
     cell(row, b.rule || b.reason || "", "mono wrap");
     cell(row, b.country || "");
     cell(row, b.offences || "", "num");

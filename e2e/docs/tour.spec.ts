@@ -132,6 +132,9 @@ test.describe('with bans', () => {
     await open(page)
     await expect(page.locator('#bans tbody tr', { hasText: '203.0.113.0/24' })).toContainText('in 7d')
     await expect(page.locator('#bans tbody tr', { hasText: 'signature' }).first()).toBeVisible()
+    // A manual ban's detector is "manual", once (it used to read "manual
+    // (manual)"). Soft, so the phone test still reaches its own check.
+    await expect.soft(page.locator('#bans tbody tr', { hasText: '203.0.113.0/24' }).locator('td').nth(1)).toHaveText('manual')
   }
 
   test('overview', async ({ page }) => {
