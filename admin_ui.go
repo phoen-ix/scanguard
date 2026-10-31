@@ -290,6 +290,7 @@ main { padding: 20px; display: grid; gap: 16px; max-width: 1400px; margin: 0 aut
 }
 .two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
 .inline-form { display: flex; gap: 6px; flex-wrap: wrap; }
+button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: not-allowed; opacity: 0.55; }
 .count { color: var(--muted); font-weight: 500; }
 .toggle { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
 
@@ -671,12 +672,16 @@ function renderState(s) {
   $("footer-backend").textContent = s.backend;
   $("dryrun").hidden = !s.dryRun;
   $("readonly").hidden = !s.readOnly;
+  // Read-only refuses every change, so the ban form says so up front instead
+  // of failing on submit; renderBans does the same for unblock.
+  var form = $("ban-form").elements;
+  for (var i = 0; i < form.length; i++) { form[i].disabled = !!s.readOnly; }
 
   lastState = s;
   renderTiles(s);
   if (openTile) { renderDetail(); }
 
-  renderBans(s.bans, s.bansTotal);
+  renderBans(s.bans, s.bansTotal, !!s.readOnly);
   renderTop("top-rules", s.topRules);
   $("top-rules-empty").hidden = !!(s.topRules && s.topRules.length);
   renderTop("top-paths", s.topPaths);
@@ -697,7 +702,7 @@ function renderState(s) {
   $("events-empty").hidden = $("events").tBodies[0].rows.length > 0;
 }
 
-function renderBans(bans, total) {
+function renderBans(bans, total, readOnly) {
   var body = $("bans").tBodies[0];
   body.textContent = "";
   total = total || bans.length;
@@ -720,6 +725,7 @@ function renderBans(bans, total) {
     btn.className = "link";
     btn.type = "button";
     btn.textContent = "unblock";
+    btn.disabled = readOnly;
     btn.addEventListener("click", function () { unban(b.key); });
     td.appendChild(btn);
     row.appendChild(td);
