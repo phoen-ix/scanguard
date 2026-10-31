@@ -484,6 +484,22 @@ than that; only the smoke test catches them. Keep the module dependency-free:
 anything using cgo, assembly, `//go:embed` or heavy reflection fails at plugin
 import.
 
+### E2E
+
+`e2e/tests/` is a Playwright suite of the console: every panel, form, tile and
+rule-editor group, as a guest, an operator, a read-only operator and an SSO
+user, plus two Traefik replicas sharing the Redis backend.
+[e2e/COVERAGE.md](e2e/COVERAGE.md) maps each feature to its test.
+`scripts/e2e.sh` starts the examples harness with its e2e overlay
+(`examples/docker-compose.e2e.yml`) under its own compose project
+(`scanguard_e2e`, the same fixed ports plus 8801/9901 and 8802/9902), runs
+the suite, and removes the harness again; CI runs it as the `console e2e` job.
+
+```bash
+(cd e2e && npm ci && npx playwright install chromium)
+scripts/e2e.sh                                 # or e.g. scripts/e2e.sh tests/bans.spec.ts
+```
+
 ### Screenshots
 
 The images in this README and in [docs/screenshots](docs/screenshots/README.md)

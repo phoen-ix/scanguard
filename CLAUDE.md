@@ -18,13 +18,16 @@ gp=$(mktemp -d); mkdir -p "$gp/src/github.com/phoen-ix"; ln -s "$PWD" "$gp/src/g
 cd examples && export COMPOSE_PROJECT_NAME=scanguard_e2e && docker compose up -d
 ./scanner-sim.sh && ./streaming-check.sh && ./rules-check.sh && ./notify-check.sh
 docker compose down -v --remove-orphans
+# console e2e suite (starts and removes its own harness, project scanguard_e2e)
+scripts/e2e.sh [playwright args]               # e2e/COVERAGE.md maps features to tests
 # docs screenshots (starts and removes its own harness, project scanguard_docs)
 (cd e2e && npm ci && npx playwright install chromium)
 scripts/docs-screenshots.sh [outdir]           # default docs/screenshots
 ```
 
 In the fleet: `fleet check scanguard` (unit, vet, gofmt, no-deps, yaegi-smoke),
-`--with e2e` adds the harness (project `fleet-scanguard`), `--with docs` the tour.
+`--with e2e` adds the harness checks (project `fleet-scanguard`) and the console
+suite (`scanguard_e2e`), `--with docs` the tour.
 Anything that starts Docker goes through `~/repos/.fleet/scripts/slot heavy scanguard -- …`.
 
 ## Invariants
@@ -60,8 +63,16 @@ Anything that starts Docker goes through `~/repos/.fleet/scripts/slot heavy scan
 - The harness token `dev-token-change-me-0123456789` is public test data; the
   tour authenticates with it (`X-Scanguard-Token`).
 - Traefik is pinned to a patch version in `examples/docker-compose.yml` and in
-  `ci.yml` (matrix, the `sed`, and the render-check steps' `if:`). Bump them
-  together and re-run `streaming-check.sh`.
+  `ci.yml` (matrix, the `sed`, and the render-check steps' `if:`), and in the
+  e2e overlay `examples/docker-compose.e2e.yml`. Bump them together and re-run
+  `streaming-check.sh`.
+- Console e2e suite (`e2e/tests/`): one worker, because every test shares the
+  harness's runtime; tests own their data through `uniqueIp()` sources, and
+  rule-editor tests revert to the file config after each test. The read-only,
+  SSO and orphan consoles come from `e2e/fixtures/consoles.yml`, which
+  global-setup copies into `examples/dynamic/zz-e2e-consoles.yml` (gitignored)
+  for the run. `scripts/e2e.sh` adds the overlay `examples/docker-compose.e2e.yml`:
+  Redis plus two Traefik replicas on 8801/9901 and 8802/9902.
 - Docs tour (`e2e/docs/`): screenshot names are stable once committed;
   `tour.spec.ts` pins every server timestamp to 2026-06-15 10:00 Vienna so two
   runs give identical PNGs. Optimise with oxipng before committing.
