@@ -260,7 +260,7 @@ func abuseCategories(detector string) string {
 	switch detector {
 	case detectorBruteForce:
 		return "18"
-	case detectorUserAgent:
+	case detectorUserAgent, detectorUARotation:
 		return "19"
 	case detectorRateAbuse:
 		return "18,19"

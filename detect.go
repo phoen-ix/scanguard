@@ -19,6 +19,7 @@ const (
 	detectorBruteForce = "brute-force"
 	detectorRateAbuse  = "rate-abuse"
 	detectorPayload    = "payload"
+	detectorUARotation = "ua-rotation"
 	detectorReputation = "reputation"
 	detectorManual     = "manual"
 )
@@ -151,6 +152,17 @@ func (rt *runtime) detectRequest(s *settings, crawlers string, req *http.Request
 			if body, ok := peekBody(req, s.payload.MaxBodyBytes); ok && s.payloadMatch.match(body) {
 				return &detection{detector: detectorPayload, rule: s.payloadMatch.which(body)}
 			}
+		}
+	}
+
+	// After the single-request detectors, so a scanner's own user-agent is still
+	// reported as "user-agent". The header is reduced to a digest first: the set
+	// holds up to maxDistinctPaths entries per source, and a raw header can be
+	// kilobytes long.
+	if s.uaRot.Enabled && rt.counters.noteUserAgent(res.key, hashOf([]byte(req.UserAgent())), now, s.uaRot.Capacity, s.uaRotLeak) {
+		return &detection{
+			detector: detectorUARotation,
+			rule:     fmt.Sprintf("%d distinct user-agents (leak %s)", s.uaRot.Capacity, formatDuration(s.uaRotLeak)),
 		}
 	}
 

@@ -217,3 +217,47 @@ func TestForgetClearsLadder(t *testing.T) {
 			"re-banned at the next rung on its very next request", got)
 	}
 }
+
+// The user-agent bucket counts DISTINCT user-agents: one repeated never trips,
+// N distinct ones arriving faster than the leak trip on the Nth, slower ones
+// never do, and the remembered set stays bounded.
+func TestUserAgentBucket(t *testing.T) {
+	cases := []struct {
+		name     string
+		distinct bool
+		gap      time.Duration
+		sends    int
+		tripAt   int // 1-based send that must trip; 0 means never
+	}{
+		{"one user-agent repeated", false, time.Millisecond, 20, 0},
+		{"distinct, faster than the leak", true, time.Millisecond, 5, 5},
+		{"distinct, slower than the leak", true, 2 * time.Minute, 20, 0},
+	}
+	for _, tc := range cases {
+		c := newCounters(1000)
+		k := key("203.0.113.20/32")
+		now := time.Now()
+		for i := 1; i <= tc.sends; i++ {
+			ua := "same"
+			if tc.distinct {
+				ua = fmt.Sprintf("ua-%d", i)
+			}
+			tripped := c.noteUserAgent(k, ua, now, 5, time.Minute)
+			if tripped != (i == tc.tripAt) {
+				t.Errorf("%s: send %d tripped=%v, want trip at %d", tc.name, i, tripped, tc.tripAt)
+			}
+			now = now.Add(tc.gap)
+		}
+	}
+
+	// A capacity the set can never reach still leaves it bounded.
+	c := newCounters(1000)
+	k := key("203.0.113.21/32")
+	now := time.Now()
+	for i := 0; i < 1000; i++ {
+		c.noteUserAgent(k, fmt.Sprintf("ua-%d", i), now, 100000, time.Hour)
+	}
+	if n := len(c.tbl[k].ua.seen); n > maxDistinctPaths {
+		t.Errorf("the remembered set grew to %d, want at most %d", n, maxDistinctPaths)
+	}
+}

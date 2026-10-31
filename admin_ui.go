@@ -938,6 +938,13 @@ var RULE_SCHEMA = [
     { p: "detectors.rateAbuse.rps", t: "int", l: "Requests per second" },
     { p: "detectors.rateAbuse.burst", t: "int", l: "Burst allowance" }
   ]},
+  { title: "User-agent rotation", fields: [
+    { p: "detectors.uaRotation.enabled", t: "bool", l: "Enabled",
+      h: "Bans a source that cycles through many User-Agent strings. Many real clients behind one address are the false-positive risk: CGNAT, a corporate NAT, a shared IPv6 /64." },
+    { p: "detectors.uaRotation.capacity", t: "int", l: "Distinct user-agents to trip" },
+    { p: "detectors.uaRotation.leak", t: "text", l: "Leak interval",
+      h: "One remembered user-agent drains per interval, e.g. 60s. A drain rate, not a window: a source sending a new one slower than this never trips." }
+  ]},
   { title: "Payload probes", fields: [
     { p: "detectors.payload.enabled", t: "bool", l: "Enabled",
       h: "Highest false-positive risk of any detector. Inspects attacker-controlled text." },

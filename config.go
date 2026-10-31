@@ -109,6 +109,7 @@ type DetectorsConfig struct {
 	BruteForce BruteForceConfig `json:"bruteForce,omitempty"`
 	RateAbuse  RateAbuseConfig  `json:"rateAbuse,omitempty"`
 	Payload    PayloadConfig    `json:"payload,omitempty"`
+	UARotation UARotationConfig `json:"uaRotation,omitempty"`
 }
 
 // SignatureConfig matches known-bad request paths before the backend is touched.
@@ -236,6 +237,28 @@ type PayloadConfig struct {
 	ScanQuery    bool     `json:"scanQuery,omitempty"`
 	ScanBody     bool     `json:"scanBody,omitempty"`
 	MaxBodyBytes int      `json:"maxBodyBytes,omitempty"`
+}
+
+// UARotationConfig is a leaky bucket over DISTINCT user-agents per source, the
+// badPaths bucket applied to the User-Agent header. Off by default.
+//
+// A browser sends one user-agent; a scanner that rotates them to look like many
+// clients sends a different one per request. Over 15 days at one deployment, 133
+// banned scanners used 6 or more distinct user-agents within 60s, while among
+// sources with real traffic only 6 did, all cloud-hosted bots; real Googlebot
+// peaked at 5. One source sent ClaudeBot, CCBot, cohere-ai, Meta-WebIndexer,
+// Qwenbot, KimiBot and Bytespider within one second while probing for secrets,
+// and a campaign of 30 addresses that no other detector caught rotated 9-10
+// user-agents over 10 requests each.
+//
+// The false-positive risk is many real clients behind one key: CGNAT, a
+// corporate NAT, or a shared IPv6 /64. Leak is a drain rate, not a window: one
+// remembered user-agent drains per interval, so capacity 8 at 60s trips on 8
+// distinct user-agents arriving faster than one a minute.
+type UARotationConfig struct {
+	Enabled  bool   `json:"enabled,omitempty"`
+	Capacity int    `json:"capacity,omitempty"`
+	Leak     string `json:"leak,omitempty"`
 }
 
 // EnforcementConfig decides what happens to a source once it is flagged.
@@ -405,6 +428,7 @@ func CreateConfig() *Config {
 				ScanBody:     false,
 				MaxBodyBytes: 8192,
 			},
+			UARotation: UARotationConfig{Enabled: false, Capacity: 8, Leak: "60s"},
 		},
 		Enforcement: EnforcementConfig{
 			RejectStatus: 403,
@@ -585,6 +609,8 @@ type settings struct {
 	rate          RateAbuseConfig
 	payload       PayloadConfig
 	payloadMatch  *matcher
+	uaRot         UARotationConfig
+	uaRotLeak     time.Duration
 
 	rejectStatus  int
 	rejectBody    string
@@ -892,6 +918,22 @@ func (c *Config) parseDetectors(s *settings) error {
 	}
 	if s.payload.MaxBodyBytes <= 0 {
 		s.payload.MaxBodyBytes = 8192
+	}
+
+	s.uaRot = d.UARotation
+	if s.uaRot.Capacity == 0 {
+		s.uaRot.Capacity = 8
+	}
+	if s.uaRotLeak, err = parseDuration("detectors.uaRotation.leak", d.UARotation.Leak, time.Minute); err != nil {
+		return err
+	}
+	if s.uaRotLeak == permanent {
+		return errors.New("detectors.uaRotation.leak must be a positive duration")
+	}
+	// The remembered set is capped at maxDistinctPaths and starts over when full,
+	// so above that a user-agent seen before counts as new again.
+	if s.uaRot.Enabled && (s.uaRot.Capacity < 2 || s.uaRot.Capacity > maxDistinctPaths) {
+		return fmt.Errorf("detectors.uaRotation.capacity: %d is outside 2-%d", s.uaRot.Capacity, maxDistinctPaths)
 	}
 	return nil
 }

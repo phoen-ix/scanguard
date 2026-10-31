@@ -1671,3 +1671,38 @@ func TestBanLogLineNamesHostMethodAndUA(t *testing.T) {
 		t.Errorf("ua = %q, want the user-agent truncated to 256 bytes", ua)
 	}
 }
+
+// A source cycling through user-agents is banned on the capacity-th distinct
+// one; a source that keeps one is not; and a scanner naming itself is still
+// reported by the user-agent detector, which runs first.
+func TestUARotationBansACyclingSource(t *testing.T) {
+	h := build(t, func(c *Config) {
+		c.Detectors.UARotation = UARotationConfig{Enabled: true, Capacity: 3, Leak: "60s"}
+	})
+	rt := registry[t.Name()]
+	ua := func(s string) map[string]string { return map[string]string{"User-Agent": s} }
+
+	for i, name := range []string{"agent-a/1", "agent-b/1"} {
+		if got := send(h, "GET", "/", "203.0.113.70:1", ua(name)).Code; got != 200 {
+			t.Fatalf("distinct user-agent %d got %d, want 200", i+1, got)
+		}
+	}
+	if got := send(h, "GET", "/", "203.0.113.70:1", ua("agent-c/1")).Code; got != 403 {
+		t.Fatalf("the 3rd distinct user-agent got %d, want 403", got)
+	}
+	b, ok := rt.store().get(key("203.0.113.70/32"), time.Now())
+	if !ok || b.Detector != detectorUARotation || b.Rule != "3 distinct user-agents (leak 1m)" {
+		t.Errorf("ban = %+v (found %v), want detector %q", b, ok, detectorUARotation)
+	}
+
+	for i := 0; i < 20; i++ {
+		if got := send(h, "GET", "/", "203.0.113.71:1", ua("Mozilla/5.0 same")).Code; got != 200 {
+			t.Fatalf("one user-agent, request %d got %d, want 200", i+1, got)
+		}
+	}
+
+	send(h, "GET", "/", "203.0.113.72:1", ua("sqlmap/1.7"))
+	if b, _ := rt.store().get(key("203.0.113.72/32"), time.Now()); b.Detector != detectorUserAgent {
+		t.Errorf("sqlmap was banned by %q, want %q", b.Detector, detectorUserAgent)
+	}
+}

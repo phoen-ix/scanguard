@@ -27,10 +27,8 @@ const permanentBanHorizon = 100 * 365 * 24 * time.Hour
 type sourceState struct {
 	lastSeen time.Time
 
-	// Leaky bucket over DISTINCT error paths.
-	badSeen  map[string]struct{}
-	badLevel float64
-	badAt    time.Time
+	// Leaky buckets over DISTINCT error paths and DISTINCT user-agents.
+	bad, ua distinctBucket
 
 	// Sliding window of authentication failures.
 	bruteHits []time.Time
@@ -120,35 +118,59 @@ func (c *counters) noteBadPath(key netip.Prefix, path string, now time.Time, cap
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.getLocked(key, now).bad.note(path, now, capacity, leak)
+}
 
-	st := c.getLocked(key, now)
-	if !st.badAt.IsZero() {
-		st.badLevel -= float64(now.Sub(st.badAt)) / float64(leak)
-		if st.badLevel <= 0 {
-			// The bucket drained: forget the path history too, so a source that
-			// returns much later starts from a clean slate rather than being unable
-			// to ever trip the detector again.
-			st.badLevel = 0
-			st.badSeen = nil
-		}
-	}
-	st.badAt = now
-
-	if st.badSeen == nil {
-		st.badSeen = make(map[string]struct{}, 8)
-	}
-	if _, seen := st.badSeen[path]; seen {
+// noteUserAgent feeds the distinct-user-agent leaky bucket and reports whether it
+// overflowed. ua is a digest of the header rather than the header itself, so the
+// remembered set costs the same whatever length a scanner sends.
+func (c *counters) noteUserAgent(key netip.Prefix, ua string, now time.Time, capacity int, leak time.Duration) bool {
+	if capacity <= 0 || leak <= 0 {
 		return false
 	}
-	if len(st.badSeen) >= maxDistinctPaths {
-		st.badSeen = make(map[string]struct{}, 8)
-	}
-	st.badSeen[path] = struct{}{}
 
-	st.badLevel++
-	if st.badLevel >= float64(capacity)-halfEvent {
-		st.badLevel = 0
-		st.badSeen = nil
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.getLocked(key, now).ua.note(ua, now, capacity, leak)
+}
+
+// distinctBucket is a leaky bucket over DISTINCT items: a repeat of an item
+// already remembered adds nothing, each new one adds one, and one drains per
+// leak interval. The caller holds counters.mu.
+type distinctBucket struct {
+	seen  map[string]struct{}
+	level float64
+	at    time.Time
+}
+
+func (b *distinctBucket) note(item string, now time.Time, capacity int, leak time.Duration) bool {
+	if !b.at.IsZero() {
+		b.level -= float64(now.Sub(b.at)) / float64(leak)
+		if b.level <= 0 {
+			// The bucket drained: forget the history too, so a source that returns
+			// much later starts from a clean slate rather than being unable to ever
+			// trip the detector again.
+			b.level = 0
+			b.seen = nil
+		}
+	}
+	b.at = now
+
+	if b.seen == nil {
+		b.seen = make(map[string]struct{}, 8)
+	}
+	if _, seen := b.seen[item]; seen {
+		return false
+	}
+	if len(b.seen) >= maxDistinctPaths {
+		b.seen = make(map[string]struct{}, 8)
+	}
+	b.seen[item] = struct{}{}
+
+	b.level++
+	if b.level >= float64(capacity)-halfEvent {
+		b.level = 0
+		b.seen = nil
 		return true
 	}
 	return false
@@ -456,7 +478,7 @@ func (c *counters) recent(n int) ([]SourceEntry, int) {
 			Key:      k.String(),
 			LastSeen: st.lastSeen.UTC(),
 			Offences: st.offences,
-			BadPaths: len(st.badSeen),
+			BadPaths: len(st.bad.seen),
 		})
 	}
 	c.mu.Unlock()

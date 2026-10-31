@@ -130,6 +130,15 @@ func TestInvalidValuesAreRejected(t *testing.T) {
 		"abuseipdb without a key": func(c *Config) {
 			c.Notify.AbuseIPDB.Enabled = true
 		},
+		"uaRotation capacity 1": func(c *Config) {
+			c.Detectors.UARotation = UARotationConfig{Enabled: true, Capacity: 1}
+		},
+		"uaRotation capacity above the remembered set": func(c *Config) {
+			c.Detectors.UARotation = UARotationConfig{Enabled: true, Capacity: maxDistinctPaths + 1}
+		},
+		"uaRotation leak 0": func(c *Config) {
+			c.Detectors.UARotation.Leak = "0"
+		},
 	}
 
 	for name, mutate := range cases {
