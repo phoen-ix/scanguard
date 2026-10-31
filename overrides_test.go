@@ -361,6 +361,21 @@ func TestTarpitCapacityFollowsRuleEdits(t *testing.T) {
 	}
 }
 
+// The cap sizes an allocation, so a console edit beyond the ceiling is refused
+// and the running semaphore is left alone.
+func TestTarpitCapacityAboveCeilingIsRefused(t *testing.T) {
+	h, rt := consoleHandler(t, nil)
+
+	edit := editableOf(t, fetchRules(t, h), "effective")
+	edit.Enforcement.Tarpit.MaxConcurrent = maxTarpitConcurrent + 1
+	if rec := ruleRequest(t, h, http.MethodPut, edit); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("PUT returned %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+	if sem, _ := rt.tarpitSem.Load().(chan struct{}); sem == nil || cap(sem) != 50 {
+		t.Fatalf("tarpit capacity changed: %v", sem)
+	}
+}
+
 // Persisted state that a newer build rejects must never stop Traefik starting.
 // The operator would have no console left to fix it from.
 func TestUnusableSavedRulesAreIgnoredNotFatal(t *testing.T) {

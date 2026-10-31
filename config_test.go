@@ -98,6 +98,9 @@ func TestInvalidValuesAreRejected(t *testing.T) {
 		"bad status code": func(c *Config) {
 			c.Enforcement.RejectStatus = 9000
 		},
+		"tarpit cap above the ceiling": func(c *Config) {
+			c.Enforcement.Tarpit.MaxConcurrent = maxTarpitConcurrent + 1
+		},
 		"unknown store backend": func(c *Config) {
 			c.Store.Backend = "postgres"
 		},

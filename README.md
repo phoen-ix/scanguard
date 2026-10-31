@@ -385,7 +385,7 @@ enforcement:
   rejectBody: ""
   escalation: ["1h", "24h", "168h", "0"]   # "0" means permanent
   decay: 24h                 # behave this long and drop a rung
-  tarpit: { enabled: false, delay: 3s, maxConcurrent: 50 }
+  tarpit: { enabled: false, delay: 3s, maxConcurrent: 50 }   # maxConcurrent: at most 10000
 
 notify:
   timeout: 5s

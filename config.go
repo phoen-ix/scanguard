@@ -469,6 +469,12 @@ func (c *Config) normalizeDefaults() {
 // permanent is the ban duration meaning "never expires".
 const permanent time.Duration = 0
 
+// maxTarpitConcurrent caps enforcement.tarpit.maxConcurrent, which sizes the
+// tarpit semaphore and can be set from the console. Every slot is a request
+// held open for the whole delay; tens of thousands of them is the self-inflicted
+// denial of service the cap exists to prevent, not a setting anyone needs.
+const maxTarpitConcurrent = 10000
+
 // parseDuration accepts Go duration syntax plus "0", "never" and "permanent",
 // all of which mean "does not expire".
 func parseDuration(field, raw string, def time.Duration) (time.Duration, error) {
@@ -930,10 +936,14 @@ func (c *Config) parseEnforcement(s *settings) error {
 	if s.tarpitDelay, err = parseDuration("enforcement.tarpit.delay", c.Enforcement.Tarpit.Delay, 3*time.Second); err != nil {
 		return err
 	}
-	s.tarpitMax = c.Enforcement.Tarpit.MaxConcurrent
-	if s.tarpitMax <= 0 {
-		s.tarpitMax = 50
+	n := c.Enforcement.Tarpit.MaxConcurrent
+	if n <= 0 {
+		n = 50
 	}
+	if n > maxTarpitConcurrent {
+		return fmt.Errorf("enforcement.tarpit.maxConcurrent: %d is above the ceiling of %d", n, maxTarpitConcurrent)
+	}
+	s.tarpitMax = n
 	return nil
 }
 
