@@ -12,3 +12,6 @@ coverage.*
 tools/yaegi-smoke/vendor/
 
 .DS_Store
+
+# The e2e suite's extra consoles and notify-check.sh's dead webhook, while they run.
+examples/dynamic/zz-*.yml

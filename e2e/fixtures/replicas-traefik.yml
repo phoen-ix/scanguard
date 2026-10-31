@@ -1,0 +1,18 @@
+# Static configuration of the two e2e replicas (examples/docker-compose.e2e.yml):
+# examples/traefik.yml without the dashboard and the Docker provider.
+log:
+  level: INFO
+entryPoints:
+  web:
+    address: ":80"
+    forwardedHeaders:
+      trustedIPs: [127.0.0.1/32, 172.16.0.0/12]
+  admin:
+    address: ":9900"
+providers:
+  file:
+    directory: /etc/traefik/dynamic
+experimental:
+  localPlugins:
+    scanguard:
+      moduleName: github.com/phoen-ix/scanguard

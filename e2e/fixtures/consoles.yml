@@ -1,0 +1,88 @@
+# Three more consoles for the e2e suite. tests/global-setup.ts copies this file
+# into examples/dynamic/ (Traefik's file provider watches it) for the length of
+# the run and removes it afterwards. Each console has its own instanceName and
+# so its own runtime: nothing here touches the harness's "default" instance.
+#
+#   /ro/      read-only console (instance e2e-ro); its detector guards /e2e-ro/
+#   /sso/     console behind a stand-in auth proxy that sets X-Forwarded-User
+#             (instance e2e-sso, no token); its detector guards /e2e-sso/
+#   /orphan/  console whose instanceName no detector shares (e2e-orphan): every
+#             list stays empty and the rule editor has nothing to edit
+http:
+  middlewares:
+    e2e-strip:
+      stripPrefix:
+        prefixes: [/ro, /sso, /orphan]
+    # What forwardAuth with authResponseHeaders does for a signed-in user.
+    e2e-sso-user:
+      headers:
+        customRequestHeaders:
+          X-Forwarded-User: operator@e2e.example
+
+    e2e-ro-detect:
+      plugin:
+        scanguard:
+          instanceName: e2e-ro
+          store: { backend: memory }
+          clientIP: { trustedProxies: [127.0.0.1/32, 172.16.0.0/12], header: X-Real-Ip }
+          detectors: { honeypots: { enabled: true, paths: [/e2e-ro/trap] } }
+    e2e-ro-ui:
+      plugin:
+        scanguard:
+          instanceName: e2e-ro
+          uiMode: true
+          admin: { enabled: true, readOnly: true, token: e2e-readonly-token-0123456789 }
+
+    e2e-sso-detect:
+      plugin:
+        scanguard:
+          instanceName: e2e-sso
+          store: { backend: memory }
+          clientIP: { trustedProxies: [127.0.0.1/32, 172.16.0.0/12], header: X-Real-Ip }
+          detectors: { honeypots: { enabled: true, paths: [/e2e-sso/trap] } }
+    e2e-sso-ui:
+      plugin:
+        scanguard:
+          instanceName: e2e-sso
+          uiMode: true
+          admin: { enabled: true, trustForwardedUser: true }
+
+    e2e-orphan-ui:
+      plugin:
+        scanguard:
+          instanceName: e2e-orphan
+          uiMode: true
+          admin: { enabled: true, token: e2e-orphan-token-0123456789 }
+
+  routers:
+    e2e-ro-site:
+      rule: PathPrefix(`/e2e-ro/`)
+      entryPoints: [web]
+      service: site
+      priority: 200
+      middlewares: [e2e-ro-detect]
+    e2e-sso-site:
+      rule: PathPrefix(`/e2e-sso/`)
+      entryPoints: [web]
+      service: site
+      priority: 200
+      middlewares: [e2e-sso-detect]
+
+    e2e-ro-console:
+      rule: PathPrefix(`/ro/`)
+      entryPoints: [admin]
+      service: noop
+      priority: 200
+      middlewares: [e2e-strip, e2e-ro-ui]
+    e2e-sso-console:
+      rule: PathPrefix(`/sso/`)
+      entryPoints: [admin]
+      service: noop
+      priority: 200
+      middlewares: [e2e-strip, e2e-sso-user, e2e-sso-ui]
+    e2e-orphan-console:
+      rule: PathPrefix(`/orphan/`)
+      entryPoints: [admin]
+      service: noop
+      priority: 200
+      middlewares: [e2e-strip, e2e-orphan-ui]

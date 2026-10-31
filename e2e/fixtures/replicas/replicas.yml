@@ -1,0 +1,41 @@
+# Both e2e replicas (examples/docker-compose.e2e.yml) run this: one scanguard
+# instance whose bans and console rule edits live in the shared Redis. Each
+# replica re-reads Redis on store.snapshotInterval (30s, the minimum).
+http:
+  middlewares:
+    e2e-redis:
+      plugin:
+        scanguard:
+          instanceName: e2e-redis
+          store:
+            backend: redis
+            snapshotInterval: 30s
+            redis: { address: "redis:6379", keyPrefix: "e2e:" }
+          clientIP: { trustedProxies: [127.0.0.1/32, 172.16.0.0/12], header: X-Real-Ip }
+          detectors: { honeypots: { enabled: true, paths: [/e2e-redis/trap] } }
+    e2e-redis-ui:
+      plugin:
+        scanguard:
+          instanceName: e2e-redis
+          uiMode: true
+          admin: { enabled: true, token: e2e-redis-token-0123456789 }
+  routers:
+    site:
+      rule: PathPrefix(`/`)
+      entryPoints: [web]
+      service: site
+      middlewares: [e2e-redis]
+    console:
+      rule: PathPrefix(`/`)
+      entryPoints: [admin]
+      service: noop
+      middlewares: [e2e-redis-ui]
+  services:
+    site:
+      loadBalancer:
+        servers:
+          - url: http://site:80
+    noop:
+      loadBalancer:
+        servers:
+          - url: http://127.0.0.1:1

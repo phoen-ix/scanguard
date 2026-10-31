@@ -67,6 +67,31 @@ jobs:
             echo "go.mod has grown a dependency:"; cat go.mod; exit 1
           fi
 
+  # The console e2e suite (e2e/tests/, e2e/COVERAGE.md) against the examples/
+  # harness on the pinned Traefik. scripts/e2e.sh starts and removes its own
+  # harness, so this is a job of its own rather than a step in `integration`.
+  e2e:
+    name: console e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+      - name: install Playwright
+        working-directory: e2e
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: console e2e suite
+        run: ARTIFACTS="$RUNNER_TEMP/e2e-run" scripts/e2e.sh
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: e2e-run
+          path: ${{ runner.temp }}/e2e-run/
+          retention-days: 7
+
   integration:
     name: traefik ${{ matrix.traefik }}
     runs-on: ubuntu-latest

@@ -1,0 +1,31 @@
+# e2e overlay (scripts/e2e.sh adds it): two more Traefik replicas sharing one
+# Redis, for e2e/tests/replicas.spec.ts. Each runs only the files in
+# e2e/fixtures/ (replicas-traefik.yml, replicas/replicas.yml: instance
+# "e2e-redis" with store.backend redis), so the harness's own Traefik and its
+# file store are untouched. Traefik is pinned like docker-compose.yml's; bump
+# both together.
+services:
+  redis:
+    image: redis:8.10.2-alpine3.23
+    expose: ["6379"]
+
+  replica-a:
+    image: traefik:v3.7.16
+    command: [--configFile=/etc/traefik/traefik.yml]
+    ports:
+      - "${SG_REPLICA_A_WEB:-127.0.0.1:8801}:80"
+      - "${SG_REPLICA_A_CONSOLE:-127.0.0.1:9901}:9900"
+    volumes: &replica-volumes
+      - ../e2e/fixtures/replicas-traefik.yml:/etc/traefik/traefik.yml:ro
+      - ../e2e/fixtures/replicas:/etc/traefik/dynamic:ro
+      - ..:/plugins-local/src/github.com/phoen-ix/scanguard:ro
+    depends_on: [site, redis]
+
+  replica-b:
+    image: traefik:v3.7.16
+    command: [--configFile=/etc/traefik/traefik.yml]
+    ports:
+      - "${SG_REPLICA_B_WEB:-127.0.0.1:8802}:80"
+      - "${SG_REPLICA_B_CONSOLE:-127.0.0.1:9902}:9900"
+    volumes: *replica-volumes
+    depends_on: [site, redis]
