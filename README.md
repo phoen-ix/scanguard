@@ -25,7 +25,7 @@ experimental:
   plugins:
     scanguard:
       moduleName: github.com/phoen-ix/scanguard
-      version: v0.1.1
+      version: v0.2.0
 ```
 
 ## What it does
