@@ -127,12 +127,17 @@ func (rt *runtime) applyBan(s *settings, res resolution, det *detection, req *ht
 		Country:  ban.Country,
 	})
 
+	// host, method and ua because the access log may have no Host column: without
+	// them a ban on a multi-site Traefik could not be traced to the site it hit.
 	logWarn(rt.name, "banned source", map[string]interface{}{
 		"key":      ban.Key,
 		"client":   res.client.String(),
 		"detector": det.detector,
 		"rule":     det.rule,
+		"host":     truncate(req.Host, 253),
+		"method":   req.Method,
 		"path":     req.URL.Path,
+		"ua":       ban.LastUA,
 		"offence":  offence,
 		"duration": formatDuration(duration),
 		"dryRun":   s.dryRun,

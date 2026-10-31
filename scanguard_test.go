@@ -2,13 +2,16 @@ package scanguard
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -1596,5 +1599,75 @@ func TestEscalationStillClimbsForASourceThatComesBack(t *testing.T) {
 	// Ban expired, and it came back before the decay window closed.
 	if got, _ := c.recordOffence(key, now.Add(90*time.Minute), decay, ladder); got != 2 {
 		t.Errorf("a source that came back after its ban did not climb: got %d, want 2", got)
+	}
+}
+
+// captureLog runs fn with this package's JSON log lines redirected into a pipe
+// and returns them. os.Stdout is swapped under logMu, the lock emit writes under,
+// so a janitor logging from another goroutine cannot race the swap.
+func captureLog(t *testing.T, fn func()) []logLine {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	logMu.Lock()
+	saved := os.Stdout
+	os.Stdout = w
+	logMu.Unlock()
+
+	out := make(chan []byte)
+	go func() {
+		buf, _ := io.ReadAll(r)
+		out <- buf
+	}()
+	fn()
+
+	logMu.Lock()
+	os.Stdout = saved
+	logMu.Unlock()
+	_ = w.Close()
+
+	var lines []logLine
+	for _, raw := range bytes.Split(<-out, []byte("\n")) {
+		var l logLine
+		if json.Unmarshal(raw, &l) == nil {
+			lines = append(lines, l)
+		}
+	}
+	return lines
+}
+
+// fieldsOf returns the fields of the first log line carrying msg.
+func fieldsOf(lines []logLine, msg string) map[string]interface{} {
+	for _, l := range lines {
+		if l.Msg == msg {
+			f, _ := l.Fields.(map[string]interface{})
+			return f
+		}
+	}
+	return nil
+}
+
+// The access log on a multi-site host may have no Host column, so the ban line
+// itself has to say which site the ban happened on, and with what.
+func TestBanLogLineNamesHostMethodAndUA(t *testing.T) {
+	h := build(t, nil)
+	longUA := "probe/1.0 " + strings.Repeat("x", 400)
+	lines := captureLog(t, func() {
+		req := httptest.NewRequest("POST", "http://shop.example.com/wp-login.php", nil)
+		req.RemoteAddr = "203.0.113.90:1"
+		req.Header.Set("User-Agent", longUA)
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	})
+	f := fieldsOf(lines, "banned source")
+	if f == nil {
+		t.Fatalf("no banned source line in %d captured lines", len(lines))
+	}
+	if f["host"] != "shop.example.com" || f["method"] != "POST" {
+		t.Errorf("host/method = %v/%v, want shop.example.com/POST", f["host"], f["method"])
+	}
+	if ua, _ := f["ua"].(string); ua != truncate(longUA, 256) {
+		t.Errorf("ua = %q, want the user-agent truncated to 256 bytes", ua)
 	}
 }
