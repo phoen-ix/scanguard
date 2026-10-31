@@ -1280,7 +1280,10 @@ document.addEventListener("DOMContentLoaded", function () {
     }).catch(function (err) { toast(err.message); });
   });
 
-  if (token) {
+  // An empty string is a session too: behind an auth proxy (trustForwardedUser)
+  // the identity travels in a header and the gate accepts an empty token, so
+  // testing the token itself sent every reload of such a console to the gate.
+  if (sessionStorage.getItem(TOKEN_KEY) !== null) {
     api("api/health").then(unlock).catch(function (err) {
       if (err.message !== "unauthorized") { lock(err.message); }
     });
