@@ -32,10 +32,11 @@ experimental:
 
 | | |
 |---|---|
-| **Signature probes** | 84 curated paths that only a scanner asks for. Blocked before the request reaches your backend. |
+| **Signature probes** | 87 curated paths that only a scanner asks for. Blocked before the request reaches your backend. |
 | **Distinct-404 floods** | A leaky bucket over *distinct* failing paths — so a scanner walking a wordlist is caught, and a real user hammering one broken link never is. |
 | **Honeypots** | Paths you invent that no legitimate client could know. One hit, instant ban, effectively zero false positives. |
 | **Scanner user-agents** | nikto, sqlmap, nuclei, masscan, zgrab and friends. Generic clients like `curl` and `python-requests` are deliberately *not* in the defaults. |
+| **User-agent rotation** | Opt-in (`detectors.uaRotation`). One source cycling through distinct user-agents: over 15 days of production traffic 133 banned scanners used six or more within 60s, while real Googlebot peaked at five. A leaky bucket over *distinct* user-agents, so it is a leak rate, not a window. The false-positive risk is many real users behind one address — CGNAT, corporate NAT, a shared IPv6 /64. |
 | **SEO crawlers** | MJ12bot, AhrefsBot, SemrushBot and friends, as a separate opt-in: `detectors.userAgent.crawlers` is `ignore` (default), `ban`, `block` or `exempt`. They are not scanners, so they get their own switch rather than being smuggled into another rule. Search engines are never on the list. **This is the one setting that can differ per router** — see [Crawlers, per router](#crawlers-per-router). |
 | **Brute force** | Repeated 401/403 from your real login endpoints. |
 | **Rate abuse** | Token bucket per source, independent of status code. |
@@ -46,6 +47,18 @@ Every detector is individually switchable, and every threshold is configurable.
 Bans escalate (`1h → 24h → 7d → permanent`), decay when a source behaves, survive
 a Traefik restart, and can be pushed to a webhook, Discord/Slack/ntfy/Gotify, or
 AbuseIPDB.
+
+**Range escalation** (`enforcement.subnet`, opt-in). Research scanners walk whole
+ranges, so every address arrives as a fresh first offence and the ladder never
+engages: one deployment banned 205 distinct addresses in a single /24 in 15 days,
+every one at rung 1. With range escalation on, the fifth source banned inside one
+/24 (IPv6: /48) within 24h bans the whole range, which then climbs one ladder of
+its own. Replayed over those 15 days it would have stopped 316 backend probes and
+saved 1146 ban entries; the collateral was 21 addresses never banned themselves,
+almost all other scanners and Tor exits. That is the risk: a range ban also hits
+innocent neighbours — Tor exits, shared hosting, CGNAT. A range that overlaps the
+allowlist or `trustedProxies` is never banned (refused, and logged once), and only
+automatic bans count towards one: manual bans and crawler `block` do not.
 
 ## The console
 
@@ -286,6 +299,11 @@ ban and to poison your list with third parties. scanguard refuses to start if yo
 set `clientIP.header` without `clientIP.trustedProxies`, never bans an address
 inside `trustedProxies`, and refuses to attribute a request it cannot identify.
 
+Cloudflare edge addresses do get banned where nothing sits behind Cloudflare:
+15 of them in 15 days on one deployment (51 requests), Workers used as scanner
+egress. That is correct there; behind Cloudflare it is the outage above, which
+`trustedProxies` plus `header` prevents.
+
 If your load balancer speaks PROXY protocol, use it instead — it actually
 rewrites `RemoteAddr` and the whole problem disappears.
 
@@ -328,6 +346,10 @@ notify:
              "detector": "signature", "rule": "/wp-login\\.php", "banFor": "1h",
              "method": "GET", "path": "/wp-login.php", "time": "2026-08-16T10:00:00Z" } }
 ```
+
+A range ban from `enforcement.subnet` arrives with a CIDR `key`
+(`"198.51.100.0/24"`), detector `subnet` and **no `client`** — so the AbuseIPDB
+reporter skips it, and a range is never reported there.
 
 Only `ban` and `unban` are delivered — per-request rejections are not, so a
 blocked scanner hammering your site cannot turn your webhook endpoint into a
@@ -378,6 +400,7 @@ detectors:
   badPaths:    { enabled: true,  capacity: 20, leak: 10s, statuses: [400,401,403,404,405,501] }
   bruteForce:  { enabled: false, capacity: 5, window: 60s, statuses: [401,403], paths: [] }
   rateAbuse:   { enabled: false, rps: 50, burst: 100 }
+  uaRotation:  { enabled: false, capacity: 8, leak: 60s }   # distinct user-agents per source; capacity 2-128, leak > 0
   payload:     { enabled: false, useDefaults: true, scanQuery: true, scanBody: false, maxBodyBytes: 8192 }
 
 enforcement:
@@ -386,6 +409,13 @@ enforcement:
   escalation: ["1h", "24h", "168h", "0"]   # "0" means permanent
   decay: 24h                 # behave this long and drop a rung
   tarpit: { enabled: false, delay: 3s, maxConcurrent: 50 }   # maxConcurrent: at most 10000
+  subnet:                    # range escalation — see "What it does"
+    enabled: false
+    threshold: 5             # this many banned sources in one range ...
+    window: 24h              # ... within this long bans the range; "0"/permanent refused
+    ipv4Prefix: 24           # the range width, 8 up to clientIP.ipv4Prefix - 1
+    ipv6Prefix: 48           # 16 up to clientIP.ipv6Prefix - 1
+                             # widths and threshold (2 or more) are checked only when enabled
 
 notify:
   timeout: 5s
@@ -531,15 +561,16 @@ interpreted plugin, and still five to ten times a "hundreds of requests per
 second" workload. Traefik's memory was 75 MB with several thousand tracked
 sources.
 
-Where the time goes, from `go test -bench .`:
+Where the time goes, from `go test -bench .` (compiled, Ryzen 7 3700X, 87
+signatures and 41 user-agent patterns):
 
 | | cost | note |
 |---|---|---|
-| Already-banned request | **881 ns**, 4 allocs | resolve, one map lookup, write a status |
-| Client-IP resolution | 208 ns, 0 allocs | with four trusted-proxy CIDRs |
-| Signature match | 5.3 µs | short subject, so cheap |
-| User-agent match | 26 µs | **the dominant cost** |
-| Clean request, end to end | 52 µs, 3 allocs | almost entirely the two matches |
+| Already-banned request | **770 ns**, 5 allocs | resolve, one map lookup, write a status |
+| Client-IP resolution | 184 ns, 0 allocs | with four trusted-proxy CIDRs |
+| Signature match | 7.1 µs | short subject, so cheap |
+| User-agent match | 35 µs | **the dominant cost** |
+| Clean request, end to end | 63 µs, 4 allocs | almost entirely the two matches |
 
 An alternation with no literal prefix must attempt a match at every position, so
 cost scales with subject length — which is why matching a 90-character
@@ -565,6 +596,10 @@ their request paths.
   request would put a network round trip on the hot path to share state nobody
   needs. A Redis outage therefore degrades to per-replica enforcement rather than
   to an outage of its own.
+- **Range escalation counts per replica.** The sources banned inside a range are
+  tallied in the process-local counters, so with several replicas the threshold
+  has to be reached on one of them; the range ban itself is then shared like any
+  other.
 - **Plugins load only at startup.** Installing or upgrading scanguard needs a
   Traefik restart. The console cannot do it.
 - **Response-status detectors act one request late.** The decision for request N
