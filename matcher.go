@@ -16,13 +16,14 @@ import (
 // Measured cost, and a deliberate decision not to optimise further:
 //
 // An alternation with no literal prefix has to attempt a match at every position
-// of the subject, so cost scales with subject length. Matching the 48 default
-// signatures against a typical path costs ~3µs; matching the 22 default
-// user-agent patterns against a full browser user-agent costs ~65µs interpreted,
-// which is the largest single cost on the request path.
+// of the subject, so cost scales with subject length. Matching the default
+// user-agent patterns against a full browser user-agent is the largest single
+// cost on the request path, several times the signature match on a typical path;
+// BenchmarkSignatureMatcher and BenchmarkUserAgentMatcher measure both, and the
+// README's Performance section records the current figures.
 //
-// Guarding the regex with a literal-substring pre-filter measures 3.2x faster
-// interpreted (65µs -> 20µs) for ordinary traffic. It is not implemented, because
+// Guarding the regex with a literal-substring pre-filter measured 3.2x faster
+// interpreted for ordinary traffic. It is not implemented, because
 // doing it correctly means deriving each pattern's required literal from the
 // regex AST, including across alternations where a branch may have none. A
 // pre-filter that gets that wrong does not fail loudly — it silently stops the

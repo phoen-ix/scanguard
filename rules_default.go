@@ -196,6 +196,23 @@ var defaultSignatures = []string{
 	// command-injection endpoint (CVE-2021-36260), both probed as single requests.
 	`/filemanager/php/connector(?:\.minimal)?\.php`,
 	`/SDK/webLanguage`,
+
+	// Measured over 15 days of live traffic at one deployment (946k requests).
+	// Each was requested only by sources that also probed for something else, and
+	// none matched any 2xx answer of the real services behind it.
+	//
+	// phpinfo() output: paths, modules, environment and often credentials in one
+	// page. 391 sources / 8,478 requests.
+	`/php[_-]?info\.php$`,
+	// A PHP file directly under /wp-content/. What WordPress keeps at that level
+	// (index.php, drop-ins such as object-cache.php) is included by PHP, never
+	// requested over HTTP, so a request is a probe for a dropped webshell.
+	// 56 sources / 454 requests.
+	`/wp-content/[^/]+\.php$`,
+	// Plugin and theme readme/changelog: the version-disclosure step of a
+	// WordPress sweep, which then looks the version up in a CVE list. A browser
+	// never loads them. 18 sources / 334 requests.
+	`/wp-content/(?:plugins|themes)/[^/]+/(?:readme|changelog)\.txt$`,
 }
 
 // defaultUserAgents matches security tooling that identifies itself.
@@ -243,7 +260,7 @@ var defaultUserAgents = []string{
 	// Single-CVE detection sweeps. The CVE and the tool name change every month,
 	// so these match the shape rather than any one campaign: a user-agent that
 	// names a CVE is announcing a vulnerability scan.
-	`\bcve-\d{4}-\d{4,7}-(?:detect|scan|check|poc|exploit)\b`,
+	`\bcve-\d{4}-\d{4,7}-(?:detect|scan|check|poc|exploit|validator)\b`,
 	`^cve-\d{4}-\d{4,7}(?:[/\s]|$)`,
 
 	// A Chrome user-agent with no AppleWebKit and no Safari token. Real Chrome has
@@ -262,6 +279,26 @@ var defaultUserAgents = []string{
 	`\binfrawatch\b`,
 	`\bmcpharvest\b`,
 	`visionheight\.com/scan`,
+
+	// Self-naming scanners from 15 days of live traffic at one deployment, each
+	// with sources / requests. Every one probed for something; none ever received
+	// a 2xx from a real service.
+	//
+	// There is no pattern for the bare word "scanner", on purpose: mail
+	// link-safety scanners (Microsoft SafeLinks, Barracuda) fetch the links in
+	// ticket and notification emails, and banning them breaks those links for the
+	// person the email was sent to.
+	`\bwp-safe-scanner\b`,                // 10 / 507
+	`\bauthorized-exposure-audit\b`,      // 24 / 32
+	`\bheader-probe\b`,                   // 14 / 19
+	`\bosint-scanner\b`,                  // 3 / 814
+	`\bgo web pentest tool\b`,            // 3 / 384
+	`\bvuln_scanner\b`,                   // 3 / 13
+	`\bzmap-proxy-probe\b`,               // 2 / 6
+	`\bkeydrop\.io\b|\bonlyscans\.com\b`, // 4 / 16
+	`\bodin-scanner\b`,                   // single hit
+	`\bgitlab-regex-rce-scanner\b`,       // single hit
+	`\bresearch-scan\b`,                  // single hit
 }
 
 // defaultCrawlers matches commercial SEO and backlink crawlers: bots that obey

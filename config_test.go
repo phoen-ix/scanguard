@@ -343,3 +343,48 @@ func TestRulesAddedFromMeasuredTraffic(t *testing.T) {
 		}
 	}
 }
+
+// The rules added from 15 days of omm traffic, each with the shape of probe it
+// was derived from and the legitimate traffic it must not touch.
+func TestRulesAddedFromOmmTraffic(t *testing.T) {
+	s := mustSettings(t, nil)
+
+	for _, path := range []string{
+		"/phpinfo.php", "/php_info.php", "/PHP-Info.php", "/wp-content/x.php",
+		"/wp-content/plugins/akismet/readme.txt", "/wp-content/themes/t/changelog.txt",
+	} {
+		if !s.sigMatcher.match(path) {
+			t.Errorf("default signatures do not match %s", path)
+		}
+	}
+	for _, path := range []string{
+		"/wp-content/uploads/2024/a.jpg", "/wp-content/plugins/x/style.css",
+		"/readme.txt", "/docs/phpinfo.php.md", "/phpinfo",
+	} {
+		if s.sigMatcher.match(path) {
+			t.Errorf("default signatures falsely match %s — that is a self-inflicted outage", path)
+		}
+	}
+
+	for _, ua := range []string{
+		"WP-Safe-Scanner/1.0", "authorized-exposure-audit/6", "header-probe/2.0",
+		"osint-scanner/1.0", "Go Web Pentest Tool", "vuln_scanner/3.1.0",
+		"zmap-proxy-probe/1.0", "Mozilla/5.0 (compatible; Keydrop.io; +https://onlyscans.com)",
+		"odin-scanner/0.4", "gitlab-regex-rce-scanner/1.1", "research-scan/1.0",
+		"wp-cve-2026-87902-validator/1.0",
+	} {
+		if !s.uaMatcher.match(ua) {
+			t.Errorf("default user-agents do not match %q", ua)
+		}
+	}
+	// Mail link-safety scanners fetch the links in ticket emails, so neither they
+	// nor anything else saying just "scanner" may match.
+	for _, ua := range []string{
+		"Barracuda Sentinel (EE)", "research-scanner/1",
+		"Mozilla/5.0 (compatible; link scanner; +https://example.com/bot)",
+	} {
+		if s.uaMatcher.match(ua) {
+			t.Errorf("default user-agents falsely match %q", ua)
+		}
+	}
+}
