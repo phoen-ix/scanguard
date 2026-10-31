@@ -221,7 +221,8 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 			"bruteForce": map[string]interface{}{
 				"enabled": true, "capacity": 3, "window": "60s", "statuses": []int{401},
 			},
-			"payload": map[string]interface{}{"enabled": true, "useDefaults": true, "scanQuery": true},
+			"payload":    map[string]interface{}{"enabled": true, "useDefaults": true, "scanQuery": true},
+			"uaRotation": map[string]interface{}{"enabled": true, "capacity": 3, "leak": "60s"},
 		},
 		"enforcement": map[string]interface{}{
 			"rejectStatus": 403,
@@ -263,6 +264,18 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 	// Query payload.
 	rec = do(h, "GET", "/search?q=1%20UNION%20SELECT%20password", "203.0.113.23:5000", nil)
 	check("injection payload in the query string is blocked", rec.Code == 403, "got status %d", rec.Code)
+
+	// User-agent rotation. The distinct-item bucket is now a method on a struct
+	// field of the counter record, a shape the interpreter has not run before.
+	for _, ua := range []string{"agent-a/1", "agent-b/1"} {
+		do(h, "GET", "/", "203.0.113.110:5000", map[string]string{"User-Agent": ua})
+	}
+	rec = do(h, "GET", "/", "203.0.113.110:5000", map[string]string{"User-Agent": "agent-c/1"})
+	check("a source cycling user-agents is banned on the 3rd", rec.Code == 403, "got status %d", rec.Code)
+	for n := 0; n < 10; n++ {
+		rec = do(h, "GET", "/", "203.0.113.111:5000", map[string]string{"User-Agent": "Mozilla/5.0 same"})
+	}
+	check("one user-agent repeated is not rotation", rec.Code == 200, "got status %d", rec.Code)
 
 	// Allowlisted source must survive an obvious probe.
 	rec = do(h, "GET", "/wp-login.php", "10.99.1.1:5000", nil)
@@ -490,7 +503,9 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 		map[string]string{"X-Scanguard-Token": token})
 	check("rule editor exposes the editable configuration",
 		rec.Code == 200 && strings.Contains(rec.Body.String(), "\"effective\"") &&
-			strings.Contains(rec.Body.String(), "\"fromFile\""),
+			strings.Contains(rec.Body.String(), "\"fromFile\"") &&
+			strings.Contains(rec.Body.String(), `"uaRotation":{"enabled":true,"capacity":3,`) &&
+			strings.Contains(rec.Body.String(), `"subnet":{"ipv4Prefix":24,"ipv6Prefix":48,"threshold":5,`),
 		"got status %d body %s", rec.Code, truncate(rec.Body.String(), 200))
 
 	var rules struct {
@@ -557,6 +572,8 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 	rec = do(h, "GET", "/console-trap", "203.0.113.72:5000", nil)
 	check("the reverted honeypot no longer blocks", rec.Code == 200, "got status %d", rec.Code)
 
+	subnetChecks(build, token)
+
 	// Invalid configuration must be rejected loudly, at startup.
 	_, err = build(map[string]interface{}{
 		"clientIP": map[string]interface{}{"header": "Cf-Connecting-Ip"},
@@ -576,6 +593,56 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 		},
 	})
 	check("an invalid regular expression is refused", err != nil, "New accepted a broken pattern")
+}
+
+// subnetChecks runs range escalation on its own instance. It is the path that
+// adds a second map lookup to the ban store and a map of members to the counter
+// record, both on the hot path, and neither is visible to go test under Yaegi.
+func subnetChecks(build func(map[string]interface{}) (http.Handler, error), token string) {
+	h, err := build(map[string]interface{}{
+		"instanceName": "smoke-subnet",
+		"store":        map[string]interface{}{"backend": "memory"},
+		"allowlist":    map[string]interface{}{"cidrs": []string{"198.51.100.0/25"}},
+		"enforcement": map[string]interface{}{
+			"subnet": map[string]interface{}{
+				"enabled": true, "threshold": 3, "window": "1h", "ipv4Prefix": 24, "ipv6Prefix": 48,
+			},
+		},
+		"admin": map[string]interface{}{"enabled": true, "pathPrefix": "/__scanguard", "token": token},
+	})
+	if err != nil {
+		fatal("New rejected the range-escalation configuration: %v", err)
+	}
+	auth := map[string]string{"X-Scanguard-Token": token, "X-Scanguard-Action": "1"}
+
+	for n := 1; n <= 3; n++ {
+		do(h, "GET", "/wp-login.php", fmt.Sprintf("192.0.2.%d:5000", n), nil)
+	}
+	rec := do(h, "GET", "/", "192.0.2.99:5000", nil)
+	check("three banned sources in a /24 ban a fresh address in it", rec.Code == 403, "got status %d", rec.Code)
+
+	rec = do(h, "GET", "/__scanguard/api/bans", "203.0.113.60:5000", auth)
+	check("the range ban is listed with detector subnet",
+		strings.Contains(rec.Body.String(), `"key":"192.0.2.0/24"`) && strings.Contains(rec.Body.String(), `"detector":"subnet"`),
+		"got status %d body %s", rec.Code, truncate(rec.Body.String(), 300))
+
+	for n := 1; n <= 3; n++ {
+		do(h, "GET", "/wp-login.php", fmt.Sprintf("[2001:db8:1:%d::1]:5000", n), nil)
+	}
+	rec = do(h, "GET", "/", "[2001:db8:1:99::1]:5000", nil)
+	check("three banned /64s in a /48 ban a fresh /64 in it", rec.Code == 403, "got status %d", rec.Code)
+
+	for n := 130; n <= 132; n++ {
+		do(h, "GET", "/wp-login.php", fmt.Sprintf("198.51.100.%d:5000", n), nil)
+	}
+	rec = do(h, "GET", "/", "198.51.100.200:5000", nil)
+	check("a range overlapping the allowlist is never banned", rec.Code == 200, "got status %d", rec.Code)
+
+	rec = do(h, "DELETE", "/__scanguard/api/bans?key=192.0.2.0/24", "203.0.113.60:5000", auth)
+	check("the range ban can be lifted", rec.Code == 200 && strings.Contains(rec.Body.String(), "\"unbanned\":true"),
+		"got status %d body %s", rec.Code, rec.Body.String())
+	rec = do(h, "GET", "/", "192.0.2.99:5000", nil)
+	check("a lifted range ban serves its addresses again", rec.Code == 200, "got status %d", rec.Code)
 }
 
 // doBody issues a request with an explicit JSON body, for the console's write endpoints.
