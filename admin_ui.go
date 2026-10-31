@@ -35,7 +35,7 @@ const indexHTML = `<!doctype html>
     <label for="token">Access token</label>
     <input id="token" type="password" autocomplete="current-password" spellcheck="false">
     <button type="submit">Unlock</button>
-    <p id="gate-error" class="error" hidden></p>
+    <p id="gate-error" class="error" role="alert" hidden></p>
   </form>
 </div>
 
@@ -71,9 +71,9 @@ const indexHTML = `<!doctype html>
       <div class="panel-head">
         <h2>Active bans <span id="ban-count" class="count"></span></h2>
         <form id="ban-form" class="inline-form">
-          <input id="ban-key" placeholder="IP or CIDR" spellcheck="false" size="18">
-          <input id="ban-duration" placeholder="1h" value="1h" size="6">
-          <input id="ban-reason" placeholder="reason" size="20">
+          <input id="ban-key" placeholder="IP or CIDR" aria-label="Address or CIDR to ban" spellcheck="false" size="18">
+          <input id="ban-duration" placeholder="1h" aria-label="Ban duration" value="1h" size="6">
+          <input id="ban-reason" placeholder="reason" aria-label="Ban reason" size="20">
           <button type="submit">Ban</button>
         </form>
       </div>
@@ -113,10 +113,10 @@ const indexHTML = `<!doctype html>
       <div class="panel-head">
         <h2>Live activity</h2>
         <div id="event-filter">
-          <button type="button" class="chip on" data-kind="">all</button>
-          <button type="button" class="chip" data-kind="ban">bans</button>
-          <button type="button" class="chip" data-kind="reject">rejects</button>
-          <button type="button" class="chip" data-kind="unban">unbans</button>
+          <button type="button" class="chip on" aria-pressed="true" data-kind="">all</button>
+          <button type="button" class="chip" aria-pressed="false" data-kind="ban">bans</button>
+          <button type="button" class="chip" aria-pressed="false" data-kind="reject">rejects</button>
+          <button type="button" class="chip" aria-pressed="false" data-kind="unban">unbans</button>
         </div>
         <label class="toggle"><input id="follow" type="checkbox" checked> follow</label>
       </div>
@@ -154,7 +154,7 @@ const indexHTML = `<!doctype html>
           <button id="rules-revert" class="ghost" type="button">Revert to file config</button>
         </div>
       </div>
-      <p id="rules-error" class="banner error" hidden></p>
+      <p id="rules-error" class="banner error" role="alert" hidden></p>
       <p id="rules-meta" class="meta"></p>
       <div id="rules-form" class="rules-form"></div>
     </section>
@@ -163,7 +163,7 @@ const indexHTML = `<!doctype html>
   <footer><p>scanguard &middot; <span id="footer-instance"></span> &middot; state: <span id="footer-backend"></span></p></footer>
 </div>
 
-<div id="toast" class="toast" hidden></div>
+<div id="toast" class="toast" role="status" hidden></div>
 <script src="app.js"></script>
 </body>
 </html>
@@ -834,7 +834,9 @@ function setEventKind(kind) {
   $("events").tBodies[0].textContent = "";
   var buttons = document.querySelectorAll("#event-filter button");
   for (var i = 0; i < buttons.length; i++) {
-    buttons[i].className = buttons[i].getAttribute("data-kind") === kind ? "chip on" : "chip";
+    var on = buttons[i].getAttribute("data-kind") === kind;
+    buttons[i].className = on ? "chip on" : "chip";
+    buttons[i].setAttribute("aria-pressed", on ? "true" : "false");
   }
   // Repaint straight from the ring rather than waiting for the next state poll,
   // so the filter feels like a filter and not like a three-second stall.
