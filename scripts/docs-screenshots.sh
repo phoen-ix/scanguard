@@ -42,7 +42,7 @@ for _ in $(seq 60); do
   curl -sf -o /dev/null -H "X-Scanguard-Token: $TOKEN" http://localhost:9900/api/health && break
   sleep 1
 done
-docker compose logs traefik 2>&1 | grep -q 'scanguard initialised'
+docker compose logs traefik 2>&1 | grep 'scanguard initialised' >/dev/null # not -q: under pipefail an early exit fails the pipe
 
 tour() { # tour <results subdir> <playwright args...>
   (cd "$ROOT/e2e" && DOCS_SCREENSHOT_DIR="$OUT" \
