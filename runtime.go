@@ -748,6 +748,10 @@ func (rt *runtime) syncOverrides() {
 	}
 	rt.overrides = stored
 	rt.applySettings(s)
+	if stored == nil {
+		logInfo(rt.name, "console rule changes were reverted on another replica; the file configuration is back in force", nil)
+		return
+	}
 	logInfo(rt.name, "adopted a rule set changed on another replica", map[string]interface{}{
 		"sections": stored.sections(),
 		"actor":    stored.Actor,

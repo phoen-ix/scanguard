@@ -170,6 +170,14 @@ func (r *redisStore) refreshOverrides() {
 	if reply.null || reply.str == "" {
 		return
 	}
+	// A revert on any replica publishes JSON null: no console rules anywhere.
+	// Decoded into an Overrides it became an empty rule set of schema version
+	// 0, which every other replica refused as "a different version of the
+	// rule schema" while it kept enforcing the reverted rules.
+	if reply.str == "null" {
+		_ = r.memStore.saveOverrides(nil)
+		return
+	}
 	var ov Overrides
 	if err := json.Unmarshal([]byte(reply.str), &ov); err != nil {
 		logWarn(r.instance, "shared rule set in redis could not be decoded; keeping the local one",
