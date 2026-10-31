@@ -193,7 +193,11 @@ func (m *memStore) matchWideLocked(key netip.Prefix) (*Ban, bool) {
 	for _, w := range m.wide {
 		if w.Bits() > bestBits && w.Contains(key.Addr()) {
 			if b, ok := m.bans[w]; ok {
-				best, bestBits = b, w.Bits()
+				// Two statements, not "best, bestBits = b, w.Bits()": Yaegi
+				// v0.16.1 runs that parallel assignment without setting best, so
+				// under Traefik a range ban matched nothing. yaegi-smoke checks it.
+				best = b
+				bestBits = w.Bits()
 			}
 		}
 	}

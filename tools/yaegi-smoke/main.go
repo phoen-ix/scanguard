@@ -344,6 +344,19 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 	rec = do(h, "GET", "/", "203.0.113.20:5000", nil)
 	check("an unbanned source is served again immediately", rec.Code == 200, "got status %d", rec.Code)
 
+	// A range ban from the console has to block the addresses inside it. Under
+	// Yaegi it blocked nothing: matchWideLocked's parallel assignment
+	// "best, bestBits = b, w.Bits()" left best nil, with no error anywhere.
+	rec = doBody(h, "POST", "/__scanguard/api/bans", "203.0.113.60:5000", `{"key":"192.0.2.0/24"}`,
+		map[string]string{"X-Scanguard-Token": token, "X-Scanguard-Action": "1"})
+	check("a manual range ban is accepted", rec.Code == 200, "got status %d body %s", rec.Code, rec.Body.String())
+	rec = do(h, "GET", "/", "192.0.2.77:5000", nil)
+	check("a manual range ban blocks an address inside it", rec.Code == 403, "got status %d", rec.Code)
+	rec = do(h, "DELETE", "/__scanguard/api/bans?key=192.0.2.0/24", "203.0.113.60:5000",
+		map[string]string{"X-Scanguard-Token": token, "X-Scanguard-Action": "1"})
+	check("the range ban is lifted", rec.Code == 200 && strings.Contains(rec.Body.String(), "\"unbanned\":true"),
+		"got status %d body %s", rec.Code, rec.Body.String())
+
 	// Persistence. The janitor snapshots on a timer, and applyBan flushes
 	// immediately, so the file must already exist and hold the remaining bans.
 	waitFor(2*time.Second, func() bool {
