@@ -135,3 +135,23 @@ for (const c of CONSOLES) {
     })
   })
 }
+
+// The SSO console as a real guest: no X-Forwarded-User and no token to fall back on.
+test.describe('SSO console without an identity (/sso-anon/)', () => {
+  test('as a guest: the API refuses with 401 and Unlock keeps the gate up', async ({ page, request }) => {
+    for (const headers of [{}, { 'X-Scanguard-Token': 'any-token-at-all-0123456789' }]) {
+      const res = await request.get(`${CONSOLE}/sso-anon/api/health`, { headers })
+      expect(res.status()).toBe(401)
+      expect(res.headers()['www-authenticate']).toBe('Bearer realm="scanguard"')
+    }
+    const ban = await request.post(`${CONSOLE}/sso-anon/api/bans`, { headers: { 'X-Scanguard-Action': '1' }, data: { key: '198.18.0.1' } })
+    expect(ban.status()).toBe(401)
+
+    await page.goto('/sso-anon/')
+    await expect(page.getByLabel('Access token')).toBeFocused()
+    await page.getByRole('button', { name: 'Unlock' }).click()
+    await expect(page.getByRole('alert')).toHaveText('That token was not accepted.')
+    await expect(page.locator('#app')).toBeHidden()
+    await expect(page.getByLabel('Access token')).toBeVisible()
+  })
+})

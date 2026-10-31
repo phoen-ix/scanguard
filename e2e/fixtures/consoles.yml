@@ -6,6 +6,7 @@
 #   /ro/      read-only console (instance e2e-ro); its detector guards /e2e-ro/
 #   /sso/     console behind a stand-in auth proxy that sets X-Forwarded-User
 #             (instance e2e-sso, no token); its detector guards /e2e-sso/
+#   /sso-anon/ the same console with no identity header: a real guest
 #   /orphan/  console whose instanceName no detector shares (e2e-orphan): every
 #             list stays empty and the rule editor has nothing to edit
 http:
@@ -13,6 +14,10 @@ http:
     e2e-strip:
       stripPrefix:
         prefixes: [/ro, /sso, /orphan]
+    # Its own, so /sso does not strip /sso-anon/ to /-anon/.
+    e2e-strip-anon:
+      stripPrefix:
+        prefixes: [/sso-anon]
     # What forwardAuth with authResponseHeaders does for a signed-in user.
     e2e-sso-user:
       headers:
@@ -80,6 +85,12 @@ http:
       service: noop
       priority: 200
       middlewares: [e2e-strip, e2e-sso-user, e2e-sso-ui]
+    e2e-sso-anon-console:
+      rule: PathPrefix(`/sso-anon/`)
+      entryPoints: [admin]
+      service: noop
+      priority: 200
+      middlewares: [e2e-strip-anon, e2e-sso-ui]
     e2e-orphan-console:
       rule: PathPrefix(`/orphan/`)
       entryPoints: [admin]

@@ -32,17 +32,20 @@ test('a range and a permanent ban, with their expiry', async ({ page, request })
   const range = '203.0.113.0/24'
   const single = uniqueIp()
   await unlock(page)
-  await banViaForm(page, range, '168h', 'e2e range')
-  await expect(toast(page)).toHaveText(`Banned ${range}`)
-  await expect(cells(banRow(page, range)).nth(6)).toHaveText('in 7d')
-  await banViaForm(page, single, '0', '')
-  await expect(toast(page)).toHaveText(`Banned ${single}/32`)
-  // No reason given: the server records "manual ban".
-  await expect(cells(banRow(page, `${single}/32`))).toHaveText([`${single}/32`, 'manual', 'manual ban', '', '', '0', 'permanent', 'unblock'])
-  // A range blocks every address inside it.
-  expect(await probe(request, '203.0.113.77', '/')).toBe(403)
-  await api(request, `/api/bans?key=${encodeURIComponent(range)}`, { method: 'DELETE' })
-  await api(request, `/api/bans?key=${single}`, { method: 'DELETE' })
+  try {
+    await banViaForm(page, range, '168h', 'e2e range')
+    await expect(toast(page)).toHaveText(`Banned ${range}`)
+    await expect(cells(banRow(page, range)).nth(6)).toHaveText('in 7d')
+    await banViaForm(page, single, '0', '')
+    await expect(toast(page)).toHaveText(`Banned ${single}/32`)
+    // No reason given: the server records "manual ban".
+    await expect(cells(banRow(page, `${single}/32`))).toHaveText([`${single}/32`, 'manual', 'manual ban', '', '', '0', 'permanent', 'unblock'])
+    // A range blocks every address inside it.
+    expect(await probe(request, '203.0.113.77', '/')).toBe(403)
+  } finally {
+    // Both outlive the test otherwise (the range is fixed, the single is permanent).
+    for (const key of [range, single]) await api(request, `/api/bans?key=${encodeURIComponent(key)}`, { method: 'DELETE' }).catch(() => {})
+  }
 })
 
 for (const [what, key, duration, message] of [

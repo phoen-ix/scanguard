@@ -13,12 +13,17 @@ Inventory, 2026-10-31, from the repo root:
 grep -oE 'case "/[^"]*"(, "[^"]*")*:' admin.go
 # console: panels, forms, inputs, buttons, filter chips, tiles, rule-editor groups, toasts - 43 items
 grep -oE '<h2[^>]*>[A-Za-z ]+|<(form|button|input)[^>]*id="[a-z-]+"|data-kind="[a-z]*"|tile\(tiles, "[^"]+"|\{ title: "[^"]+"|toast\("[^"]+' admin_ui.go
-# request-path features: the README "What it does" table and the Configuration block
+# request-path features - 30 rows: the 8 detectors of the README "What it does" table,
+# then one row per behaviour the Configuration reference's keys switch on (tuning
+# knobs such as capacities and timeouts fold into their detector's row)
+awk '/^## What it does/{f=1;next} /^## /{f=0} f' README.md | grep -oE '^\| \*\*[^*]+'
+awk '/^## Configuration/{f=1;next} /^## /{f=0} f' README.md | sed -n '/^```yaml/,/^```/p' | grep -oE '^ {0,2}[a-zA-Z]+:'
 ```
 
 Roles: **guest** (no credential), **wrong token**, **operator** (`X-Scanguard-Token`
 or `Authorization: Bearer`), **read-only operator** (`admin.readOnly`), **SSO user**
-(`admin.trustForwardedUser`, identity from an auth proxy). The read-only, SSO and
+(`admin.trustForwardedUser`, identity from an auth proxy). The read-only, SSO
+(`/sso/` with the identity header, `/sso-anon/` without it) and
 "orphan" (no detector shares its `instanceName`) consoles come from
 `e2e/fixtures/consoles.yml`, added to the running harness for the length of the run;
 two Traefik replicas sharing a Redis come from the overlay `examples/docker-compose.e2e.yml`.
@@ -60,7 +65,7 @@ Test names are `file › [describe ›] title`.
 |---|---|---|
 | main `/` (operator) | ✅ `sweep.spec.ts › main console (/) › as a guest: the gate, nothing else` | ✅ `sweep.spec.ts › main console (/) › as its operator: every panel` |
 | `/ro/` (read-only operator) | ✅ `sweep.spec.ts › read-only console (/ro/) › as a guest: …` | ✅ `… › as its operator: every panel` |
-| `/sso/` (SSO user) | ✅ `sweep.spec.ts › SSO console (/sso/) › as a guest: …` | ✅ `… › as its operator: every panel` |
+| `/sso/` (SSO user) | ✅ `sweep.spec.ts › SSO console without an identity (/sso-anon/) › as a guest: the API refuses with 401 and Unlock keeps the gate up` (no `X-Forwarded-User`; `sweep.spec.ts › SSO console (/sso/) › as a guest: …` is a signed-in user's first visit, before Unlock) | ✅ `sweep.spec.ts › SSO console (/sso/) › as its operator: every panel` |
 | `/orphan/` (operator, no detector) | ✅ `sweep.spec.ts › orphan console (/orphan/) › as a guest: …` | ✅ `… › as its operator: every panel` |
 
 ## Console features (43, from the extraction command)
@@ -157,7 +162,7 @@ Test names are `file › [describe ›] title`.
 | distinct-404 flood | ❌ (c) `examples/scanner-sim.sh` "Distinct 404 flood"; `TestBadPathBucketTripsAtCapacity`, `TestBadPathBucketLeaks` |
 | brute force (repeated 401/403) | ❌ (c) `TestResponseStatusDetectorBansOneRequestLate`, `TestAuthFailureWindow` (the harness's nginx answers no 401s) |
 | rate abuse | ❌ (c) `TestRateBucket` |
-| SEO crawler policy per router | ❌ (c) `TestCrawlerPolicy*` (11 tests in `scanguard_test.go`) |
+| SEO crawler policy per router | ❌ (c) `TestCrawler*` (13 tests in `scanguard_test.go`) |
 | tarpit | ❌ (c) `TestTarpitDelaysRejectedRequests`, `TestTarpitAbortsWhenTheClientDisconnects` |
 | escalation ladder and decay | ❌ (c) `TestEscalationLadderAndDecay`, `TestEscalationClimbsAcrossABanExpiry` |
 | forwarded-header spoofing is attributed to the real peer | ❌ (c) `examples/scanner-sim.sh` "Spoofing"; `TestResolveWalksForwardedForRightToLeft` |
