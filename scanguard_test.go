@@ -1706,3 +1706,155 @@ func TestUARotationBansACyclingSource(t *testing.T) {
 		t.Errorf("sqlmap was banned by %q, want %q", b.Detector, detectorUserAgent)
 	}
 }
+
+func withSubnet(c *Config) {
+	c.Enforcement.Subnet = SubnetConfig{Enabled: true, Threshold: 3, Window: "1h", IPv4Prefix: 24, IPv6Prefix: 48}
+}
+
+// rangeBanEvent returns the ban event recorded for key, if any.
+func rangeBanEvent(rt *runtime, key string) (Event, bool) {
+	for _, e := range rt.events.recent(0) {
+		if e.Kind == eventBan && e.Key == key {
+			return e, true
+		}
+	}
+	return Event{}, false
+}
+
+// Research scanners walk a range one address at a time, so each ban is a fresh
+// first offence. Once three sources in one range are banned, the range is.
+func TestSubnetEscalation(t *testing.T) {
+	for _, tc := range []struct {
+		name, rng, fresh string
+		members          []string
+	}{
+		{"v4", "192.0.2.0/24", "192.0.2.99:1", []string{"192.0.2.1:1", "192.0.2.2:1", "192.0.2.3:1"}},
+		{"v6", "2001:db8:1::/48", "[2001:db8:1:99::1]:1",
+			[]string{"[2001:db8:1:1::1]:1", "[2001:db8:1:2::1]:1", "[2001:db8:1:3::1]:1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, rt := consoleHandler(t, withSubnet)
+			if got := send(h, "GET", "/", tc.fresh, nil).Code; got != 200 {
+				t.Fatalf("a clean source got %d before any ban", got)
+			}
+			for _, m := range tc.members {
+				if got := send(h, "GET", "/wp-login.php", m, nil).Code; got != 403 {
+					t.Fatalf("probe from %s got %d", m, got)
+				}
+			}
+			if got := send(h, "GET", "/", tc.fresh, nil).Code; got != 403 {
+				t.Fatalf("a fresh address in %s got %d after three bans, want 403", tc.rng, got)
+			}
+
+			b, ok := rt.store().get(key(tc.rng), time.Now())
+			wantRule := "3 sources in " + tc.rng + " within 1h"
+			if !ok || b.Detector != detectorSubnet || b.Rule != wantRule || b.Offences != 1 {
+				t.Errorf("range ban = %+v (found %v), want detector %q rule %q", b, ok, detectorSubnet, wantRule)
+			}
+			if e, ok := rangeBanEvent(rt, tc.rng); !ok || e.Client != "" || e.Detector != detectorSubnet {
+				t.Errorf("range ban event = %+v (found %v), want one with no client", e, ok)
+			}
+
+			if rec := ruleRequestAt(t, h, http.MethodDelete, nil, "/__scanguard/api/bans?key="+tc.rng); rec.Code != 200 {
+				t.Fatalf("DELETE the range returned %d: %s", rec.Code, rec.Body.String())
+			}
+			if n := rt.counters.offences(key(tc.rng)); n != 0 {
+				t.Errorf("the range kept ladder position %d after unban", n)
+			}
+			if got := send(h, "GET", "/", tc.fresh, nil).Code; got != 200 {
+				t.Errorf("still blocked after the range was unbanned, got %d", got)
+			}
+		})
+	}
+}
+
+// A range that overlaps the allowlist or a trusted proxy is never banned, and
+// saying so once is enough however often it trips.
+func TestSubnetEscalationNeverCoversProtectedRanges(t *testing.T) {
+	h, rt := consoleHandler(t, func(c *Config) {
+		withSubnet(c)
+		c.Allowlist.CIDRs = []string{"198.51.100.0/25"}
+		c.ClientIP.TrustedProxies = []string{"203.0.113.5/32"}
+	})
+	lines := captureLog(t, func() {
+		for i := 130; i < 136; i++ {
+			send(h, "GET", "/wp-login.php", fmt.Sprintf("198.51.100.%d:1", i), nil)
+		}
+		for i := 10; i < 13; i++ {
+			send(h, "GET", "/wp-login.php", fmt.Sprintf("203.0.113.%d:1", i), nil)
+		}
+	})
+	for _, fresh := range []string{"198.51.100.200:1", "203.0.113.200:1"} {
+		if got := send(h, "GET", "/", fresh, nil).Code; got != 200 {
+			t.Errorf("%s in a protected range got %d, want 200", fresh, got)
+		}
+	}
+	for _, b := range rt.store().list(time.Now()) {
+		if b.Detector == detectorSubnet {
+			t.Errorf("a protected range was banned: %+v", b)
+		}
+	}
+	refused := 0
+	for _, l := range lines {
+		if l.Msg == "range escalation skipped a protected range" {
+			refused++
+		}
+	}
+	if refused != 2 {
+		t.Errorf("logged %d refusals for two ranges tripping three times, want 2", refused)
+	}
+}
+
+// Only automatic bans count: an operator's manual bans and the crawler "block"
+// policy, which writes no ban at all, never add up to a range ban.
+func TestSubnetEscalationCountsOnlyAutomaticBans(t *testing.T) {
+	h, rt := consoleHandler(t, func(c *Config) {
+		withSubnet(c)
+		c.Detectors.UserAgent.Crawlers = crawlersBlock
+	})
+	for i := 1; i <= 3; i++ {
+		body := map[string]string{"key": fmt.Sprintf("192.0.2.%d", i), "duration": "1h"}
+		if rec := ruleRequestAt(t, h, http.MethodPost, body, "/__scanguard/api/bans"); rec.Code != 200 {
+			t.Fatalf("manual ban %d returned %d: %s", i, rec.Code, rec.Body.String())
+		}
+	}
+	for i := 1; i <= 3; i++ {
+		if got := send(h, "GET", "/", fmt.Sprintf("198.51.100.%d:1", i), crawlerUA()).Code; got != 403 {
+			t.Fatalf("crawler block %d got %d, want 403", i, got)
+		}
+	}
+	for _, fresh := range []string{"192.0.2.99:1", "198.51.100.99:1"} {
+		if got := send(h, "GET", "/", fresh, nil).Code; got != 200 {
+			t.Errorf("%s got %d: a range was banned from bans that do not count", fresh, got)
+		}
+	}
+	for _, b := range rt.store().list(time.Now()) {
+		if b.Detector == detectorSubnet {
+			t.Errorf("unexpected range ban %+v", b)
+		}
+	}
+}
+
+// A dry run writes the range ban to the shadow list like every other ban: it is
+// reported and consulted, never enforced, and never reaches the real store.
+func TestSubnetEscalationInDryRunUsesTheShadow(t *testing.T) {
+	h, rt := consoleHandler(t, func(c *Config) {
+		withSubnet(c)
+		c.DryRun = true
+	})
+	for i := 1; i <= 3; i++ {
+		send(h, "GET", "/wp-login.php", fmt.Sprintf("192.0.2.%d:1", i), nil)
+	}
+	if got := send(h, "GET", "/", "192.0.2.99:1", nil).Code; got != 200 {
+		t.Fatalf("a dry run blocked %d", got)
+	}
+	if b, ok := rt.shadow.get(key("192.0.2.99/32"), time.Now()); !ok || b.Key != "192.0.2.0/24" || b.Detector != detectorSubnet {
+		t.Errorf("shadow lookup = %+v (found %v), want the range ban", b, ok)
+	}
+	if n := len(rt.store().list(time.Now())); n != 0 {
+		t.Errorf("the real store holds %d bans after a dry run", n)
+	}
+	if e, ok := rangeBanEvent(rt, "192.0.2.0/24"); !ok || !e.DryRun {
+		t.Errorf("range ban event = %+v (found %v), want a dry-run one", e, ok)
+	}
+}

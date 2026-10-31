@@ -20,6 +20,7 @@ const (
 	detectorRateAbuse  = "rate-abuse"
 	detectorPayload    = "payload"
 	detectorUARotation = "ua-rotation"
+	detectorSubnet     = "subnet"
 	detectorReputation = "reputation"
 	detectorManual     = "manual"
 )

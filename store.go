@@ -66,7 +66,11 @@ type banStore interface {
 	// plugin at load time under the interpreter while compiling and testing
 	// perfectly. Every backend embeds *memStore, so all three satisfy this for
 	// free.
-	setKeyWidths(v4, v6 int)
+	//
+	// subV4 and subV6 are enforcement.subnet's range widths, or 0 when range
+	// escalation is off. Range bans at exactly that width are found with one more
+	// map lookup instead of joining the containment scan.
+	setKeyWidths(v4, v6, subV4, subV6 int)
 	// loadOverrides returns the console's saved rule edits, or nil if there are none.
 	loadOverrides() *Overrides
 	// saveOverrides records the console's rule edits.
@@ -117,6 +121,10 @@ type memStore struct {
 	// typing a CIDR into the console, and is the only kind that a plain map lookup
 	// on the request key cannot find.
 	v4Bits, v6Bits int
+	// subV4 and subV6 are the range widths automatic range escalation bans at
+	// (0: off). Those bans are found by masking the request key to that width and
+	// looking it up, so on omm's traffic hundreds of range bans never reach wide.
+	subV4, subV6 int
 	// wide lists exactly those operator-entered prefixes, so the containment test
 	// on lookup walks a handful of hand-typed entries rather than the whole ban
 	// table. It stays empty on a deployment that never bans a range, which is the
@@ -145,25 +153,62 @@ func (m *memStore) refresh() error { return nil }
 
 // setKeyWidths tells the store how wide the detector's own ban keys are, so it
 // can tell an operator's range ban apart from an ordinary one. Called on every
-// configuration apply, because clientIP.ipv4Prefix and ipv6Prefix are editable.
-func (m *memStore) setKeyWidths(v4, v6 int) {
+// configuration apply, because clientIP.ipv4Prefix and ipv6Prefix are editable,
+// and so is enforcement.subnet.
+func (m *memStore) setKeyWidths(v4, v6, subV4, subV6 int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if v4 == m.v4Bits && v6 == m.v6Bits {
+	if v4 == m.v4Bits && v6 == m.v6Bits && subV4 == m.subV4 && subV6 == m.subV6 {
 		return
 	}
-	m.v4Bits, m.v6Bits = v4, v6
+	// One assignment per statement: Yaegi v0.16.1 mishandles parallel
+	// assignment (see matchWideLocked).
+	m.v4Bits = v4
+	m.v6Bits = v6
+	m.subV4 = subV4
+	m.subV6 = subV6
 	m.rebuildWideLocked()
 }
 
 // isWideLocked reports whether a stored prefix is broader than the keys requests
 // arrive under, and therefore needs a containment test rather than a map lookup.
+// A prefix at the range-escalation width is broader too, but lookupLocked finds
+// it with a masked map lookup instead.
 func (m *memStore) isWideLocked(p netip.Prefix) bool {
+	key := m.v6Bits
+	sub := m.subV6
 	if p.Addr().Is4() {
-		return p.Bits() < m.v4Bits
+		key = m.v4Bits
+		sub = m.subV4
 	}
-	return p.Bits() < m.v6Bits
+	return p.Bits() < key && (sub == 0 || p.Bits() != sub)
+}
+
+// lookupLocked finds the ban covering key: the exact key, then the range ban at
+// the range-escalation width, then an operator-entered range. The caller holds mu.
+func (m *memStore) lookupLocked(key netip.Prefix) (*Ban, bool) {
+	if b, ok := m.bans[key]; ok {
+		return b, true
+	}
+	sub := m.subV6
+	if key.Addr().Is4() {
+		sub = m.subV4
+	}
+	if sub > 0 {
+		if p, err := key.Addr().Prefix(sub); err == nil {
+			if b, ok := m.bans[p]; ok {
+				return b, true
+			}
+		}
+	}
+	if len(m.wide) > 0 {
+		// Only an operator's range ban is left to find, and only when one exists
+		// at all — so the scan is skipped entirely on the ordinary path, and walks
+		// a hand-typed list when it is not.
+		return m.matchWideLocked(key)
+	}
+	return nil, false
 }
 
 func (m *memStore) rebuildWideLocked() {
@@ -206,13 +251,7 @@ func (m *memStore) matchWideLocked(key netip.Prefix) (*Ban, bool) {
 
 func (m *memStore) get(key netip.Prefix, now time.Time) (Ban, bool) {
 	m.mu.RLock()
-	b, ok := m.bans[key]
-	if !ok && len(m.wide) > 0 {
-		// Only an operator's range ban can be missed by the exact lookup, and only
-		// when one exists at all — so the scan is skipped entirely on the ordinary
-		// path, and walks a hand-typed list when it is not.
-		b, ok = m.matchWideLocked(key)
-	}
+	b, ok := m.lookupLocked(key)
 	if !ok {
 		m.mu.RUnlock()
 		return Ban{}, false
@@ -275,11 +314,7 @@ func (m *memStore) list(now time.Time) []Ban {
 
 func (m *memStore) countHit(key netip.Prefix) {
 	m.mu.Lock()
-	b, ok := m.bans[key]
-	if !ok && len(m.wide) > 0 {
-		b, ok = m.matchWideLocked(key)
-	}
-	if ok {
+	if b, ok := m.lookupLocked(key); ok {
 		b.Hits++
 	}
 	m.mu.Unlock()

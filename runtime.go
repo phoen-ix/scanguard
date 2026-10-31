@@ -346,11 +346,17 @@ func (rt *runtime) applySettings(s *settings) {
 	// The store has to know how wide the detector's own keys are, so it can tell
 	// an operator's range ban from an ordinary one. Both widths are editable, so
 	// this is re-applied on every configuration change rather than set once.
+	subV4 := 0
+	subV6 := 0
+	if s.subnet.Enabled {
+		subV4 = s.subnet.IPv4Prefix
+		subV6 = s.subnet.IPv6Prefix
+	}
 	if st := rt.store(); st != nil {
-		st.setKeyWidths(s.ipv4Prefix, s.ipv6Prefix)
+		st.setKeyWidths(s.ipv4Prefix, s.ipv6Prefix, subV4, subV6)
 	}
 	if rt.shadow != nil {
-		rt.shadow.setKeyWidths(s.ipv4Prefix, s.ipv6Prefix)
+		rt.shadow.setKeyWidths(s.ipv4Prefix, s.ipv6Prefix, subV4, subV6)
 	}
 }
 
@@ -599,6 +605,12 @@ func (rt *runtime) tick() {
 	idle := s.decay
 	if idle < time.Hour {
 		idle = time.Hour
+	}
+	// A range's member count is bucket state on the range's own record, which is
+	// touched only when a member is banned. Swept sooner than the window, the
+	// count would restart in the middle of it.
+	if s.subnet.Enabled && s.subnetWindow > idle {
+		idle = s.subnetWindow
 	}
 	rt.counters.sweep(now, idle, s.decay)
 

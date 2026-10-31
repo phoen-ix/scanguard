@@ -284,3 +284,60 @@ func TestTallyIsCappedAndRanked(t *testing.T) {
 func writeFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o600)
 }
+
+// Range-escalation bans sit at a known width, so they are found with one masked
+// map lookup and never join the containment scan; turning escalation off moves
+// them into it, and operator ranges at other widths still go there.
+func TestSubnetWidthBansUseTheMaskedLookup(t *testing.T) {
+	for _, tc := range []struct{ rng, inside, outside, manual, manualIn string }{
+		{"192.0.2.0/24", "192.0.2.77/32", "192.0.3.1/32", "198.51.0.0/16", "198.51.7.7/32"},
+		{"2001:db8:1::/48", "2001:db8:1:42::/64", "2001:db8:2::/64", "2001:db9::/32", "2001:db9:0:5::/64"},
+	} {
+		now := time.Now()
+		m := newMemStore(100)
+		m.setKeyWidths(32, 64, 24, 48)
+		if err := m.put(ban(tc.rng, now.Add(time.Hour))); err != nil {
+			t.Fatal(err)
+		}
+		found := func(where string) {
+			t.Helper()
+			if b, ok := m.get(key(tc.inside), now); !ok || b.Key != tc.rng {
+				t.Errorf("%s: %s not found under %s (%+v)", where, tc.inside, tc.rng, b)
+			}
+		}
+		found("after put")
+		if len(m.wide) != 0 {
+			t.Errorf("%s joined the containment scan: wide=%v", tc.rng, m.wide)
+		}
+		if _, ok := m.get(key(tc.outside), now); ok {
+			t.Errorf("%s outside %s was found", tc.outside, tc.rng)
+		}
+		m.countHit(key(tc.inside))
+		if b, _ := m.get(key(tc.inside), now); b.Hits != 1 {
+			t.Errorf("countHit missed the range: hits=%d", b.Hits)
+		}
+
+		snap := m.snapshot()
+		m.restore(snap, now)
+		found("after restore")
+		m.replaceAll(snap, now)
+		found("after replaceAll")
+		if len(m.wide) != 0 {
+			t.Errorf("restore/replaceAll put %s in wide: %v", tc.rng, m.wide)
+		}
+
+		m.setKeyWidths(32, 64, 0, 0)
+		if len(m.wide) != 1 {
+			t.Errorf("with escalation off, wide=%v, want the range", m.wide)
+		}
+		found("with escalation off")
+
+		m.setKeyWidths(32, 64, 24, 48)
+		if err := m.put(ban(tc.manual, now.Add(time.Hour))); err != nil {
+			t.Fatal(err)
+		}
+		if b, ok := m.get(key(tc.manualIn), now); !ok || b.Key != tc.manual {
+			t.Errorf("manual range %s not found for %s (%+v)", tc.manual, tc.manualIn, b)
+		}
+	}
+}

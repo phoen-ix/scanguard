@@ -971,7 +971,15 @@ var RULE_SCHEMA = [
     { p: "enforcement.tarpit.enabled", t: "bool", l: "Tarpit instead of rejecting at once" },
     { p: "enforcement.tarpit.delay", t: "text", l: "Tarpit delay" },
     { p: "enforcement.tarpit.maxConcurrent", t: "int", l: "Max concurrent tarpits",
-      h: "Every tarpitted request holds a connection open. Too high and a scanner turns this into a denial of service against you." }
+      h: "Every tarpitted request holds a connection open. Too high and a scanner turns this into a denial of service against you." },
+    { p: "enforcement.subnet.enabled", t: "bool", l: "Ban the whole range of repeat offenders",
+      h: "Once enough sources in one range have been banned, ban the range. It also refuses innocent neighbours: Tor exits, shared hosting, CGNAT. Never covers the allowlist or trusted proxies." },
+    { p: "enforcement.subnet.threshold", t: "int", l: "Banned sources per range" },
+    { p: "enforcement.subnet.window", t: "text", l: "Within", h: "e.g. 24h" },
+    { p: "enforcement.subnet.ipv4Prefix", t: "int", l: "IPv4 range width",
+      h: "Must be wider than the IPv4 ban-key width, e.g. 24." },
+    { p: "enforcement.subnet.ipv6Prefix", t: "int", l: "IPv6 range width",
+      h: "Must be wider than the IPv6 ban-key width, e.g. 48." }
   ]}
 ];
 

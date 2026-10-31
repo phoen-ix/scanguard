@@ -261,3 +261,51 @@ func TestUserAgentBucket(t *testing.T) {
 		t.Errorf("the remembered set grew to %d, want at most %d", n, maxDistinctPaths)
 	}
 }
+
+// Range escalation counts distinct banned members of a range within the window.
+func TestSubnetMembers(t *testing.T) {
+	rng := key("198.51.100.0/24")
+	m := func(i int) netip.Prefix { return key(fmt.Sprintf("198.51.100.%d/32", i)) }
+	const window = time.Hour
+	start := time.Now()
+
+	cases := []struct {
+		name  string
+		steps func(c *counters) (int, bool)
+		wantN int
+		trip  bool
+	}{
+		{"the threshold-th member trips", func(c *counters) (int, bool) {
+			c.noteSubnetBan(rng, m(1), start, 3, window, false)
+			c.noteSubnetBan(rng, m(2), start, 3, window, false)
+			return c.noteSubnetBan(rng, m(3), start, 3, window, false)
+		}, 3, true},
+		{"a repeated member counts once", func(c *counters) (int, bool) {
+			c.noteSubnetBan(rng, m(1), start, 3, window, false)
+			c.noteSubnetBan(rng, m(1), start, 3, window, false)
+			return c.noteSubnetBan(rng, m(2), start, 3, window, false)
+		}, 2, false},
+		{"members older than the window drop", func(c *counters) (int, bool) {
+			c.noteSubnetBan(rng, m(1), start, 3, window, false)
+			c.noteSubnetBan(rng, m(2), start, 3, window, false)
+			return c.noteSubnetBan(rng, m(3), start.Add(window+time.Second), 3, window, false)
+		}, 1, false},
+		{"switching dry run starts over", func(c *counters) (int, bool) {
+			c.noteSubnetBan(rng, m(1), start, 3, window, true)
+			c.noteSubnetBan(rng, m(2), start, 3, window, true)
+			return c.noteSubnetBan(rng, m(3), start, 3, window, false)
+		}, 1, false},
+		{"a trip starts the count over", func(c *counters) (int, bool) {
+			for i := 1; i <= 3; i++ {
+				c.noteSubnetBan(rng, m(i), start, 3, window, false)
+			}
+			return c.noteSubnetBan(rng, m(4), start, 3, window, false)
+		}, 1, false},
+	}
+	for _, tc := range cases {
+		n, trip := tc.steps(newCounters(1000))
+		if n != tc.wantN || trip != tc.trip {
+			t.Errorf("%s: got (%d, %v), want (%d, %v)", tc.name, n, trip, tc.wantN, tc.trip)
+		}
+	}
+}

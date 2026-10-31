@@ -739,6 +739,7 @@ func configSummary(s *settings) map[string]interface{} {
 			detectorRateAbuse:  s.rate.Enabled,
 			detectorPayload:    s.payload.Enabled,
 			detectorUARotation: s.uaRot.Enabled,
+			detectorSubnet:     s.subnet.Enabled,
 		},
 		"crawlers": s.uaCrawlers,
 		"notify": map[string]bool{

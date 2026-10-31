@@ -139,6 +139,27 @@ func TestInvalidValuesAreRejected(t *testing.T) {
 		"uaRotation leak 0": func(c *Config) {
 			c.Detectors.UARotation.Leak = "0"
 		},
+		"subnet ipv4Prefix not wider than the ban key": func(c *Config) {
+			c.Enforcement.Subnet = SubnetConfig{Enabled: true, IPv4Prefix: 32}
+		},
+		"subnet ipv4Prefix below /8": func(c *Config) {
+			c.Enforcement.Subnet = SubnetConfig{Enabled: true, IPv4Prefix: 7}
+		},
+		"subnet ipv6Prefix not wider than the ban key": func(c *Config) {
+			c.Enforcement.Subnet = SubnetConfig{Enabled: true, IPv6Prefix: 64}
+		},
+		"subnet ipv6Prefix below /16": func(c *Config) {
+			c.Enforcement.Subnet = SubnetConfig{Enabled: true, IPv6Prefix: 15}
+		},
+		"subnet threshold 1": func(c *Config) {
+			c.Enforcement.Subnet = SubnetConfig{Enabled: true, Threshold: 1}
+		},
+		"subnet window 0": func(c *Config) {
+			c.Enforcement.Subnet.Window = "0"
+		},
+		"subnet window not a duration": func(c *Config) {
+			c.Enforcement.Subnet.Window = "soon"
+		},
 	}
 
 	for name, mutate := range cases {
@@ -395,5 +416,27 @@ func TestRulesAddedFromOmmTraffic(t *testing.T) {
 		if s.uaMatcher.match(ua) {
 			t.Errorf("default user-agents falsely match %q", ua)
 		}
+	}
+}
+
+// The opt-in features ship off, with the defaults the README documents, and range
+// widths are not validated while range escalation is off: a deployment that
+// already keys bans at /24 must keep starting.
+func TestSubnetAndUARotationDefaults(t *testing.T) {
+	c := CreateConfig()
+	if got, want := c.Enforcement.Subnet, (SubnetConfig{IPv4Prefix: 24, IPv6Prefix: 48, Threshold: 5, Window: "24h"}); got != want {
+		t.Errorf("subnet defaults = %+v, want %+v", got, want)
+	}
+	if got, want := c.Detectors.UARotation, (UARotationConfig{Capacity: 8, Leak: "60s"}); got != want {
+		t.Errorf("uaRotation defaults = %+v, want %+v", got, want)
+	}
+
+	c.ClientIP.IPv4Prefix = 24
+	s, err := c.parse()
+	if err != nil {
+		t.Fatalf("subnet off with clientIP.ipv4Prefix 24 was refused: %v", err)
+	}
+	if s.subnet.Enabled || s.uaRot.Enabled || s.subnetWindow != 24*time.Hour || s.uaRotLeak != time.Minute {
+		t.Errorf("parsed subnet=%+v window=%s uaRot=%+v leak=%s", s.subnet, s.subnetWindow, s.uaRot, s.uaRotLeak)
 	}
 }

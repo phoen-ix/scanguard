@@ -273,6 +273,32 @@ type EnforcementConfig struct {
 	// Decay is how long a source must behave before its offence count drops.
 	Decay  string       `json:"decay,omitempty"`
 	Tarpit TarpitConfig `json:"tarpit,omitempty"`
+	Subnet SubnetConfig `json:"subnet,omitempty"`
+}
+
+// SubnetConfig escalates from banning sources to banning the range they share,
+// once Threshold distinct sources in one range have been banned within Window.
+// Off by default.
+//
+// Research scanners walk whole ranges, so every ban is a fresh first offence and
+// the escalation ladder never engages. Over 15 days at one deployment 205 banned
+// addresses sat in a single /24 and 176 in another (Palo Alto Cortex Xpanse),
+// 184 in two Censys-style /24s, and about 50 in each of three IPv6 /48s.
+// Simulating 5 bans per /24 within 24h: 28 ranges banned, 316 backend probes
+// stopped, 1146 per-address ban entries saved. The would-be collateral was 21
+// never-banned addresses, almost all other scanners plus Tor exits.
+//
+// That collateral is the cost: a range ban also refuses innocent neighbours —
+// Tor exits, shared hosting, CGNAT. It never covers the allowlist or
+// trustedProxies (see refuseDangerousBan), it climbs one escalation ladder per
+// range, and only automatic bans count towards it. IPv4Prefix and IPv6Prefix
+// must be wider than clientIP's ban-key widths.
+type SubnetConfig struct {
+	Enabled    bool   `json:"enabled,omitempty"`
+	IPv4Prefix int    `json:"ipv4Prefix,omitempty"`
+	IPv6Prefix int    `json:"ipv6Prefix,omitempty"`
+	Threshold  int    `json:"threshold,omitempty"`
+	Window     string `json:"window,omitempty"`
 }
 
 // TarpitConfig slows banned clients down instead of rejecting them outright.
@@ -438,6 +464,7 @@ func CreateConfig() *Config {
 				Delay:         "3s",
 				MaxConcurrent: 50,
 			},
+			Subnet: SubnetConfig{IPv4Prefix: 24, IPv6Prefix: 48, Threshold: 5, Window: "24h"},
 		},
 		Notify: NotifyConfig{
 			Timeout: "5s",
@@ -619,6 +646,8 @@ type settings struct {
 	tarpitEnabled bool
 	tarpitDelay   time.Duration
 	tarpitMax     int
+	subnet        SubnetConfig
+	subnetWindow  time.Duration
 
 	notify        NotifyConfig
 	notifyTimeout time.Duration
@@ -986,6 +1015,36 @@ func (c *Config) parseEnforcement(s *settings) error {
 		return fmt.Errorf("enforcement.tarpit.maxConcurrent: %d is above the ceiling of %d", n, maxTarpitConcurrent)
 	}
 	s.tarpitMax = n
+
+	s.subnet = c.Enforcement.Subnet
+	if s.subnet.IPv4Prefix == 0 {
+		s.subnet.IPv4Prefix = 24
+	}
+	if s.subnet.IPv6Prefix == 0 {
+		s.subnet.IPv6Prefix = 48
+	}
+	if s.subnet.Threshold == 0 {
+		s.subnet.Threshold = 5
+	}
+	if s.subnetWindow, err = parseDuration("enforcement.subnet.window", c.Enforcement.Subnet.Window, 24*time.Hour); err != nil {
+		return err
+	}
+	if s.subnetWindow == permanent {
+		return errors.New("enforcement.subnet.window must be a positive duration")
+	}
+	// Only when enabled: a deployment that already keys bans at /24 would
+	// otherwise fail to start over a setting it does not use.
+	if s.subnet.Enabled {
+		if p := s.subnet.IPv4Prefix; p < 8 || p >= s.ipv4Prefix {
+			return fmt.Errorf("enforcement.subnet.ipv4Prefix: %d must be 8 or more and wider than clientIP.ipv4Prefix (%d)", p, s.ipv4Prefix)
+		}
+		if p := s.subnet.IPv6Prefix; p < 16 || p >= s.ipv6Prefix {
+			return fmt.Errorf("enforcement.subnet.ipv6Prefix: %d must be 16 or more and wider than clientIP.ipv6Prefix (%d)", p, s.ipv6Prefix)
+		}
+		if s.subnet.Threshold < 2 {
+			return fmt.Errorf("enforcement.subnet.threshold: %d must be at least 2", s.subnet.Threshold)
+		}
+	}
 	return nil
 }
 

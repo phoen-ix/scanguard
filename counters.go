@@ -43,6 +43,11 @@ type sourceState struct {
 	// banUntil is when the ban issued for the last offence ran out. Decay is
 	// measured from it rather than from lastOffence; see recordOffence.
 	banUntil time.Time
+
+	// On a RANGE key's record only: the sources inside it banned within
+	// enforcement.subnet.window, and the dry-run mode they were counted in.
+	subnetHits map[netip.Prefix]time.Time
+	subnetDry  bool
 }
 
 // counters is the local per-source counter table, hard-capped and LRU-evicted.
@@ -244,6 +249,40 @@ func (c *counters) noteRequest(key netip.Prefix, now time.Time, rps, burst int) 
 		return true
 	}
 	return false
+}
+
+// noteSubnetBan records that member, a source inside rangeKey, was just banned,
+// and reports how many distinct members were banned within window and whether
+// that reached threshold. A trip starts the count over.
+//
+// Members counted in a dry run are dropped when enforcement starts, and the
+// other way round: hypothetical bans must not add up to a real range ban.
+func (c *counters) noteSubnetBan(rangeKey, member netip.Prefix, now time.Time, threshold int, window time.Duration, dry bool) (int, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	st := c.getLocked(rangeKey, now)
+	if st.subnetDry != dry {
+		st.subnetHits = nil
+		st.subnetDry = dry
+	}
+	if st.subnetHits == nil {
+		st.subnetHits = make(map[netip.Prefix]time.Time)
+	}
+	cutoff := now.Add(-window)
+	for m, at := range st.subnetHits {
+		if !at.After(cutoff) {
+			delete(st.subnetHits, m)
+		}
+	}
+	st.subnetHits[member] = now
+
+	n := len(st.subnetHits)
+	if n >= threshold {
+		st.subnetHits = nil
+		return n, true
+	}
+	return n, false
 }
 
 // recordOffence advances the escalation ladder for a source and returns its new

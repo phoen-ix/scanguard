@@ -1,6 +1,7 @@
 package scanguard
 
 import (
+	"fmt"
 	"net/http"
 	"net/netip"
 	"time"
@@ -79,38 +80,7 @@ func (rt *runtime) applyBan(s *settings, res resolution, det *detection, req *ht
 	// matched anything; the pattern that fired can.
 	rt.topRules.add(det.detector + ": " + det.rule)
 
-	// A dry run records the ban in the shadow list instead of the real one. It is
-	// still a ban as far as every counter and every report is concerned — it just
-	// cannot reject anything, and it never reaches disk or Redis. Without this the
-	// source is re-detected on its next request and the ladder runs away; see the
-	// comment on runtime.shadow.
-	if s.dryRun {
-		if err := rt.shadow.put(ban); err != nil {
-			logWarn(rt.name, "could not record dry-run ban", map[string]interface{}{
-				"key":   ban.Key,
-				"error": err.Error(),
-			})
-		} else {
-			rt.stats.BansIssued.Add(1)
-		}
-	} else {
-		if err := rt.store().put(ban); err != nil {
-			logWarn(rt.name, "could not record ban", map[string]interface{}{
-				"key":   ban.Key,
-				"error": err.Error(),
-			})
-		} else {
-			rt.stats.BansIssued.Add(1)
-			// Persist immediately on a ban-list change. Counter updates deliberately
-			// do not trigger a write — rewriting the snapshot on every counter bump
-			// under a 404 flood would burn through IOPS or an SD card.
-			if fs, ok := rt.store().(*fileStore); ok {
-				if err := fs.flush(); err != nil {
-					logWarn(rt.name, "could not persist state", map[string]interface{}{"error": err.Error()})
-				}
-			}
-		}
-	}
+	rt.putBan(s, ban)
 
 	rt.record(Event{
 		Kind:     eventBan,
@@ -144,7 +114,120 @@ func (rt *runtime) applyBan(s *settings, res resolution, det *detection, req *ht
 		"ipSource": res.source,
 	})
 
+	if s.subnet.Enabled {
+		rangeKey := banKey(res.client, s.subnet.IPv4Prefix, s.subnet.IPv6Prefix)
+		if n, trip := rt.counters.noteSubnetBan(rangeKey, res.key, now, s.subnet.Threshold, s.subnetWindow, s.dryRun); trip {
+			rt.applySubnetBan(s, rangeKey, n, res, req, now)
+		}
+	}
 	return ban
+}
+
+// putBan writes a ban to the list this instance enforces from.
+//
+// A dry run records the ban in the shadow list instead of the real one. It is
+// still a ban as far as every counter and every report is concerned — it just
+// cannot reject anything, and it never reaches disk or Redis. Without this the
+// source is re-detected on its next request and the ladder runs away; see the
+// comment on runtime.shadow.
+func (rt *runtime) putBan(s *settings, ban Ban) {
+	if s.dryRun {
+		if err := rt.shadow.put(ban); err != nil {
+			logWarn(rt.name, "could not record dry-run ban", map[string]interface{}{
+				"key":   ban.Key,
+				"error": err.Error(),
+			})
+			return
+		}
+		rt.stats.BansIssued.Add(1)
+		return
+	}
+	if err := rt.store().put(ban); err != nil {
+		logWarn(rt.name, "could not record ban", map[string]interface{}{
+			"key":   ban.Key,
+			"error": err.Error(),
+		})
+		return
+	}
+	rt.stats.BansIssued.Add(1)
+	// Persist immediately on a ban-list change. Counter updates deliberately do
+	// not trigger a write — rewriting the snapshot on every counter bump under a
+	// 404 flood would burn through IOPS or an SD card.
+	if fs, ok := rt.store().(*fileStore); ok {
+		if err := fs.flush(); err != nil {
+			logWarn(rt.name, "could not persist state", map[string]interface{}{"error": err.Error()})
+		}
+	}
+}
+
+// applySubnetBan bans rangeKey once enforcement.subnet.threshold of its sources
+// have been banned within the window. Only applyBan calls it, so only automatic
+// bans count: banManual and the crawler "block" policy never get there.
+//
+// The range climbs its own escalation ladder, keyed by the range. The event has
+// no Client, so reportAbuse skips it: a range is never reported to AbuseIPDB, and
+// the member whose ban tripped it has already been reported on its own.
+func (rt *runtime) applySubnetBan(s *settings, rangeKey netip.Prefix, members int, res resolution, req *http.Request, now time.Time) {
+	// The same refusal an operator's range ban gets: never over the allowlist or
+	// a trusted proxy. Said once per range, because the range keeps tripping.
+	if status, msg := refuseDangerousBan(s, rangeKey); status != 0 {
+		warnOnce(rt.name, "subnet-refused:"+rangeKey.String(), "range escalation skipped a protected range",
+			map[string]interface{}{"key": rangeKey.String(), "reason": msg})
+		return
+	}
+	offence, fresh := rt.counters.recordOffence(rangeKey, now, s.decay, s.banDuration)
+	if !fresh {
+		return
+	}
+	duration := s.banDuration(offence)
+	rule := fmt.Sprintf("%d sources in %s within %s", s.subnet.Threshold, rangeKey, formatDuration(s.subnetWindow))
+
+	ban := Ban{
+		Key:      rangeKey.String(),
+		Detector: detectorSubnet,
+		Rule:     rule,
+		Reason:   detectorSubnet + ": " + rule,
+		Created:  now.UTC(),
+		Offences: offence,
+		LastPath: truncate(req.URL.Path, 512),
+		LastUA:   truncate(req.UserAgent(), 256),
+	}
+	if duration != permanent {
+		ban.Expires = now.Add(duration).UTC()
+	}
+	rt.putBan(s, ban)
+
+	rt.stats.Detections.Add(1)
+	rt.topDetectors.add(detectorSubnet)
+	rt.topRules.add(detectorSubnet + ": " + rule)
+
+	rt.record(Event{
+		Kind:     eventBan,
+		Key:      ban.Key,
+		Detector: detectorSubnet,
+		Rule:     rule,
+		Method:   req.Method,
+		Host:     req.Host,
+		Path:     req.URL.Path,
+		UA:       req.UserAgent(),
+		BanFor:   formatDuration(duration),
+		DryRun:   s.dryRun,
+	})
+
+	logWarn(rt.name, "banned range", map[string]interface{}{
+		"key":      ban.Key,
+		"members":  members,
+		"detector": detectorSubnet,
+		"rule":     rule,
+		"offence":  offence,
+		"duration": formatDuration(duration),
+		"dryRun":   s.dryRun,
+		"client":   res.client.String(),
+		"host":     truncate(req.Host, 253),
+		"method":   req.Method,
+		"path":     req.URL.Path,
+		"ua":       ban.LastUA,
+	})
 }
 
 // banManual records an operator-initiated ban from the admin UI.
