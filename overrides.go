@@ -43,7 +43,9 @@ type Overrides struct {
 // policy into "" — which reads as "ignore" — with no log line. Bump this whenever
 // a field is added to an editable section. A mismatch is refused loudly and the
 // file configuration runs; see runtime.loadStoredOverridesLocked.
-const overridesVersion = 1
+//
+// 2: detectors.uaRotation and enforcement.subnet.
+const overridesVersion = 2
 
 // compatible reports whether this override set was written against the editable
 // schema this build understands.

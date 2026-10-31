@@ -382,7 +382,7 @@ func TestUnusableSavedRulesAreIgnoredNotFatal(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
 
-	broken := `{"version":1,"bans":[],"overrides":{"version":1,"updated":"2026-01-01T00:00:00Z",` +
+	broken := `{"version":1,"bans":[],"overrides":{"version":2,"updated":"2026-01-01T00:00:00Z",` +
 		`"detectors":{"signatures":{"enabled":true,"patterns":["([unclosed"]}}}}`
 	if err := writeFile(path, broken); err != nil {
 		t.Fatal(err)
@@ -566,5 +566,46 @@ func TestAManualBanNarrowerThanTheKeyWidthIsRefused(t *testing.T) {
 	}
 	if got.Bits() != 64 {
 		t.Errorf("a bare address normalised to /%d, want /64", got.Bits())
+	}
+}
+
+// Both opt-in features are console-editable: switched on through the rule API
+// they act on the next request, and a value the parser refuses changes nothing.
+func TestUARotationAndSubnetAreEditable(t *testing.T) {
+	h, rt := consoleHandler(t, nil)
+
+	edit := editableOf(t, fetchRules(t, h), "effective")
+	if edit.Detectors.UARotation.Capacity != 8 || edit.Enforcement.Subnet.Threshold != 5 {
+		t.Fatalf("the editor does not see the defaults: uaRotation=%+v subnet=%+v",
+			edit.Detectors.UARotation, edit.Enforcement.Subnet)
+	}
+
+	bad := edit
+	bad.Enforcement.Subnet.Enabled = true
+	bad.Enforcement.Subnet.Threshold = 1
+	before := rt.settings()
+	if rec := ruleRequest(t, h, http.MethodPut, bad); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("threshold 1 returned %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+	if rt.settings() != before {
+		t.Error("a refused edit replaced the running configuration")
+	}
+
+	edit.Detectors.UARotation = UARotationConfig{Enabled: true, Capacity: 2, Leak: "60s"}
+	edit.Enforcement.Subnet.Enabled = true
+	edit.Enforcement.Subnet.Threshold = 2
+	if rec := ruleRequest(t, h, http.MethodPut, edit); rec.Code != http.StatusOK {
+		t.Fatalf("PUT rules returned %d: %s", rec.Code, rec.Body.String())
+	}
+
+	ua := func(s string) map[string]string { return map[string]string{"User-Agent": s} }
+	send(h, "GET", "/", "203.0.113.40:1", ua("agent-a"))
+	if got := send(h, "GET", "/", "203.0.113.40:1", ua("agent-b")).Code; got != 403 {
+		t.Errorf("user-agent rotation did not take effect, got %d", got)
+	}
+	send(h, "GET", "/wp-login.php", "192.0.2.1:1", nil)
+	send(h, "GET", "/wp-login.php", "192.0.2.2:1", nil)
+	if got := send(h, "GET", "/", "192.0.2.3:1", nil).Code; got != 403 {
+		t.Errorf("range escalation did not take effect, got %d", got)
 	}
 }
