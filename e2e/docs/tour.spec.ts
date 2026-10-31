@@ -74,7 +74,7 @@ async function open(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.locator('#app')).toBeVisible()
   // The last thing refresh() paints.
-  await expect(page.locator('#rules-form .rule-group')).toHaveCount(10)
+  await expect(page.locator('#rules-form .rule-group')).toHaveCount(11)
 }
 
 /** Viewport shot, or the box around `els` (capped at 2400 CSS px). */
@@ -122,7 +122,7 @@ test('access gate', async ({ page }) => {
   await page.fill('#token', TOKEN)
   await page.click('#gate-form button[type=submit]')
   await expect(page.locator('#app')).toBeVisible()
-  await expect(page.locator('#rules-form .rule-group')).toHaveCount(10)
+  await expect(page.locator('#rules-form .rule-group')).toHaveCount(11)
 })
 
 test.describe('with bans', () => {

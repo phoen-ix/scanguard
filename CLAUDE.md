@@ -66,6 +66,12 @@ Anything that starts Docker goes through `~/repos/.fleet/scripts/slot heavy scan
   `ci.yml` (matrix, the `sed`, and the render-check steps' `if:`), and in the
   e2e overlay `examples/docker-compose.e2e.yml`. Bump them together and re-run
   `streaming-check.sh`.
+- The harness keeps `enforcement.subnet` and `detectors.uaRotation` off (the
+  defaults). scanner-sim bans ten sources in 198.51.100.0/24 and `uniqueIp()`
+  hands out consecutive addresses, so tests' sources share /24s: with range
+  escalation on they would ban each other. The one e2e test that needs it
+  (`rules.spec.ts`, range escalation) enables it from the editor for itself, on
+  198.51.100.0/24, which scanner-sim only uses in its own harness.
 - Console e2e suite (`e2e/tests/`): one worker, because every test shares the
   harness's runtime; tests own their data through `uniqueIp()` sources, and
   rule-editor tests revert to the file config after each test. The read-only,

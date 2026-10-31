@@ -15,7 +15,7 @@ test('says it is read only and offers no control that would change anything', as
   for (const name of ['Address or CIDR to ban', 'Ban duration', 'Ban reason']) await expect(page.getByLabel(name)).toBeDisabled()
   await expect(page.getByRole('button', { name: 'Ban', exact: true })).toBeDisabled()
 
-  await expect(page.locator('#rules-form .rule-group')).toHaveCount(10)
+  await expect(page.locator('#rules-form .rule-group')).toHaveCount(11)
   await expect(page.getByRole('button', { name: 'Save and apply' })).toBeDisabled()
   await expect(page.getByRole('button', { name: 'Revert to file config' })).toBeDisabled()
   await expect(page.locator('#rules-form').locator('input:enabled, textarea:enabled, select:enabled')).toHaveCount(0)

@@ -11,9 +11,9 @@ Inventory, 2026-10-31, from the repo root:
 ```bash
 # admin routes (serveAdmin) - 10 cases, 11 paths
 grep -oE 'case "/[^"]*"(, "[^"]*")*:' admin.go
-# console: panels, forms, inputs, buttons, filter chips, tiles, rule-editor groups, toasts - 43 items
+# console: panels, forms, inputs, buttons, filter chips, tiles, rule-editor groups, toasts - 44 items
 grep -oE '<h2[^>]*>[A-Za-z ]+|<(form|button|input)[^>]*id="[a-z-]+"|data-kind="[a-z]*"|tile\(tiles, "[^"]+"|\{ title: "[^"]+"|toast\("[^"]+' admin_ui.go
-# request-path features - 30 rows: the 8 detectors of the README "What it does" table,
+# request-path features - 32 rows: the 9 detectors of the README "What it does" table,
 # then one row per behaviour the Configuration reference's keys switch on (tuning
 # knobs such as capacities and timeouts fold into their detector's row)
 awk '/^## What it does/{f=1;next} /^## /{f=0} f' README.md | grep -oE '^\| \*\*[^*]+'
@@ -28,7 +28,7 @@ or `Authorization: Bearer`), **read-only operator** (`admin.readOnly`), **SSO us
 `e2e/fixtures/consoles.yml`, added to the running harness for the length of the run;
 two Traefik replicas sharing a Redis come from the overlay `examples/docker-compose.e2e.yml`.
 
-**Totals: 159 items — ✅ 139, ❌ 20** ((a) 2, (c) 18).
+**Totals: 162 items — ✅ 141, ❌ 21** ((a) 2, (c) 19).
 
 Test names are `file › [describe ›] title`.
 
@@ -68,7 +68,7 @@ Test names are `file › [describe ›] title`.
 | `/sso/` (SSO user) | ✅ `sweep.spec.ts › SSO console without an identity (/sso-anon/) › as a guest: the API refuses with 401 and Unlock keeps the gate up` (no `X-Forwarded-User`; `sweep.spec.ts › SSO console (/sso/) › as a guest: …` is a signed-in user's first visit, before Unlock) | ✅ `sweep.spec.ts › SSO console (/sso/) › as its operator: every panel` |
 | `/orphan/` (operator, no detector) | ✅ `sweep.spec.ts › orphan console (/orphan/) › as a guest: …` | ✅ `… › as its operator: every panel` |
 
-## Console features (43, from the extraction command)
+## Console features (44, from the extraction command)
 
 | # | Item | Test |
 |---|---|---|
@@ -106,12 +106,13 @@ Test names are `file › [describe ›] title`.
 | 35 | editor group Distinct failing paths | ✅ same; `› a rejected edit (Leak interval: soon) …` |
 | 36 | editor group Brute force | ✅ `rules.spec.ts › every kind of field in every group round-trips: …` |
 | 37 | editor group Request rate | ✅ same |
-| 38 | editor group Payload probes | ✅ same |
-| 39 | editor group Allowlist | ✅ `rules.spec.ts › an allowlist edit exempts the range at once, and the ban form refuses it`; `› a rejected edit (Never-ban CIDRs: 10.0.0.0/33) …` |
-| 40 | editor group Enforcement (ladder, reject body, reject status) | ✅ `rules.spec.ts › every kind of field in every group round-trips: …`; `› a rejected edit (Reject status: 99) …` |
-| 41 | toast "Rules applied" | ✅ `rules.spec.ts › saving applies on the next request, is marked, and survives a reload` |
-| 42 | toast "Reverted to the file configuration" | ✅ `rules.spec.ts › Revert asks first, then hands control back to the file` |
-| 43 | toast "Banned …" (and "Unblocked …", "No ban found for …") | ✅ `bans.spec.ts › a manual ban from the form is listed, enforced, and lifted by unblock`, `› unblocking a ban that is already gone says so` |
+| 38 | editor group User-agent rotation | ✅ same |
+| 39 | editor group Payload probes | ✅ same |
+| 40 | editor group Allowlist | ✅ `rules.spec.ts › an allowlist edit exempts the range at once, and the ban form refuses it`; `› a rejected edit (Never-ban CIDRs: 10.0.0.0/33) …` |
+| 41 | editor group Enforcement (ladder, reject body, reject status, range escalation) | ✅ `rules.spec.ts › every kind of field in every group round-trips: …`; `› a rejected edit (Reject status: 99) …`; `› range escalation: three banned sources in one /24 ban the range, and unblock lifts it` |
+| 42 | toast "Rules applied" | ✅ `rules.spec.ts › saving applies on the next request, is marked, and survives a reload` |
+| 43 | toast "Reverted to the file configuration" | ✅ `rules.spec.ts › Revert asks first, then hands control back to the file` |
+| 44 | toast "Banned …" (and "Unblocked …", "No ban found for …") | ✅ `bans.spec.ts › a manual ban from the form is listed, enforced, and lifted by unblock`, `› unblocking a ban that is already gone says so` |
 
 ## Cross-cutting flows and states (24)
 
@@ -143,7 +144,7 @@ Test names are `file › [describe ›] title`.
 | Country column (geo lookup) | ❌ (a) needs ip-api.com (external, no simulator in the harness); lookup and caching: `notify_test.go TestGeoLookupIsAsyncAndCached`, `TestGeoDisabledMakesNoCalls` |
 | language switch, theme switch, registration, password reset, 2FA | not counted: the console is English only, follows the OS colour scheme, and has one credential (token or SSO header) |
 
-## Request-path features (30)
+## Request-path features (32)
 
 | Item | Test |
 |---|---|
@@ -162,9 +163,11 @@ Test names are `file › [describe ›] title`.
 | distinct-404 flood | ❌ (c) `examples/scanner-sim.sh` "Distinct 404 flood"; `TestBadPathBucketTripsAtCapacity`, `TestBadPathBucketLeaks` |
 | brute force (repeated 401/403) | ❌ (c) `TestResponseStatusDetectorBansOneRequestLate`, `TestAuthFailureWindow` (the harness's nginx answers no 401s) |
 | rate abuse | ❌ (c) `TestRateBucket` |
+| user-agent rotation (opt-in, off in the harness) | ❌ (c) `TestUserAgentBucket`, `TestUARotationBansACyclingSource`; under the interpreter by `tools/yaegi-smoke` |
 | SEO crawler policy per router | ❌ (c) `TestCrawler*` (13 tests in `scanguard_test.go`) |
 | tarpit | ❌ (c) `TestTarpitDelaysRejectedRequests`, `TestTarpitAbortsWhenTheClientDisconnects` |
 | escalation ladder and decay | ❌ (c) `TestEscalationLadderAndDecay`, `TestEscalationClimbsAcrossABanExpiry` |
+| subnet escalation (opt-in): a /24 of banned sources bans the range; unblock lifts it | ✅ `rules.spec.ts › range escalation: three banned sources in one /24 ban the range, and unblock lifts it` |
 | forwarded-header spoofing is attributed to the real peer | ❌ (c) `examples/scanner-sim.sh` "Spoofing"; `TestResolveWalksForwardedForRightToLeft` |
 | allowlisted user agents and paths | ❌ (c) `TestExemptRules`, `TestAllowlistedPathIsNotAWayAroundABan` |
 | bans survive a Traefik restart | ❌ (c) `ci.yml` integration "bans survive a restart"; `TestFileStoreRoundTrip` |

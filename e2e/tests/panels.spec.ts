@@ -24,8 +24,11 @@ test('detectors show which are on and how often each fired', async ({ page, requ
   expect(await probe(request, uniqueIp(), '/admin.php')).toBe(403)
   await unlock(page)
   const chips = page.locator('#detectors .dchip')
-  await expect(chips).toHaveCount(7)
+  await expect(chips).toHaveCount(9)
   await expect(chips.filter({ hasText: /^rate-abuse$/ })).toHaveAttribute('title', 'disabled')
+  // Opt-in, and off in the harness. A count is possible: the rule-editor test turns subnet on for a while.
+  await expect(chips.filter({ hasText: /^ua-rotation( · \d+)?$/ })).toHaveAttribute('title', 'disabled')
+  await expect(chips.filter({ hasText: /^subnet( · \d+)?$/ })).toHaveAttribute('title', 'disabled')
   await expect(chips.filter({ hasText: /^honeypot · \d+$/ })).toHaveAttribute('title', 'enabled')
 })
 
