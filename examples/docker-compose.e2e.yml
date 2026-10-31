@@ -6,11 +6,11 @@
 # both together.
 services:
   redis:
-    image: redis:8.10.2-alpine3.23
+    image: redis:8.10.3-alpine3.23
     expose: ["6379"]
 
   replica-a:
-    image: traefik:v3.7.16
+    image: traefik:v3.7.17
     command: [--configFile=/etc/traefik/traefik.yml]
     ports:
       - "${SG_REPLICA_A_WEB:-127.0.0.1:8801}:80"
@@ -22,7 +22,7 @@ services:
     depends_on: [site, redis]
 
   replica-b:
-    image: traefik:v3.7.16
+    image: traefik:v3.7.17
     command: [--configFile=/etc/traefik/traefik.yml]
     ports:
       - "${SG_REPLICA_B_WEB:-127.0.0.1:8802}:80"

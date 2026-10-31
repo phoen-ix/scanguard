@@ -98,14 +98,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        traefik: ["v3.7.16", "v3.7", "v3.6"]
+        traefik: ["v3.7.17", "v3.7", "v3.6"]
     steps:
       - uses: actions/checkout@v7
 
       - name: start the harness
         working-directory: examples
         run: |
-          sed -i "s|image: traefik:v3.7.16|image: traefik:${{ matrix.traefik }}|" docker-compose.yml
+          sed -i "s|image: traefik:v3.7.17|image: traefik:${{ matrix.traefik }}|" docker-compose.yml
           docker compose up -d
           for i in $(seq 1 30); do
             curl -sf http://localhost:18081/api/overview >/dev/null && break
@@ -130,11 +130,11 @@ jobs:
       # The docs tour (e2e/docs/) as a render check of the console, while
       # scanner-sim.sh's bans are there to render. Once, on the pinned Traefik.
       - uses: actions/setup-node@v7
-        if: matrix.traefik == 'v3.7.16'
+        if: matrix.traefik == 'v3.7.17'
         with:
           node-version: "26"
       - name: console render check (docs tour)
-        if: matrix.traefik == 'v3.7.16'
+        if: matrix.traefik == 'v3.7.17'
         working-directory: e2e
         run: |
           npm ci --no-audit --no-fund
@@ -142,7 +142,7 @@ jobs:
           DOCS_SCREENSHOT_DIR="$RUNNER_TEMP/screenshots" \
             npx playwright test -c playwright.docs.config.ts --output "$RUNNER_TEMP/docs-run"
       - uses: actions/upload-artifact@v7
-        if: failure() && matrix.traefik == 'v3.7.16'
+        if: failure() && matrix.traefik == 'v3.7.17'
         with:
           name: docs-run
           path: ${{ runner.temp }}/docs-run/
