@@ -10,6 +10,8 @@ One artifact. No sidecar, no database, no agent. MIT.
 
 <img src="docs/screenshots/console-overview.png" alt="The scanguard console: request and ban counters, then the active ban list with the detector and rule behind each ban" width="800">
 
+**Status:** [v0.2.0](https://github.com/phoen-ix/scanguard/releases/tag/v0.2.0), tested against Traefik v3.7.17.
+
 </div>
 
 ---
@@ -28,6 +30,8 @@ experimental:
       version: v0.2.0
 ```
 
+**Contents:** [What it does](#what-it-does) · [The console](#the-console) · [Honest comparison](#honest-comparison) · [Install](#install) · [⚠️ Client IP](#-client-ip-or-how-to-take-your-own-site-down) · [⚠️ WebSockets, SSE and gRPC](#-websockets-sse-and-grpc) · [Firewall](#blocking-at-the-firewall) · [Configuration](#configuration) · [Development](#development) · [Performance](#performance) · [Limitations](#limitations) · [Documentation](#documentation)
+
 ## What it does
 
 | | |
@@ -36,37 +40,45 @@ experimental:
 | **Distinct-404 floods** | A leaky bucket over *distinct* failing paths — so a scanner walking a wordlist is caught, and a real user hammering one broken link never is. |
 | **Honeypots** | Paths you invent that no legitimate client could know. One hit, instant ban, effectively zero false positives. |
 | **Scanner user-agents** | nikto, sqlmap, nuclei, masscan, zgrab and friends. Generic clients like `curl` and `python-requests` are deliberately *not* in the defaults. |
-| **User-agent rotation** | Opt-in (`detectors.uaRotation`). One source cycling through distinct user-agents: over 15 days of production traffic 133 banned scanners used six or more within 60s, while real Googlebot peaked at five. A leaky bucket over *distinct* user-agents, so it is a leak rate, not a window. The false-positive risk is many real users behind one address — CGNAT, corporate NAT, a shared IPv6 /64. |
-| **SEO crawlers** | MJ12bot, AhrefsBot, SemrushBot and friends, as a separate opt-in: `detectors.userAgent.crawlers` is `ignore` (default), `ban`, `block` or `exempt`. They are not scanners, so they get their own switch rather than being smuggled into another rule. Search engines are never on the list. **This is the one setting that can differ per router** — see [Crawlers, per router](#crawlers-per-router). |
+| **User-agent rotation** | Opt-in (`detectors.uaRotation`): a leaky bucket over the *distinct* user-agents of one source. In 15 days of production traffic 133 banned scanners used six or more within 60s; real Googlebot peaked at five. Risk: many real users behind one address (CGNAT, corporate NAT, a shared IPv6 /64). |
+| **SEO crawlers** | MJ12bot, AhrefsBot, SemrushBot and friends, as their own opt-in switch, since they are not scanners: `detectors.userAgent.crawlers` is `ignore` (default), `ban`, `block` or `exempt`. Search engines are never on the list. **The one setting that can differ per router** — see [Crawlers, per router](#crawlers-per-router). |
 | **Brute force** | Repeated 401/403 from your real login endpoints. |
 | **Rate abuse** | Token bucket per source, independent of status code. |
 | **Injection payloads** | SQLi, traversal, template injection and XSS probes in the query string and optionally the body. Checked in both raw and decoded form. |
 
 Every detector is individually switchable, and every threshold is configurable.
 
-Bans escalate (`1h → 24h → 7d → permanent`), decay when a source behaves, survive
-a Traefik restart, and can be pushed to a webhook, Discord/Slack/ntfy/Gotify, or
-AbuseIPDB.
+- **Escalating bans:** `1h → 24h → 7d → permanent`, dropping a rung when a source behaves.
+- **Persistent:** bans survive a Traefik restart.
+- **Notifications:** a webhook, Discord/Slack/ntfy/Gotify, or AbuseIPDB.
 
-**Range escalation** (`enforcement.subnet`, opt-in). Research scanners walk whole
-ranges, so every address arrives as a fresh first offence and the ladder never
-engages: one deployment banned 205 distinct addresses in a single /24 in 15 days,
-every one at rung 1. With range escalation on, the fifth source banned inside one
-/24 (IPv6: /48) within 24h bans the whole range, which then climbs one ladder of
-its own. Replayed over those 15 days it would have stopped 316 backend probes and
-saved 1146 ban entries; the collateral was 21 addresses never banned themselves,
-almost all other scanners and Tor exits. That is the risk: a range ban also hits
-innocent neighbours — Tor exits, shared hosting, CGNAT. A range that overlaps the
-allowlist or `trustedProxies` is never banned (refused, and logged once), and only
-automatic bans count towards one: manual bans and crawler `block` do not.
+### Range escalation (opt-in)
+
+`enforcement.subnet` bans a whole range once enough of its addresses have been banned.
+
+- **Why:** research scanners walk whole ranges, so every address arrives as a fresh
+  first offence and the ladder never engages. One deployment banned 205 distinct
+  addresses in a single /24 in 15 days, every one at rung 1.
+- **How:** the fifth source banned inside one /24 (IPv6: /48) within 24h bans the
+  whole range, which then climbs one ladder of its own.
+- **Replayed over those 15 days**, it would have stopped 316 backend probes and
+  saved 1146 ban entries. The collateral was 21 addresses never banned
+  themselves, almost all other scanners and Tor exits.
+- **The risk:** a range ban also hits innocent neighbours — Tor exits, shared
+  hosting, CGNAT.
+- **Guards:** a range that overlaps the allowlist or `trustedProxies` is never
+  banned (refused, and logged once). Only automatic bans count towards one:
+  manual bans and crawler `block` do not.
 
 ## The console
 
 <div align="center"><em>Your own router, on your own host or port — not a tab in the Traefik dashboard.</em></div>
 
-Active bans with the rule that caught them, one-click unblock, manual ban by IP or
-CIDR, a live activity feed, most-probed paths, top sources, and a **full rule
-editor**. It is one self-contained page: no build step, no npm, no CDN.
+- **Bans:** the active list with the rule that caught each, one-click unblock, and
+  manual ban by IP or CIDR.
+- **Traffic:** a live activity feed, most-probed paths and top sources.
+- **Rules:** a **full rule editor** (below).
+- **Self-contained:** one page, no build step, no npm, no CDN.
 
 <img src="docs/screenshots/console-activity.png" alt="The live activity feed filtered to bans: time, source, detector, method, path and the rule that fired" width="800">
 
@@ -84,9 +96,11 @@ no file to edit.
 
 Traefik's configuration is one-way: it is decoded once when the middleware is
 built, and nothing can write back to it. Writing to the file provider instead
-would be worse — every write trips fsnotify, rebuilds the whole router tree and
-re-runs `New()` for every plugin middleware on every router. So scanguard keeps
-its own override store, saved beside the ban list and restored at startup.
+would be worse: every write trips fsnotify, rebuilds the whole router tree and
+re-runs `New()` for every plugin middleware on every router.
+
+So scanguard keeps its own override store, saved beside the ban list and restored
+at startup.
 
 - **Only what you change is taken over.** Edit a honeypot and the console owns
   `detectors`; `enforcement` keeps tracking your YAML. The editor marks changed
@@ -100,16 +114,18 @@ its own override store, saved beside the ban list and restored at startup.
 - **`clientIP`, `store`, `admin` and `notify` are not editable.** They hold
   secrets, or must agree with Traefik's *static* configuration that nothing at
   runtime can change — see the comment at the top of `overrides.go`.
+- **Replicas:** with the Redis backend, a rule change on one replica reaches the
+  others on their next refresh, exactly like a ban.
 
-With the Redis backend, a rule change on one replica reaches the others on their
-next refresh, exactly like a ban.
+### Why not a dashboard tab
 
 **Traefik plugins cannot extend the Traefik dashboard.** The dashboard is a
-compiled-in single-page app with no extension point;
-[traefik#8684](https://github.com/traefik/traefik/issues/8684) has been open since
-January 2022, and the dashboard's own CSP blocks embedding a plugin page in an
-iframe. So scanguard serves its console on a router you define. Put it on a
-private entrypoint and chain your own auth in front of it.
+compiled-in single-page app with no extension point
+([traefik#8684](https://github.com/traefik/traefik/issues/8684), open since
+January 2022), and its own CSP blocks embedding a plugin page in an iframe.
+
+So scanguard serves its console on a router you define. Put it on a private
+entrypoint and chain your own auth in front of it.
 
 ## Honest comparison
 
@@ -188,62 +204,23 @@ http:
 
 ### Crawlers, per router
 
-`detectors.userAgent.crawlers` is the one setting read from the middleware
-definition that handled the request rather than from the instance. That exists
-because a single instance often protects both placeholder hosts, which have
-nothing to crawl, and a real site, which wants crawling — and splitting them into
-two `instanceName`s to express that would split the ban list and the console too.
-
-```yaml
-http:
-  middlewares:
-    # Placeholder hosts: refuse crawlers.
-    scanguard-parked:
-      plugin:
-        scanguard: &sg
-          instanceName: prod
-          detectors:
-            userAgent: { enabled: true, useDefaults: true, crawlers: block }
-
-    # Real content: same instance, same ban list, opposite answer.
-    scanguard-content:
-      plugin:
-        scanguard:
-          <<: *sg
-          detectors:
-            userAgent: { enabled: true, useDefaults: true, crawlers: ignore }
-```
+`detectors.userAgent.crawlers` is read from the middleware definition that handled
+the request, not from the instance. So placeholder hosts can refuse crawlers while
+a real site on the same instance, ban list and console welcomes them.
 
 **Prefer `block` to `ban` when the instance also protects a site you want
-crawled.** The difference is where the decision is recorded:
+crawled:**
 
-| value | effect |
-| --- | --- |
-| `ignore` (default) | the crawler list is unused |
-| `ban` | writes a ban record — the crawler is then refused on **every** router this instance protects, and escalates |
-| `block` | refuses the crawler on **this router only**, with `rejectStatus`. No ban record, no offence, no escalation |
-| `exempt` | adds the list to the User-Agent allowlist, so a matching crawler skips every detector **and** an existing ban |
+- `ignore` (default): the crawler list is unused.
+- `ban`: writes a ban record, so the crawler is refused on **every** router this
+  instance protects, and escalates.
+- `block`: refuses the crawler on **this router only**, with `rejectStatus`. No ban
+  record, no offence, no escalation.
+- `exempt`: the crawler skips every detector **and** an existing ban. A
+  User-Agent is trivially forged, so anyone copying the string gets the same pass.
 
-The trap `block` exists to avoid: the ban list is keyed by source and shared by
-the whole instance, and it is consulted *before* any crawler policy. So one `ban`
-on a placeholder host refuses that crawler on your content site as well, and
-setting `ignore` there does **not** undo it. `block` writes nothing shared, so
-each router genuinely decides for itself.
-
-`exempt` is the only value that forgives an existing ban, because the allowlist is
-checked before the ban list. Be clear about the cost: a User-Agent is trivially
-forged, so `exempt` hands anyone who copies the string a free pass past every
-detector. `ban` and `block` carry no such risk — the worst a forged UA achieves is
-getting its own author refused.
-
-Two practical notes. Siblings sharing an `instanceName` should be **identical
-apart from this one key** — they publish to one settings object, and any other
-difference means whichever Traefik builds last wins. And state the policy on every
-definition that shares an instance: one that states none inherits the
-instance-wide value, and which sibling supplies that is decided by build order.
-
-A crawler refused by policy is reported under its own detector, `crawler`, not
-`user-agent`, so the console and the event log tell the two apart.
+The example config, the trap `block` exists to avoid and the rules for sibling
+definitions: [docs/crawlers.md](docs/crawlers.md).
 
 ### Turn on the console
 
@@ -295,9 +272,11 @@ clientIP:
 `trustedProxies` has **no default**, on purpose. A configurable client-IP header
 without a trusted-proxy check is not a hardening gap, it is a remote "ban anybody
 you name" primitive — an attacker sets the header per request to evade their own
-ban and to poison your list with third parties. scanguard refuses to start if you
-set `clientIP.header` without `clientIP.trustedProxies`, never bans an address
-inside `trustedProxies`, and refuses to attribute a request it cannot identify.
+ban and to poison your list with third parties. So scanguard:
+
+- refuses to start if you set `clientIP.header` without `clientIP.trustedProxies`
+- never bans an address inside `trustedProxies`
+- refuses to attribute a request it cannot identify
 
 Cloudflare edge addresses do get banned where nothing sits behind Cloudflare:
 15 of them in 15 days on one deployment (51 requests), Workers used as scanner
@@ -326,12 +305,10 @@ upgrade** — and if you ever see a `flusher-unavailable` warning in the log, se
 
 ## Blocking at the firewall
 
-scanguard cannot touch nftables itself: `os/exec` does not exist under the Yaegi
-interpreter, and Traefik has no privileges to do it with. Instead it emits a ban
-event and **you supply the helper** — a small privileged container that consumes
-these webhooks and applies nftables rules. No such helper ships here; what ships
-is the payload contract below, verified end to end by `examples/notify-check.sh`
-against a real receiver:
+scanguard cannot touch nftables itself: there is no `os/exec` under Yaegi, and
+Traefik has no privileges to do it with. It emits a ban event instead, and **you
+supply the helper**: a small privileged container that consumes the webhooks and
+applies nftables rules. No such helper ships here.
 
 ```yaml
 notify:
@@ -340,21 +317,13 @@ notify:
       events: [ban, unban]
 ```
 
-```json
-{ "source": "scanguard", "instance": "default",
-  "event": { "kind": "ban", "key": "203.0.113.5/32", "client": "203.0.113.5",
-             "detector": "signature", "rule": "/wp-login\\.php", "banFor": "1h",
-             "method": "GET", "path": "/wp-login.php", "time": "2026-08-16T10:00:00Z" } }
-```
-
-A range ban from `enforcement.subnet` arrives with a CIDR `key`
-(`"198.51.100.0/24"`), detector `subnet` and **no `client`** — so the AbuseIPDB
-reporter skips it, and a range is never reported there.
-
-Only `ban` and `unban` are delivered — per-request rejections are not, so a
-blocked scanner hammering your site cannot turn your webhook endpoint into a
-firehose. Delivery is bounded and fire-and-forget: a dead endpoint costs nothing
-but a log line, and cannot stall a request or take Traefik down with it.
+- **Payload contract**, verified end to end by `examples/notify-check.sh`:
+  [docs/webhooks.md](docs/webhooks.md).
+- **Range bans** carry a CIDR `key` and no `client`, so they are never reported to
+  AbuseIPDB.
+- **Only `ban` and `unban` are delivered**, bounded and fire-and-forget: a
+  hammering scanner cannot flood your endpoint, and a dead endpoint cannot stall
+  Traefik.
 
 ## Configuration
 
@@ -389,7 +358,7 @@ clientIP:
 
 allowlist:
   cidrs: []                  # office egress, uptime monitors
-  userAgents: []             # matched against the User-Agent header — see the warning below
+  userAgents: []             # matched against the User-Agent header — see docs/crawlers.md on forged UAs
   paths: []                  # e.g. ^/health$
 
 detectors:
@@ -409,7 +378,7 @@ enforcement:
   escalation: ["1h", "24h", "168h", "0"]   # "0" means permanent
   decay: 24h                 # behave this long and drop a rung
   tarpit: { enabled: false, delay: 3s, maxConcurrent: 50 }   # maxConcurrent: at most 10000
-  subnet:                    # range escalation — see "What it does"
+  subnet:                    # range escalation — see "Range escalation"
     enabled: false
     threshold: 5             # this many banned sources in one range ...
     window: 24h              # ... within this long bans the range; "0"/permanent refused
@@ -440,14 +409,18 @@ scanguard into a pass-through at startup, no config edit required.
 
 **On `trustForwardedUser`.** When it is on, any request carrying an
 `X-Forwarded-User` header is an authenticated administrator and the token is not
-checked. scanguard cannot tell a header your auth proxy set from one the client
-sent, because by the time a middleware runs the peer is the client, not the
-proxy. Turn it on only when the auth middleware in front of the console
-overwrites that header on every request — with Traefik's `forwardAuth`, list it
-in `authResponseHeaders`, which deletes the client's copy before setting the
-proxy's — and never on a router that skips that middleware. scanguard logs a
-warning at startup to say the same. Failed console logins are counted in
-`stats.authFailures` and logged at most once a minute.
+checked.
+
+- scanguard cannot tell a header your auth proxy set from one the client sent:
+  by the time a middleware runs, the peer is the client, not the proxy.
+- Turn it on only when the auth middleware in front of the console overwrites
+  that header on every request. With Traefik's `forwardAuth`, list it in
+  `authResponseHeaders`, which deletes the client's copy before setting the
+  proxy's.
+- Never turn it on for a router that skips that middleware. scanguard logs a
+  warning at startup to say the same.
+- Failed console logins are counted in `stats.authFailures` and logged at most
+  once a minute.
 
 </details>
 
@@ -481,49 +454,24 @@ cd examples && docker compose up -d
 ```
 
 **`tools/yaegi-smoke` is the most important thing in this repository.** Traefik
-does not compile plugins, it interprets them with
-[Yaegi](https://github.com/traefik/yaegi), which is pinned at v0.16.1 and exposes
-only the **Go 1.22** standard library. Two whole classes of bug are invisible to
-`go build` and `go test`:
-
-- Using a stdlib API the interpreter does not expose: generic ones such as
-  `slices.Sort` and `atomic.Pointer`, the `min`/`max` builtins, `os/exec`.
-  Compiles locally, fails at plugin load.
-- `//go:embed`, which does not work under Yaegi and **fails silently** — the
-  variable is empty, the tests pass, and the page is blank only inside Traefik.
-  That is why the console is a string constant, and why the smoke test asserts
-  the page is non-empty.
-
-Two more interpreter traps this project hit, both invisible to `go test` and both
-now asserted by the smoke test:
-
-- **Encoding a response as `map[string]interface{}` with structs as values
-  produced `{"effective":{}}`** under Yaegi — the nested structs lost every field,
-  with no encoding error. The console read that empty object, wrote it back, and
-  wiped the ruleset. Every admin response now has a named struct type; see the
-  note on `RulesResponse`.
-- **mapstructure merges into a pre-populated slice instead of replacing it.**
-  A default of `[400,401,403,404,405,501]` plus a configured `[404]` yields
-  `[404,401,403,404,405,501]`. List defaults therefore live in
-  `defaultBadPathStatuses` and friends, applied after decoding, never in
-  `CreateConfig`.
-
-`go.mod` declares `go 1.22`, Yaegi's stdlib level, so CI's Go 1.22 toolchain
-(and `go vet` locally) refuses anything newer. The generic APIs above are older
-than that; only the smoke test catches them. Keep the module dependency-free:
-anything using cgo, assembly, `//go:embed` or heavy reflection fails at plugin
-import.
+interprets plugins with [Yaegi](https://github.com/traefik/yaegi) v0.16.1, which
+exposes only the Go 1.22 standard library, so whole classes of bug are invisible
+to `go build` and `go test`. The traps, and what the smoke test asserts:
+[docs/development.md](docs/development.md).
 
 ### E2E
 
-`e2e/tests/` is a Playwright suite of the console: every panel, form, tile and
-rule-editor group, as a guest, an operator, a read-only operator and an SSO
-user, plus two Traefik replicas sharing the Redis backend.
+`e2e/tests/` is a Playwright suite of the console;
 [e2e/COVERAGE.md](e2e/COVERAGE.md) maps each feature to its test.
-`scripts/e2e.sh` starts the examples harness with its e2e overlay
-(`examples/docker-compose.e2e.yml`) under its own compose project
-(`scanguard_e2e`, the same fixed ports plus 8801/9901 and 8802/9902), runs
-the suite, and removes the harness again; CI runs it as the `console e2e` job.
+
+- **Covers** every panel, form, tile and rule-editor group, as a guest, an
+  operator, a read-only operator and an SSO user, plus two Traefik replicas
+  sharing the Redis backend.
+- **`scripts/e2e.sh`** starts the examples harness with its overlay
+  `examples/docker-compose.e2e.yml` as compose project `scanguard_e2e` (the
+  fixed ports plus 8801/9901 and 8802/9902), runs the suite, and removes the
+  harness again.
+- **CI** runs it as the `console e2e` job.
 
 ```bash
 (cd e2e && npm ci && npx playwright install chromium)
@@ -548,58 +496,33 @@ CI runs the same tour as a render check after `scanner-sim.sh`; the manual
 
 ## Performance
 
-Measured on Traefik v3.7.10 with the example configuration, `wrk -t4 -c50` inside
-the compose network:
+Roughly a third of the raw proxy throughput (2760 vs 8790 req/s, measured on
+Traefik v3.7.10): the price of an interpreted plugin, and still five to ten times
+a "hundreds of requests per second" workload.
 
-| | req/s | avg latency |
-|---|---|---|
-| Baseline route, no middleware | 8790 | 5.7 ms |
-| Through scanguard | 2760 | 18.9 ms |
+- **Already-banned request:** 770 ns.
+- **Dominant cost:** user-agent matching; turning that detector off buys most of
+  the throughput back.
 
-So roughly a third of the raw proxy throughput — which is the price of an
-interpreted plugin, and still five to ten times a "hundreds of requests per
-second" workload. Traefik's memory was 75 MB with several thousand tracked
-sources.
-
-Where the time goes, from `go test -bench .` (compiled, Ryzen 7 3700X, 87
-signatures and 41 user-agent patterns):
-
-| | cost | note |
-|---|---|---|
-| Already-banned request | **770 ns**, 5 allocs | resolve, one map lookup, write a status |
-| Client-IP resolution | 184 ns, 0 allocs | with four trusted-proxy CIDRs |
-| Signature match | 7.1 µs | short subject, so cheap |
-| User-agent match | 35 µs | **the dominant cost** |
-| Clean request, end to end | 63 µs, 4 allocs | almost entirely the two matches |
-
-An alternation with no literal prefix must attempt a match at every position, so
-cost scales with subject length — which is why matching a 90-character
-user-agent costs 5× more than matching a path despite having fewer than half the
-patterns.
-A literal pre-filter measures 3.2× faster interpreted, and is deliberately not
-implemented; see the note in `matcher.go` for why a wrong pre-filter fails
-silently in exactly the direction you cannot afford.
-
-If you need the throughput back: `detectors.userAgent.enabled: false` removes
-most of the cost, at the price of catching self-identifying scanners only via
-their request paths.
+Benchmarks and why there is no literal pre-filter: [docs/performance.md](docs/performance.md).
 
 ## Limitations
 
-- **No Traefik dashboard tab.** Not now, not later. See above.
+- **No Traefik dashboard tab.** Not now, not later. See [above](#why-not-a-dashboard-tab).
 - **Single Traefik instance by default.** State is process-global, so N replicas
   means N independent ban lists, thresholds effectively multiplied by N, and an
-  Unblock that applies to one replica. It degrades *silently*. Use the Redis
-  backend for HA — bans are shared and propagate to other replicas within one
-  janitor cycle (~30s, measured), the way CrowdSec's stream mode works. Per-source
-  counters stay local by design: shipping a counter increment to Redis on every
-  request would put a network round trip on the hot path to share state nobody
-  needs. A Redis outage therefore degrades to per-replica enforcement rather than
-  to an outage of its own.
+  Unblock that applies to one replica. It degrades *silently*.
+  - **Use the Redis backend for HA:** bans are shared and propagate to other
+    replicas within one janitor cycle (~30s, measured), the way CrowdSec's
+    stream mode works.
+  - **Per-source counters stay local by design:** shipping a counter increment to
+    Redis on every request would put a network round trip on the hot path to
+    share state nobody needs.
+  - **A Redis outage** therefore degrades to per-replica enforcement rather than
+    to an outage of its own.
 - **Range escalation counts per replica.** The sources banned inside a range are
-  tallied in the process-local counters, so with several replicas the threshold
-  has to be reached on one of them; the range ban itself is then shared like any
-  other.
+  tallied in the process-local counters, so with several replicas one of them has
+  to reach the threshold. The range ban itself is then shared like any other.
 - **Plugins load only at startup.** Installing or upgrading scanguard needs a
   Traefik restart. The console cannot do it.
 - **Response-status detectors act one request late.** The decision for request N
@@ -609,6 +532,15 @@ their request paths.
 - **Interpreted code is unprofilable** — every frame shows as
   `yaegi/interp.call.func9` in pprof. The hot path is kept to a map lookup and one
   pre-compiled alternation regexp for that reason.
+
+## Documentation
+
+- [docs/screenshots](docs/screenshots/README.md) — every console screen, with a sentence each
+- [docs/crawlers.md](docs/crawlers.md) — the per-router crawler policy in full
+- [docs/webhooks.md](docs/webhooks.md) — the ban webhook payload and its delivery
+- [docs/performance.md](docs/performance.md) — throughput and per-request benchmarks
+- [docs/development.md](docs/development.md) — the Yaegi interpreter traps
+- [e2e/COVERAGE.md](e2e/COVERAGE.md) — every feature and the test that covers it
 
 ## Licence
 
