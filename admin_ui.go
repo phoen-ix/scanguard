@@ -411,8 +411,14 @@ function api(path, options) {
     cache: "no-store"
   }).then(function (r) {
     if (r.status === 401) { lock("That token was not accepted."); throw new Error("unauthorized"); }
-    return r.json().then(function (data) {
-      if (!r.ok) { throw new Error(data && data.error ? data.error : "request failed"); }
+    // Read as text first: an error from in front of the plugin (a 502 page from
+    // Traefik, a gateway's HTML) is not JSON, and r.json() on it surfaced
+    // "Unexpected token <" where "HTTP 502" is the useful message.
+    return r.text().then(function (text) {
+      var data = null;
+      if (text) { try { data = JSON.parse(text); } catch (e) { data = null; } }
+      if (!r.ok) { throw new Error(data && data.error ? data.error : "HTTP " + r.status); }
+      if (data === null) { throw new Error("unexpected response (HTTP " + r.status + ")"); }
       return data;
     });
   });
@@ -435,6 +441,7 @@ function lock(message) {
   openTile = null;
   lastState = null;
   sourcesData = { sources: [], total: 0, truncated: false };
+  detectionsData = [];
   // And the tables: #app is only hidden, so without this a second session
   // unlocked with a different token saw the first one's events and bans.
   $("events").tBodies[0].textContent = "";
@@ -543,10 +550,15 @@ var TILE_DETAIL = {
     title: "Detections",
     cols: ["time", "source", "detector", "path"],
     events: "ban",
-    rows: function (s) {
+    // From the ban ring (api/events?kind=ban), not from the hundred events
+    // api/state carries: on a busy instance those are almost all rejects, so
+    // the detections list drawn from them was empty while the bans ring held
+    // hundreds. Fetched while the list is open, like the tracked sources.
+    fetch: fetchDetections,
+    rows: function () {
       // Manual bans are ban events too, but not detections: the tile's counter
-      // leaves them out, so the list does as well.
-      return (s.events || []).filter(function (e) { return e.kind === "ban" && e.detector !== "manual"; })
+      // leaves them out, so the list does as well. Newest first.
+      return detectionsData.filter(function (e) { return e.kind === "ban" && e.detector !== "manual"; })
         .slice().reverse().map(function (e) {
           return [fmtTime(e.time) + (e.dryRun ? " (dry)" : ""), e.client || e.key, e.detector, e.path];
         });
@@ -564,7 +576,7 @@ var TILE_DETAIL = {
     title: "Tracked sources",
     note: "Most recently seen first. Fetched on demand \u2014 this table is capped at maxEntries and is not part of the three-second poll.",
     cols: ["source", "last seen", "offences", "distinct bad paths"],
-    remote: true,
+    fetch: fetchSources,
     rows: function () {
       return (sourcesData.sources || []).map(function (r) {
         return [r.key, fmtTime(r.lastSeen), r.offences, r.badPaths];
@@ -580,6 +592,7 @@ var TILE_DETAIL = {
 };
 
 var sourcesData = { sources: [], total: 0, truncated: false };
+var detectionsData = [];
 
 function eventRows(s, kind) {
   return (s.events || []).filter(function (e) { return e.kind === kind; })
@@ -591,9 +604,15 @@ function eventRows(s, kind) {
 function toggleTile(kind) {
   if (openTile === kind) { closeDetail(); return; }
   openTile = kind;
-  if (TILE_DETAIL[kind] && TILE_DETAIL[kind].remote) { fetchSources(); }
+  fetchDetail();
   renderDetail();
   if (lastState) { renderTiles(lastState); }
+}
+
+// fetchDetail refreshes the open list when it is one fetched on demand.
+function fetchDetail() {
+  var spec = TILE_DETAIL[openTile];
+  if (spec && spec.fetch) { spec.fetch(); }
 }
 
 function closeDetail() {
@@ -606,6 +625,15 @@ function fetchSources() {
   api("api/sources?limit=50").then(function (r) {
     sourcesData = r;
     if (openTile === "sources") { renderDetail(); }
+  }).catch(function (err) {
+    if (err.message !== "unauthorized") { toast(err.message); }
+  });
+}
+
+function fetchDetections() {
+  api("api/events?since=0&kind=ban&limit=500").then(function (r) {
+    detectionsData = r.events || [];
+    if (openTile === "detections") { renderDetail(); }
   }).catch(function (err) {
     if (err.message !== "unauthorized") { toast(err.message); }
   });
@@ -831,12 +859,19 @@ var eventKind = "";
 // Everything after that arrives through api/events, so a filtered feed that is
 // legitimately empty is not mistaken for "not painted yet".
 var eventsPainted = false;
+// feedEpoch counts filter switches. A poll that was in flight when the filter
+// changed answers for the OLD filter, and appending it would mix kinds into the
+// freshly cleared table; every fetch records the epoch it started in and drops
+// its result if the epoch has moved on.
+var feedEpoch = 0;
 
 function setEventKind(kind) {
   if (eventKind === kind) { return; }
   eventKind = kind;
   lastSeq = 0;
   eventsPainted = true;
+  feedEpoch++;
+  var epoch = feedEpoch;
   $("events").tBodies[0].textContent = "";
   var buttons = document.querySelectorAll("#event-filter button");
   for (var i = 0; i < buttons.length; i++) {
@@ -849,6 +884,7 @@ function setEventKind(kind) {
   var url = "api/events?since=0&limit=500";
   if (kind) { url += "&kind=" + encodeURIComponent(kind); }
   api(url).then(function (r) {
+    if (epoch !== feedEpoch) { return; }
     appendEvents(r.events);
     $("events-empty").hidden = $("events").tBodies[0].rows.length > 0;
   }).catch(function () {});
@@ -1213,7 +1249,7 @@ function refresh() {
 function tick() {
   api("api/state").then(function (s) {
     renderState(s);
-    if (openTile === "sources") { fetchSources(); }
+    fetchDetail();
     pulse();
     return pollEvents();
   }).catch(function (err) {
@@ -1226,9 +1262,11 @@ function tick() {
 // worth a toast on top of whatever already failed.
 function pollEvents() {
   if (!eventsPainted) { return; }
+  var epoch = feedEpoch;
   var url = "api/events?since=" + lastSeq + "&limit=500";
   if (eventKind) { url += "&kind=" + encodeURIComponent(eventKind); }
   return api(url).then(function (r) {
+    if (epoch !== feedEpoch) { return; }
     appendEvents(r.events);
   }).catch(function () {});
 }
