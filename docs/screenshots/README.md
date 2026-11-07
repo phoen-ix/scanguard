@@ -66,8 +66,9 @@ every pattern currently compiled in (a scrolling list).
 
 Every detector, threshold, allowlist and enforcement setting, applied on the
 next request without a Traefik restart. A changed field is marked and the
-editor says the change is unsaved. (The first two rows of groups; rate,
-payload, allowlist and enforcement follow below.)
+editor says the change is unsaved. (The first two rows of groups, from General
+to Brute force; request rate, user-agent rotation, payload, allowlist and
+enforcement follow below.)
 
 <img src="console-rule-editor.png" alt="The rule editor with one changed honeypot path marked and the unsaved indicator showing" width="800">
 

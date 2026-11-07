@@ -1,7 +1,8 @@
 # Performance
 
-Measured on Traefik v3.7.10 with the example configuration, `wrk -t4 -c50` inside
-the compose network:
+Measured on Traefik v3.7.10 (the pinned version at the time; the figures have not
+been re-taken since the pin moved to v3.7.17) with the example configuration,
+`wrk -t4 -c50` inside the compose network:
 
 | | req/s | avg latency |
 |---|---|---|
@@ -27,8 +28,9 @@ user-agent patterns):
 | Clean request, end to end | 63 µs, 4 allocs | almost entirely the two matches |
 
 An alternation with no literal prefix must attempt a match at every position, so
-cost scales with subject length. That is why matching a 90-character user-agent
-costs 5× more than matching a path despite having fewer than half the patterns.
+cost scales with subject length. That is why matching a 77-character browser
+user-agent costs 5× more than matching a short path despite having fewer than
+half the patterns.
 
 A literal pre-filter measures 3.2× faster interpreted, and is deliberately not
 implemented; see the note in `matcher.go` for why a wrong pre-filter fails
@@ -37,4 +39,6 @@ silently in exactly the direction you cannot afford.
 ## Getting the throughput back
 
 `detectors.userAgent.enabled: false` removes most of the cost, at the price of
-catching self-identifying scanners only via their request paths.
+catching self-identifying scanners only via their request paths. The crawler
+policy (`detectors.userAgent.crawlers`) is a separate switch and keeps working;
+its twelve patterns cost a fraction of the scanner list.

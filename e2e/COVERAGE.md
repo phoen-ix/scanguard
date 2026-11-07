@@ -164,7 +164,7 @@ Test names are `file › [describe ›] title`.
 | brute force (repeated 401/403) | ❌ (c) `TestResponseStatusDetectorBansOneRequestLate`, `TestAuthFailureWindow` (the harness's nginx answers no 401s) |
 | rate abuse | ❌ (c) `TestRateBucket` |
 | user-agent rotation (opt-in, off in the harness) | ❌ (c) `TestUserAgentBucket`, `TestUARotationBansACyclingSource`; under the interpreter by `tools/yaegi-smoke` |
-| SEO crawler policy per router | ❌ (c) `TestCrawler*` (13 tests in `scanguard_test.go`) |
+| SEO crawler policy per router | ❌ (c) `TestCrawler*` (14 tests in `scanguard_test.go`) |
 | tarpit | ❌ (c) `TestTarpitDelaysRejectedRequests`, `TestTarpitAbortsWhenTheClientDisconnects` |
 | escalation ladder and decay | ❌ (c) `TestEscalationLadderAndDecay`, `TestEscalationClimbsAcrossABanExpiry` |
 | subnet escalation (opt-in): a /24 of banned sources bans the range; unblock lifts it | ✅ `rules.spec.ts › range escalation: three banned sources in one /24 ban the range, and unblock lifts it` |
@@ -173,7 +173,7 @@ Test names are `file › [describe ›] title`.
 | bans survive a Traefik restart | ❌ (c) `ci.yml` integration "bans survive a restart"; `TestFileStoreRoundTrip` |
 | console rule edits survive a Traefik restart | ❌ (c) `examples/rules-check.sh` "Edits survive a Traefik restart"; `TestRuleEditPersistsAcrossRestart` |
 | WebSocket upgrade and SSE flush through the middleware | ❌ (c) `examples/streaming-check.sh` |
-| webhook and chat notifications (ban, unban; no per-reject flood; dead endpoint survivable) | ❌ (c) `examples/notify-check.sh` (webhook sink in the harness); `TestWebhookDelivery`, `TestChatPayloadsPerProvider` |
+| webhook and chat notifications (ban, unban by console and by expiry; no per-reject flood; dead endpoint survivable) | ❌ (c) `examples/notify-check.sh` (webhook sink in the harness); `TestWebhookDelivery`, `TestChatPayloadsPerProvider`, `TestExpiredBansAreReportedToNotifiers` |
 | AbuseIPDB report / check | ❌ (a) needs an AbuseIPDB account; `TestAbuseIPDBReport`, `TestAbuseIPDBCheckIsAsyncAndCached` against a fake |
 | `SCANGUARD_DISABLE` kill switch | ❌ (c) `TestDisabledAndKillSwitch` |
 | console in prefix mode (`admin.pathPrefix` on a detection router) and `serveOnDetectionRoutes` | ❌ (c) `TestPrefixModeStillServesTheConsole`, `TestAdminPrefixNeedsAPathBoundary`, `TestServeOnDetectionRoutesReopensTheConsoleDeliberately` |

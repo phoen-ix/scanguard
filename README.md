@@ -101,7 +101,8 @@ would be worse: every write trips fsnotify, rebuilds the whole router tree and
 re-runs `New()` for every plugin middleware on every router.
 
 So scanguard keeps its own override store, saved beside the ban list and restored
-at startup.
+at startup (with the `file` or `redis` backend; `memory` keeps it for the life of
+the process).
 
 - **Only what you change is taken over.** Edit a honeypot and the console owns
   `detectors`; `enforcement` keeps tracking your YAML. The editor marks changed
@@ -112,9 +113,11 @@ at startup.
 - **Reverting restores the file configuration**, section by section.
 - **A Traefik reload re-layers your edits** onto the new file config rather than
   discarding them.
-- **`clientIP`, `store`, `admin` and `notify` are not editable.** They hold
-  secrets, or must agree with Traefik's *static* configuration that nothing at
-  runtime can change — see the comment at the top of `overrides.go`.
+- **Only `dryRun`, `detectors`, `allowlist` and `enforcement` are editable.**
+  `clientIP`, `store`, `admin`, `notify` and `geo` hold secrets, or must agree
+  with Traefik's *static* configuration that nothing at runtime can change, and
+  `enabled`, `instanceName`, `uiMode` and `observeResponse` decide what the
+  middleware is — see the comment at the top of `overrides.go`.
 - **Replicas:** with the Redis backend, a rule change on one replica reaches the
   others on their next refresh, exactly like a ban.
 
@@ -322,9 +325,10 @@ notify:
   [docs/webhooks.md](docs/webhooks.md).
 - **Range bans** carry a CIDR `key` and no `client`, so they are never reported to
   AbuseIPDB.
-- **Only `ban` and `unban` are delivered**, bounded and fire-and-forget: a
-  hammering scanner cannot flood your endpoint, and a dead endpoint cannot stall
-  Traefik.
+- **Only `ban` and `unban` are delivered** — every unban, by expiry or from the
+  console, with `actor` saying which — bounded and fire-and-forget: a hammering
+  scanner cannot flood your endpoint, and a dead endpoint cannot stall Traefik.
+  Dry-run would-bans arrive with `dryRun: true`; a firewall helper must skip them.
 
 ## Configuration
 
@@ -371,7 +375,7 @@ detectors:
   bruteForce:  { enabled: false, capacity: 5, window: 60s, statuses: [401,403], paths: [] }
   rateAbuse:   { enabled: false, rps: 50, burst: 100 }
   uaRotation:  { enabled: false, capacity: 8, leak: 60s }   # distinct user-agents per source; capacity 2-128, leak > 0
-  payload:     { enabled: false, useDefaults: true, scanQuery: true, scanBody: false, maxBodyBytes: 8192 }
+  payload:     { enabled: false, useDefaults: true, patterns: [], scanQuery: true, scanBody: false, maxBodyBytes: 8192 }
 
 enforcement:
   rejectStatus: 403          # 404 hides the middleware's existence
@@ -389,7 +393,7 @@ enforcement:
 
 notify:
   timeout: 5s
-  webhooks: [{ url: "", method: POST, headers: {}, events: [ban, unban] }]
+  webhooks: []               # none by default; each entry: { url, method: POST, headers: {}, events: [ban, unban] }
   chat: { kind: "", url: "", events: [] }   # discord | slack | ntfy | gotify
   abuseipdb: { enabled: false, apiKey: "", report: true, check: false, minConfidence: 75, cacheTTL: 24h }
 
@@ -447,7 +451,7 @@ go test ./...                                  # unit tests
 # at its import path (default /go), so give it one:
 gp=$(mktemp -d); mkdir -p "$gp/src/github.com/phoen-ix"; ln -s "$PWD" "$gp/src/github.com/phoen-ix/scanguard"
 (cd tools/yaegi-smoke && SMOKE_GOPATH="$gp" go run .)
-cd examples && docker compose up -d
+cd examples && export COMPOSE_PROJECT_NAME=scanguard_e2e && docker compose up -d
 ./scanner-sim.sh                               # end-to-end detection checks against live Traefik
 ./streaming-check.sh                           # the WebSocket + SSE release gate
 ./rules-check.sh                               # the rule editor, including restart survival
@@ -539,6 +543,7 @@ Benchmarks and why there is no literal pre-filter: [docs/performance.md](docs/pe
 - [docs/screenshots](docs/screenshots/README.md) — every console screen, with a sentence each
 - [docs/crawlers.md](docs/crawlers.md) — the per-router crawler policy in full
 - [docs/webhooks.md](docs/webhooks.md) — the ban webhook payload and its delivery
+- [docs/api.md](docs/api.md) — the console's HTTP API, for scripts and curl
 - [docs/performance.md](docs/performance.md) — throughput and per-request benchmarks
 - [docs/development.md](docs/development.md) — the Yaegi interpreter traps
 - [e2e/COVERAGE.md](e2e/COVERAGE.md) — every feature and the test that covers it

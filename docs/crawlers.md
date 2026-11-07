@@ -37,7 +37,7 @@ crawled.** The difference is where the decision is recorded:
 | `ignore` (default) | the crawler list is unused |
 | `ban` | writes a ban record — the crawler is then refused on **every** router this instance protects, and escalates |
 | `block` | refuses the crawler on **this router only**, with `rejectStatus`. No ban record, no offence, no escalation |
-| `exempt` | adds the list to the User-Agent allowlist, so a matching crawler skips every detector **and** an existing ban |
+| `exempt` | a matching crawler skips every detector **and** an existing ban; checked per request and reported as `crawler-exempt` in the exempt tally |
 
 ## Why `block` exists
 
@@ -50,7 +50,7 @@ The ban list is keyed by source, shared by the whole instance, and consulted
 
 ## The cost of `exempt`
 
-`exempt` is the only value that forgives an existing ban, because the allowlist is
+`exempt` is the only value that forgives an existing ban, because exemptions are
 checked before the ban list.
 
 - A User-Agent is trivially forged, so `exempt` hands anyone who copies the string
@@ -68,3 +68,10 @@ checked before the ban list.
   decided by build order.
 - **Own detector name:** a crawler refused by policy is reported as `crawler`, not
   `user-agent`, so the console and the event log tell the two apart.
+
+## Independent of the scanner user-agent detector
+
+The policy is its own switch. `ban` and `block` keep working with
+`detectors.userAgent.enabled: false`; only the scanner patterns are off then.
+(Earlier builds evaluated the policy inside that detector, so switching it off
+silently turned `ban` and `block` into `ignore`.)

@@ -20,21 +20,39 @@ Two whole classes of bug:
   - That is why the console is a string constant, and why the smoke test asserts
     the page is non-empty.
 
-## Two more traps this project hit
+## Four more traps this project hit
 
-Both invisible to `go test`, both now asserted by the smoke test:
+All invisible to `go test`, all now asserted by the smoke test:
 
 - **`map[string]interface{}` with structs as values encoded as
   `{"effective":{}}`** under Yaegi: the nested structs lost every field, with no
   encoding error.
   - The console read that empty object, wrote it back, and wiped the ruleset.
   - Every admin response now has a named struct type; see the note on
-    `RulesResponse`.
+    `RulesResponse`. The smoke test decodes `/api/state`, `/api/events`,
+    `/api/bans`, `/api/sources` and `/api/rules/compiled` and checks the fields
+    are populated.
+- **A struct passed through an `interface{}` parameter arrives empty.**
+  `json.Marshal` of it returns `{}` with a nil error, so every configuration
+  hashed the same and no dynamic-configuration change ever reached the running
+  middleware (see `configFingerprint`). Fingerprint helpers take concrete types.
+  - Asserted by rotating the admin token on a rebuild.
+- **Parallel assignment can silently skip a target.** `best, bestBits = b,
+  w.Bits()` ran without setting `best` under Yaegi v0.16.1, so a range ban
+  matched nothing (`matchWideLocked`). One assignment per statement in that
+  code, and in `setKeyWidths`.
+  - Asserted by a manual range ban, and by switching range escalation off on a
+    reload with a range ban in place.
 - **mapstructure merges into a pre-populated slice instead of replacing it.**
   - A default of `[400,401,403,404,405,501]` plus a configured `[404]` yields
     `[404,401,403,404,405,501]`.
   - List defaults therefore live in `defaultBadPathStatuses` and friends, applied
-    after decoding, never in `CreateConfig`.
+    after decoding, never in `CreateConfig`. Asserted for `badPaths.statuses`
+    and for `enforcement.escalation`.
+
+The smoke test also reads a snapshot back into a fresh runtime, exercises a
+read-only console, both crawler policies on sibling definitions, the rule
+editor's write path, and refuses three invalid configurations.
 
 ## Go version and dependencies
 
