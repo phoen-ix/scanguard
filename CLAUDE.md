@@ -67,7 +67,7 @@ Anything that starts Docker goes through `~/repos/.fleet/scripts/slot heavy scan
   e2e overlay `examples/docker-compose.e2e.yml`. Bump them together and re-run
   `streaming-check.sh`.
 - The harness keeps `enforcement.subnet` and `detectors.uaRotation` off (the
-  defaults). scanner-sim bans ten sources in 198.51.100.0/24 and `uniqueIp()`
+  defaults). scanner-sim bans nine sources in 198.51.100.0/24 and `uniqueIp()`
   hands out consecutive addresses, so tests' sources share /24s: with range
   escalation on they would ban each other. The one e2e test that needs it
   (`rules.spec.ts`, range escalation) enables it from the editor for itself, on

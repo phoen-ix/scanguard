@@ -13,7 +13,6 @@
 set -uo pipefail
 
 BASE="${BASE:-http://localhost:8800}"
-HOST="${HOST:-localhost:8800}"
 
 pass=0
 fail=0
@@ -21,10 +20,10 @@ ok()  { printf '  \033[32mPASS\033[0m %s\n' "$*"; pass=$((pass + 1)); }
 bad() { printf '  \033[31mFAIL\033[0m %s\n' "$*"; fail=$((fail + 1)); }
 
 printf '\n\033[1mWebSocket upgrade through the middleware\033[0m\n'
-# A raw handshake, so the check needs no extra tooling. A 101 means the upgrade
-# survived; anything else means the ResponseWriter wrapper ate the hijack.
-response=$(printf 'GET /ws HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n' "$HOST" \
-  | timeout 6 curl -s --http1.1 --max-time 5 \
+# curl sends the handshake headers itself, so the check needs no extra tooling.
+# A 101 means the upgrade survived; anything else means the ResponseWriter
+# wrapper ate the hijack.
+response=$(timeout 6 curl -s --http1.1 --max-time 5 \
       -o /dev/null -w '%{http_code}' \
       -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
       -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \

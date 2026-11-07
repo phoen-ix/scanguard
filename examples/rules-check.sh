@@ -80,7 +80,7 @@ expect "no anti-CSRF header is refused" 403 "$code"
 
 say "Edits survive a Traefik restart"
 # Restart the Traefik that serves $CONSOLE, under whatever compose project
-# started it (CI's default, fleet's -p fleet-scanguard, scanguard_docs): a bare
+# started it (scanguard_e2e, fleet's -p fleet-scanguard, scanguard_docs): a bare
 # `docker compose restart` only reaches the project named after this directory.
 project=$(docker ps --filter "publish=${CONSOLE##*:}" --format '{{.Label "com.docker.compose.project"}}' | head -n1)
 if [[ -n "$project" ]] && docker compose -p "$project" restart traefik >/dev/null 2>&1; then

@@ -122,8 +122,6 @@ func main() {
 	fmt.Println("OK  scanguard runs correctly under the Yaegi interpreter")
 }
 
-// backend is the "next" handler. It answers 404 for anything under /missing/ so
-// the response-status detectors have something to observe.
 // withAdminToken copies cfg one level deep, replacing only admin.token, so the
 // caller's configuration map is left untouched.
 func withAdminToken(cfg map[string]interface{}, token string) map[string]interface{} {
@@ -169,6 +167,34 @@ func withCrawlers(cfg map[string]interface{}, policy string) map[string]interfac
 	return out
 }
 
+// withSubnetEnabled copies cfg two levels deep along enforcement.subnet, setting
+// only whether range escalation is on. Used to reload the range-escalation
+// instance with the feature off and on again.
+func withSubnetEnabled(cfg map[string]interface{}, enabled bool) map[string]interface{} {
+	out := make(map[string]interface{}, len(cfg))
+	for k, v := range cfg {
+		out[k] = v
+	}
+	enf := make(map[string]interface{})
+	if existing, ok := cfg["enforcement"].(map[string]interface{}); ok {
+		for k, v := range existing {
+			enf[k] = v
+		}
+	}
+	sub := make(map[string]interface{})
+	if existing, ok := enf["subnet"].(map[string]interface{}); ok {
+		for k, v := range existing {
+			sub[k] = v
+		}
+	}
+	sub["enabled"] = enabled
+	enf["subnet"] = sub
+	out["enforcement"] = enf
+	return out
+}
+
+// backend is the "next" handler. It answers 404 for anything under /missing/ so
+// the response-status detectors have something to observe.
 func backend() http.HandlerFunc {
 	return func(rw http.ResponseWriter, req *http.Request) {
 		switch {
@@ -463,6 +489,60 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 		strings.Contains(rec.Body.String(), "\"topHosts\"") && strings.Contains(rec.Body.String(), "\"topExempt\""),
 		"body=%s", truncate(rec.Body.String(), 250))
 
+	// The other named-struct responses. Each is a struct the interpreter could
+	// encode as {} without an error; only decoding them and finding the fields
+	// populated proves otherwise.
+	rec = do(h, "GET", "/__scanguard/api/events?kind=ban&limit=50", "203.0.113.81:5000",
+		map[string]string{"X-Scanguard-Token": token})
+	var events struct {
+		Events []struct {
+			Seq      uint64 `json:"seq"`
+			Kind     string `json:"kind"`
+			Key      string `json:"key"`
+			Detector string `json:"detector"`
+		} `json:"events"`
+		LastSeq uint64 `json:"lastSeq"`
+	}
+	if jerr := json.Unmarshal(rec.Body.Bytes(), &events); jerr != nil || rec.Code != 200 {
+		check("events response decodes", false, "status %d: %v: %s", rec.Code, jerr, truncate(rec.Body.String(), 200))
+	} else {
+		check("events response carries populated ban events, not empty structs",
+			len(events.Events) > 0 && events.Events[0].Kind == "ban" && events.Events[0].Key != "" &&
+				events.Events[0].Seq > 0 && events.LastSeq >= events.Events[0].Seq,
+			"lastSeq=%d rows=%d body=%s", events.LastSeq, len(events.Events), truncate(rec.Body.String(), 250))
+	}
+
+	rec = do(h, "GET", "/__scanguard/api/bans", "203.0.113.81:5000",
+		map[string]string{"X-Scanguard-Token": token})
+	var banList struct {
+		Bans []struct {
+			Key      string `json:"key"`
+			Detector string `json:"detector"`
+			Created  string `json:"created"`
+			Offences int    `json:"offences"`
+		} `json:"bans"`
+	}
+	if jerr := json.Unmarshal(rec.Body.Bytes(), &banList); jerr != nil || rec.Code != 200 {
+		check("ban list decodes", false, "status %d: %v: %s", rec.Code, jerr, truncate(rec.Body.String(), 200))
+	} else {
+		check("ban list carries populated rows, not empty structs",
+			len(banList.Bans) > 0 && banList.Bans[0].Key != "" && banList.Bans[0].Detector != "" &&
+				banList.Bans[0].Created != "" && banList.Bans[0].Offences > 0,
+			"rows=%d body=%s", len(banList.Bans), truncate(rec.Body.String(), 250))
+	}
+
+	rec = do(h, "GET", "/__scanguard/api/rules/compiled", "203.0.113.81:5000",
+		map[string]string{"X-Scanguard-Token": token})
+	var compiled map[string][]string
+	if jerr := json.Unmarshal(rec.Body.Bytes(), &compiled); jerr != nil || rec.Code != 200 {
+		check("compiled rules decode", false, "status %d: %v: %s", rec.Code, jerr, truncate(rec.Body.String(), 200))
+	} else {
+		check("compiled rules list the defaults and the configured honeypot",
+			len(compiled["signatures"]) > 50 && len(compiled["userAgents"]) > 20 &&
+				len(compiled["honeypots"]) == 1 && compiled["honeypots"][0] == "/trap" && len(compiled["crawlers"]) > 0,
+			"signatures=%d userAgents=%d honeypots=%v", len(compiled["signatures"]), len(compiled["userAgents"]), compiled["honeypots"])
+	}
+
 	// A configuration CHANGE must actually reach the running middleware on rebuild.
 	// Traefik drives this path on every dynamic-configuration change, and it is
 	// invisible to `go test`: compiled Go marshals a struct correctly through an
@@ -526,6 +606,14 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 				len(statuses) == 1, "badPaths.statuses is %v, want exactly [404]", statuses)
 		}
 	}
+	// The same trap for the ban ladder: two configured rungs must not come back
+	// with the two default rungs appended.
+	if enf, ok := rules.Effective["enforcement"].(map[string]interface{}); ok {
+		ladder, _ := enf["escalation"].([]interface{})
+		check("a configured escalation ladder replaces the default instead of merging into it",
+			len(ladder) == 2 && ladder[0] == "1h" && ladder[1] == "24h",
+			"enforcement.escalation is %v, want exactly [1h 24h]", ladder)
+	}
 
 	// Add a honeypot from the console and confirm it takes effect immediately.
 	if detectors, ok := rules.Effective["detectors"].(map[string]interface{}); ok {
@@ -574,6 +662,39 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 
 	subnetChecks(build, token)
 
+	// A read-only console serves everything and refuses every mutation.
+	ro, err := build(map[string]interface{}{
+		"instanceName": "smoke-readonly",
+		"store":        map[string]interface{}{"backend": "memory"},
+		"admin":        map[string]interface{}{"enabled": true, "pathPrefix": "/__scanguard", "token": token, "readOnly": true},
+	})
+	if err != nil {
+		fatal("New rejected the read-only console: %v", err)
+	}
+	rec = do(ro, "GET", "/__scanguard/api/state", "203.0.113.60:5000", map[string]string{"X-Scanguard-Token": token})
+	check("a read-only console still serves state", rec.Code == 200, "got status %d", rec.Code)
+	rec = doBody(ro, "PUT", "/__scanguard/api/rules", "203.0.113.60:5000", `{"dryRun":true}`,
+		map[string]string{"X-Scanguard-Token": token, "X-Scanguard-Action": "1"})
+	check("a read-only console refuses a rule change", rec.Code == 403, "got status %d", rec.Code)
+	rec = doBody(ro, "POST", "/__scanguard/api/bans", "203.0.113.60:5000", `{"key":"192.0.2.1"}`,
+		map[string]string{"X-Scanguard-Token": token, "X-Scanguard-Action": "1"})
+	check("a read-only console refuses a manual ban", rec.Code == 403, "got status %d", rec.Code)
+
+	// The snapshot the main instance wrote is read back by a runtime that starts
+	// from nothing but the file. This is the restart path: json.Unmarshal into
+	// the plugin's own struct types under the interpreter, then restore().
+	restored, err := build(map[string]interface{}{
+		"instanceName": "smoke-restore",
+		"store":        map[string]interface{}{"backend": "file", "path": statePath},
+		"admin":        map[string]interface{}{"enabled": true, "pathPrefix": "/__scanguard", "token": token},
+	})
+	if err != nil {
+		fatal("New rejected a runtime reading the existing snapshot: %v", err)
+	}
+	rec = do(restored, "GET", "/", "203.0.113.21:5000", nil)
+	check("a ban read back from the snapshot is enforced by a fresh runtime", rec.Code == 403,
+		"got status %d — the snapshot did not restore under the interpreter", rec.Code)
+
 	// Invalid configuration must be rejected loudly, at startup.
 	_, err = build(map[string]interface{}{
 		"clientIP": map[string]interface{}{"header": "Cf-Connecting-Ip"},
@@ -599,7 +720,7 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 // adds a second map lookup to the ban store and a map of members to the counter
 // record, both on the hot path, and neither is visible to go test under Yaegi.
 func subnetChecks(build func(map[string]interface{}) (http.Handler, error), token string) {
-	h, err := build(map[string]interface{}{
+	cfgSubnet := map[string]interface{}{
 		"instanceName": "smoke-subnet",
 		"store":        map[string]interface{}{"backend": "memory"},
 		"allowlist":    map[string]interface{}{"cidrs": []string{"198.51.100.0/25"}},
@@ -609,7 +730,8 @@ func subnetChecks(build func(map[string]interface{}) (http.Handler, error), toke
 			},
 		},
 		"admin": map[string]interface{}{"enabled": true, "pathPrefix": "/__scanguard", "token": token},
-	})
+	}
+	h, err := build(cfgSubnet)
 	if err != nil {
 		fatal("New rejected the range-escalation configuration: %v", err)
 	}
@@ -625,6 +747,26 @@ func subnetChecks(build func(map[string]interface{}) (http.Handler, error), toke
 	check("the range ban is listed with detector subnet",
 		strings.Contains(rec.Body.String(), `"key":"192.0.2.0/24"`) && strings.Contains(rec.Body.String(), `"detector":"subnet"`),
 		"got status %d body %s", rec.Code, truncate(rec.Body.String(), 300))
+
+	// Switch range escalation off on a reload. The /24 is now wider than any key
+	// the store knows, so it is found only if setKeyWidths rebuilt the wide index
+	// — the method whose parallel assignment Yaegi v0.16.1 ran without effect.
+	// Before this check a no-op setKeyWidths passed every gate here, because the
+	// masked lookup found the range without it.
+	cfgOff := withSubnetEnabled(cfgSubnet, false)
+	hOff, oerr := build(cfgOff)
+	if oerr != nil {
+		fatal("New rejected the range-escalation instance with the feature off: %v", oerr)
+	}
+	rec = do(hOff, "GET", "/", "192.0.2.99:5000", nil)
+	check("an existing range ban still blocks after range escalation is switched off",
+		rec.Code == 403, "got status %d — setKeyWidths did not rebuild the wide-prefix index", rec.Code)
+	if _, oerr = build(cfgSubnet); oerr != nil {
+		fatal("New rejected switching range escalation back on: %v", oerr)
+	}
+	rec = do(h, "GET", "/", "192.0.2.99:5000", nil)
+	check("the range ban still blocks after range escalation is switched back on",
+		rec.Code == 403, "got status %d", rec.Code)
 
 	for n := 1; n <= 3; n++ {
 		do(h, "GET", "/wp-login.php", fmt.Sprintf("[2001:db8:1:%d::1]:5000", n), nil)

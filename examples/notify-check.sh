@@ -92,7 +92,11 @@ say "Per-request rejects are NOT notified"
 # A banned source hitting the site repeatedly must not turn the webhook endpoint
 # into a firehose; only ban and unban are delivered.
 clear_received
-src2="198.51.100.$((RANDOM % 100 + 20))"
+# .150-.199: a range scanner-sim.sh never touches. Drawn from .20-.119 this
+# collided with sources scanner-sim had already banned, and then /.env created
+# no new ban, the wait below timed out quietly, and before == after held
+# without anything having been tested.
+src2="198.51.100.$((RANDOM % 50 + 150))"
 curl -s -o /dev/null --max-time 10 -H "X-Real-Ip: $src2" "$BASE/.env"
 wait_for 'len(d)>0' 10 >/dev/null
 before=$(received | jqp 'print(len(d))')
@@ -108,14 +112,30 @@ fi
 say "A dead endpoint does not take Traefik with it"
 # Point a webhook at a black hole, trigger bans, and confirm the proxy is fine.
 # An unrecovered panic in a notifier goroutine would kill the whole process.
+#
+# The probe instance gets a router of its own: a middleware no router references
+# is never instantiated by Traefik, so without one this step exercised nothing.
+# It trusts the same proxies as the main instance so X-Real-Ip is believed, and
+# the sources are real addresses — "198.51.100.9$RANDOM" produced strings like
+# 198.51.100.912345, which no parser accepts, so nothing was ever bannable.
 cat > /tmp/scanguard-deadhook.yml <<'EOF'
 http:
+  routers:
+    scanguard-deadhook-probe:
+      rule: PathPrefix(`/deadhook/`)
+      entryPoints: [web]
+      service: site
+      priority: 200
+      middlewares: [scanguard-deadhook-probe]
   middlewares:
     scanguard-deadhook-probe:
       plugin:
         scanguard:
           instanceName: deadhook
           store: {backend: memory}
+          clientIP:
+            trustedProxies: [127.0.0.1/32, 172.16.0.0/12]
+            header: X-Real-Ip
           admin: {enabled: false}
           notify:
             timeout: 1s
@@ -124,9 +144,16 @@ http:
 EOF
 cp /tmp/scanguard-deadhook.yml dynamic/zz-deadhook.yml
 sleep 3
-for _ in $(seq 1 5); do
-  curl -s -o /dev/null --max-time 5 -H "X-Real-Ip: 198.51.100.9$RANDOM" "$BASE/.git/config"
+deadhook_bans=0
+for n in $(seq 1 5); do
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5     -H "X-Real-Ip: 198.51.100.$((200 + n))" "$BASE/deadhook/.git/config")
+  [[ "$code" == "403" ]] && deadhook_bans=$((deadhook_bans + 1))
 done
+if [[ "$deadhook_bans" -eq 5 ]]; then
+  ok "five sources were banned by the instance with the dead webhook"
+else
+  bad "only $deadhook_bans of 5 probes were refused by the dead-webhook instance; the step is not exercising it"
+fi
 sleep 3
 if curl -sf -o /dev/null --max-time 5 "$BASE/"; then
   ok "Traefik is still serving after failed webhook deliveries"

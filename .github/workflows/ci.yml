@@ -95,6 +95,10 @@ jobs:
   integration:
     name: traefik ${{ matrix.traefik }}
     runs-on: ubuntu-latest
+    env:
+      # Always an explicit compose project name (CLAUDE.md): a bare `docker
+      # compose` names the project after the directory, "examples".
+      COMPOSE_PROJECT_NAME: scanguard_e2e
     strategy:
       fail-fast: false
       matrix:
