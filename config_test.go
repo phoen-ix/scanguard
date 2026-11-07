@@ -419,6 +419,31 @@ func TestRulesAddedFromOmmTraffic(t *testing.T) {
 	}
 }
 
+// Development surfaces no production deployment serves, added from eight days of
+// live traffic: Symfony's dev front controller and profiler, and the ownCloud
+// graphapi phpinfo page (CVE-2023-49103).
+func TestDevSurfaceSignaturesAreCovered(t *testing.T) {
+	s := mustSettings(t, nil)
+
+	for _, path := range []string{
+		"/app_dev.php", "/app_dev.php/_profiler/open", "/_profiler/phpinfo", "/_profiler/",
+		"/_profiler", "/apps/graphapi/vendor/microsoft/microsoft-graph/tests/GetPhpInfo.php/.css",
+		"/owncloud/apps/graphapi/vendor/microsoft/microsoft-graph/tests/GetPhpInfo.php",
+	} {
+		if !s.sigMatcher.match(path) {
+			t.Errorf("default signatures do not match %s", path)
+		}
+	}
+	for _, path := range []string{
+		"/app.php", "/app_dev.phpx", "/profiler", "/_profilers", "/api/profiler/open",
+		"/vendor/microsoft/microsoft-graph/tests/other.php",
+	} {
+		if s.sigMatcher.match(path) {
+			t.Errorf("default signatures falsely match %s", path)
+		}
+	}
+}
+
 // The opt-in features ship off, with the defaults the README documents, and range
 // widths are not validated while range escalation is off: a deployment that
 // already keys bans at /24 must keep starting.

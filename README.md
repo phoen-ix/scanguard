@@ -36,20 +36,21 @@ experimental:
 
 | | |
 |---|---|
-| **Signature probes** | 87 curated paths that only a scanner asks for. Blocked before the request reaches your backend. |
+| **Signature probes** | 90 curated paths that only a scanner asks for. Blocked before the request reaches your backend. |
 | **Distinct-404 floods** | A leaky bucket over *distinct* failing paths — so a scanner walking a wordlist is caught, and a real user hammering one broken link never is. |
 | **Honeypots** | Paths you invent that no legitimate client could know. One hit, instant ban, effectively zero false positives. |
 | **Scanner user-agents** | nikto, sqlmap, nuclei, masscan, zgrab and friends. Generic clients like `curl` and `python-requests` are deliberately *not* in the defaults. |
 | **User-agent rotation** | Opt-in (`detectors.uaRotation`): a leaky bucket over the *distinct* user-agents of one source. In 15 days of production traffic 133 banned scanners used six or more within 60s; real Googlebot peaked at five. Risk: many real users behind one address (CGNAT, corporate NAT, a shared IPv6 /64). |
 | **SEO crawlers** | MJ12bot, AhrefsBot, SemrushBot and friends, as their own opt-in switch, since they are not scanners: `detectors.userAgent.crawlers` is `ignore` (default), `ban`, `block` or `exempt`. Search engines are never on the list. **The one setting that can differ per router** — see [Crawlers, per router](#crawlers-per-router). |
-| **Brute force** | Repeated 401/403 from your real login endpoints. |
+| **Brute force** | Repeated 401/403 from the login endpoints you list in `bruteForce.paths`. With none listed every path counts, which is the bad-paths signal under another label — list them. |
 | **Rate abuse** | Token bucket per source, independent of status code. |
-| **Injection payloads** | SQLi, traversal, template injection and XSS probes in the query string and optionally the body. Checked in both raw and decoded form. |
+| **Injection payloads** | SQLi, traversal, template injection and XSS probes in the query string and optionally the body. The query string is checked both raw and percent-decoded; the body as sent. |
 
 Every detector is individually switchable, and every threshold is configurable.
 
 - **Escalating bans:** `1h → 24h → 7d → permanent`, dropping a rung when a source behaves.
-- **Persistent:** bans survive a Traefik restart.
+- **Persistent** with `store.backend: file` or `redis`: bans and console edits
+  survive a Traefik restart. The default `memory` backend forgets both.
 - **Notifications:** a webhook, Discord/Slack/ntfy/Gotify, or AbuseIPDB.
 
 ### Range escalation (opt-in)

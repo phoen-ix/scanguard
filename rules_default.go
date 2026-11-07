@@ -213,6 +213,22 @@ var defaultSignatures = []string{
 	// WordPress sweep, which then looks the version up in a CVE list. A browser
 	// never loads them. 18 sources / 334 requests.
 	`/wp-content/(?:plugins|themes)/[^/]+/(?:readme|changelog)\.txt$`,
+
+	// Development surfaces that a production deployment never serves, measured
+	// over eight days of live traffic at one deployment (478k requests). Each was
+	// requested only by sources that probed for other things too, and the only
+	// 2xx answers came from single-page applications that answer 200 to any path.
+	//
+	// Symfony's dev front controller and web profiler. The profiler hands out the
+	// container's parameters, including database credentials, which is what
+	// /app_dev.php/_profiler/open?file=app/config/parameters.yml asks for.
+	// 214 sources / 543 requests.
+	`/app_dev\.php(?:/|$)`,
+	`/_profiler(?:/|$)`,
+	// ownCloud graphapi (CVE-2023-49103): a phpinfo() page inside a vendored test
+	// directory, reached with a static-file suffix so the server executes it.
+	// 6 sources / 9 requests, but a single request is a full environment dump.
+	`/graphapi/vendor/microsoft/microsoft-graph/tests/getphpinfo\.php`,
 }
 
 // defaultUserAgents matches security tooling that identifies itself.
