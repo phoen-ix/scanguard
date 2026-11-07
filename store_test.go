@@ -102,6 +102,24 @@ func TestMemStoreCapPrefersKeepingManualBans(t *testing.T) {
 	}
 }
 
+// A smaller cap applied at runtime evicts at once, so a reload that lowers
+// store.maxEntries bounds the shadow list as well as the real store.
+func TestMemStoreSetMaxEvictsAtOnce(t *testing.T) {
+	s := newMemStore(100)
+	now := time.Now()
+	for i := 0; i < 60; i++ {
+		_ = s.put(ban(fmt.Sprintf("10.1.%d.%d/32", i/256, i%256), now.Add(time.Duration(i+1)*time.Minute)))
+	}
+	s.setMax(10)
+	if s.size() > 10 {
+		t.Fatalf("store holds %d bans after setMax(10), want at most 10", s.size())
+	}
+	// The soonest-expiring went first, so the longest-lived survive.
+	if _, found := s.get(netip.MustParsePrefix("10.1.0.59/32"), now); !found {
+		t.Error("the longest-lived ban was evicted ahead of sooner-expiring ones")
+	}
+}
+
 func TestFileStoreRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
@@ -235,9 +253,9 @@ func TestEventRingBufferIsBounded(t *testing.T) {
 		t.Errorf("lastSeq = %d, want 100", l.lastSeq())
 	}
 
-	since := l.since(95, 0)
+	since := l.sinceKind(95, 0, "")
 	if len(since) != 5 {
-		t.Fatalf("since(95) returned %d events, want 5", len(since))
+		t.Fatalf("sinceKind(95) returned %d events, want 5", len(since))
 	}
 	if since[0].Seq != 96 {
 		t.Errorf("since(95) starts at seq %d, want 96", since[0].Seq)

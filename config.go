@@ -143,8 +143,9 @@ type UserAgentConfig struct {
 	//	                     router this instance protects, and it escalates.
 	//	"block"            — a matching crawler is refused on THIS router only, with
 	//	                     rejectStatus. No ban record, no offence, no escalation.
-	//	"exempt"           — the list is added to allowlist.userAgents, so a
-	//	                     matching crawler can never be banned by ANY detector.
+	//	"exempt"           — a matching crawler is exempt from every detector and
+	//	                     from the ban list, checked per request and reported
+	//	                     as "crawler-exempt" (see exemptFor).
 	//
 	// THIS SETTING IS PER ROUTER. Unlike every other detector option it is read
 	// from the middleware definition that handled the request, falling back to the
@@ -855,10 +856,11 @@ func (c *Config) parseDetectors(s *settings) error {
 		}
 		s.honeyPaths[p] = struct{}{}
 	}
-	if s.honeyEnabled && len(s.honeyPaths) == 0 {
-		// Not an error: an operator may legitimately want the detector wired up and
-		// add trap paths later from the GUI.
-		s.honeyEnabled = len(s.honeyPaths) > 0
+	if len(s.honeyPaths) == 0 {
+		// Enabled with no trap paths is not an error — an operator may wire the
+		// detector up and add paths later from the console — but there is
+		// nothing to detect until then.
+		s.honeyEnabled = false
 	}
 
 	s.uaEnabled = d.UserAgent.Enabled
@@ -1064,6 +1066,9 @@ func (c *Config) parseNotify(s *settings) error {
 		if !strings.HasPrefix(w.URL, "http://") && !strings.HasPrefix(w.URL, "https://") {
 			return fmt.Errorf("notify.webhooks[%d].url must be an http(s) URL, got %q", i, w.URL)
 		}
+		if err := validateEventFilter(fmt.Sprintf("notify.webhooks[%d].events", i), w.Events); err != nil {
+			return err
+		}
 	}
 	if c.Notify.Chat.Kind != "" {
 		switch strings.ToLower(c.Notify.Chat.Kind) {
@@ -1073,6 +1078,9 @@ func (c *Config) parseNotify(s *settings) error {
 		}
 		if strings.TrimSpace(c.Notify.Chat.URL) == "" {
 			return errors.New("notify.chat.url is required when notify.chat.kind is set")
+		}
+		if err := validateEventFilter("notify.chat.events", c.Notify.Chat.Events); err != nil {
+			return err
 		}
 	}
 	if c.Notify.AbuseIPDB.Enabled && strings.TrimSpace(c.Notify.AbuseIPDB.APIKey) == "" {
@@ -1092,6 +1100,23 @@ func (c *Config) parseNotify(s *settings) error {
 	}
 	if s.geoCacheTTL, err = parseDuration("geo.cacheTTL", c.Geo.CacheTTL, 168*time.Hour); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateEventFilter refuses event kinds a notifier can never receive. Only
+// ban and unban are dispatched (see runtime.record); "reject" and anything else
+// used to be accepted and then silently never fired, which looked like a broken
+// webhook rather than a filter that cannot match.
+func validateEventFilter(field string, events []string) error {
+	for _, e := range events {
+		switch strings.ToLower(strings.TrimSpace(e)) {
+		case eventBan, eventUnban:
+		case "":
+			return fmt.Errorf("%s: empty entry; list %q, %q, or leave the list out for both", field, eventBan, eventUnban)
+		default:
+			return fmt.Errorf("%s: %q is never delivered to notifiers; only %q and %q are", field, e, eventBan, eventUnban)
+		}
 	}
 	return nil
 }

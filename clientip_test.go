@@ -6,15 +6,17 @@ import (
 	"testing"
 )
 
-func mustSettings(t *testing.T, mutate func(*Config)) *settings {
-	t.Helper()
+// mustSettings parses a configuration for a test or a benchmark; testing.TB so
+// bench_test.go does not need a copy of its own.
+func mustSettings(tb testing.TB, mutate func(*Config)) *settings {
+	tb.Helper()
 	cfg := CreateConfig()
 	if mutate != nil {
 		mutate(cfg)
 	}
 	s, err := cfg.parse()
 	if err != nil {
-		t.Fatalf("parse: %v", err)
+		tb.Fatalf("parse: %v", err)
 	}
 	return s
 }

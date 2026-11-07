@@ -16,8 +16,6 @@ type resolution struct {
 	// key is client aggregated to the configured prefix width. It is what bans and
 	// counters are stored under.
 	key netip.Prefix
-	// peer is the TCP peer that opened the connection to Traefik.
-	peer netip.Addr
 	// source records how client was determined, for the audit log.
 	source string
 	// bannable is false when we could not identify the client with enough
@@ -49,7 +47,6 @@ func (s *settings) resolve(req *http.Request) resolution {
 			map[string]interface{}{"remoteAddr": req.RemoteAddr})
 		return res
 	}
-	res.peer = peer
 	res.client = peer
 	res.key = banKey(peer, s.ipv4Prefix, s.ipv6Prefix)
 	res.bannable = true

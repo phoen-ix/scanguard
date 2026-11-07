@@ -480,18 +480,6 @@ func (m *memStore) replaceAll(bans []Ban, now time.Time) int {
 	return len(m.bans)
 }
 
-func (m *memStore) isDirty() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.dirty
-}
-
-func (m *memStore) clearDirty() {
-	m.mu.Lock()
-	m.dirty = false
-	m.mu.Unlock()
-}
-
 // clearDirtyIfSet clears the dirty flag and reports whether it was set, in one
 // step, so a writer can claim the pending changes before copying the table.
 func (m *memStore) clearDirtyIfSet() bool {
@@ -512,4 +500,17 @@ func (m *memStore) size() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.bans)
+}
+
+// setMax changes the ban-table cap, evicting at once if the table is over it.
+// A reload that changes store.maxEntries rebuilds the real store with the new
+// cap; the dry-run shadow list is this type too and has to follow.
+func (m *memStore) setMax(max int) {
+	if max <= 0 {
+		max = 50000
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.max = max
+	m.evictLocked()
 }

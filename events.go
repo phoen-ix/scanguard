@@ -138,15 +138,10 @@ func (l *eventLog) recent(n int) []Event {
 	return out
 }
 
-// since returns events newer than seq, oldest first, for incremental polling by
-// the admin UI. Events already overwritten in the ring are simply gone; the UI
-// notices because the oldest returned sequence jumps.
-func (l *eventLog) since(seq uint64, limit int) []Event {
-	return l.sinceKind(seq, limit, "")
-}
-
-// sinceKind is since restricted to one event kind, or every kind when kind is
-// empty.
+// sinceKind returns events newer than seq, oldest first, for incremental polling
+// by the admin UI; kind restricts it to one event kind, or every kind when empty.
+// Events already overwritten in the ring are simply gone; the UI notices because
+// the oldest returned sequence jumps.
 //
 // Bans and unbans are read from their own ring, which is what makes the filter
 // useful: on a busy instance the shared ring is overwhelmingly rejects — 92% when
@@ -184,6 +179,37 @@ func (l *eventLog) lastSeq() uint64 {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.seq
+}
+
+// resize changes the capacity of both rings, keeping the newest entries. A
+// no-op when the size is unchanged, so applySettings can call it on every
+// configuration apply without churning the rings.
+func (l *eventLog) resize(size int) {
+	if size <= 0 {
+		size = 500
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if len(l.all.buf) == size {
+		return
+	}
+	l.all = l.all.resized(size)
+	l.bans = l.bans.resized(size)
+}
+
+// resized copies the newest entries that fit into a ring of the new size,
+// oldest first so the order of the copy matches the original.
+func (r *eventRing) resized(size int) eventRing {
+	out := eventRing{buf: make([]Event, size)}
+	keep := r.count()
+	if keep > size {
+		keep = size
+	}
+	for i := keep - 1; i >= 0; i-- {
+		out.add(r.at(i))
+	}
+	return out
 }
 
 func truncate(s string, max int) string {

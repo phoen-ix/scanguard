@@ -499,3 +499,74 @@ func TestNotifierDisabledDoesNothing(t *testing.T) {
 	}
 	n.dispatch(banEvent()) // must not panic or block
 }
+
+// An unban by expiry is an unban. The janitor used to record it straight into
+// the event ring, so a webhook consumer that adds a firewall rule on "ban" never
+// got the "unban" that takes it out again; only manual unbans were delivered.
+func TestExpiredBansAreReportedToNotifiers(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		body, _ := io.ReadAll(req.Body)
+		mu.Lock()
+		bodies = append(bodies, string(body))
+		mu.Unlock()
+		rw.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	h := build(t, func(c *Config) {
+		c.Notify.Webhooks = []WebhookConfig{{URL: srv.URL + "/ban"}}
+	})
+	_ = h
+	rt := registry[t.Name()]
+
+	now := time.Now()
+	expired := Ban{Key: "203.0.113.180/32", Detector: detectorSignature, Rule: "/wp-login\\.php",
+		Created: now.Add(-2 * time.Hour), Expires: now.Add(-time.Minute), Offences: 1}
+	if err := rt.store().put(expired); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	shadow := expired
+	shadow.Key = "203.0.113.181/32"
+	if err := rt.shadow.put(shadow); err != nil {
+		t.Fatalf("shadow put: %v", err)
+	}
+
+	rt.tick()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		n := len(bodies)
+		mu.Unlock()
+		if n >= 2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 2 {
+		t.Fatalf("the janitor's sweep produced %d webhook deliveries, want 2 (the real and the shadow expiry)", len(bodies))
+	}
+	seen := map[string]Event{}
+	for _, body := range bodies {
+		var payload struct {
+			Event Event `json:"event"`
+		}
+		if err := json.Unmarshal([]byte(body), &payload); err != nil {
+			t.Fatalf("payload is not valid JSON: %v (%s)", err, body)
+		}
+		seen[payload.Event.Key] = payload.Event
+	}
+	real, ok := seen["203.0.113.180/32"]
+	if !ok || real.Kind != eventUnban || real.Actor != "expiry" || real.DryRun {
+		t.Errorf("the expired ban's unban did not arrive as kind=unban actor=expiry: %+v", real)
+	}
+	dry, ok := seen["203.0.113.181/32"]
+	if !ok || dry.Kind != eventUnban || dry.Actor != "expiry" || !dry.DryRun {
+		t.Errorf("the expired shadow ban's unban did not arrive with dryRun set: %+v", dry)
+	}
+}

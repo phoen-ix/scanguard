@@ -224,9 +224,58 @@ func TestBanEventsSurviveARejectFlood(t *testing.T) {
 	if got := l.sinceKind(0, 0, eventUnban); len(got) != 1 {
 		t.Errorf("unbans share the ban ring; filter returned %d, want 1", len(got))
 	}
-	if got := l.since(0, 0); len(got) != 10 {
-		t.Errorf("unfiltered since returned %d, want the ring size 10", len(got))
+	if got := l.sinceKind(0, 0, ""); len(got) != 10 {
+		t.Errorf("unfiltered sinceKind returned %d, want the ring size 10", len(got))
 	}
+}
+
+// resize keeps the newest entries, in order, and leaves polling consistent.
+func TestEventLogResizeKeepsTheNewestEntries(t *testing.T) {
+	l := newEventLog(10)
+	for i := 1; i <= 10; i++ {
+		l.add(Event{Kind: eventBan, Key: fmt.Sprintf("203.0.113.%d/32", i)})
+	}
+
+	l.resize(5)
+	recent := l.recent(0)
+	if len(recent) != 5 || recent[0].Key != "203.0.113.10/32" || recent[4].Key != "203.0.113.6/32" {
+		t.Fatalf("after shrinking to 5 the ring holds %v, want the five newest, newest first", keysOf(recent))
+	}
+	oldest := l.sinceKind(0, 0, "")
+	if len(oldest) != 5 || oldest[0].Key != "203.0.113.6/32" || oldest[4].Key != "203.0.113.10/32" {
+		t.Errorf("polling after a shrink returned %v, want 6..10 oldest first", keysOf(oldest))
+	}
+	if bans := l.sinceKind(0, 0, eventBan); len(bans) != 5 {
+		t.Errorf("the ban ring kept %d entries after the shrink, want 5", len(bans))
+	}
+
+	// Growing keeps what is there and makes room for more.
+	l.resize(8)
+	if got := len(l.recent(0)); got != 5 {
+		t.Fatalf("growing the ring changed its contents: %d entries, want 5", got)
+	}
+	for i := 11; i <= 14; i++ {
+		l.add(Event{Kind: eventBan, Key: fmt.Sprintf("203.0.113.%d/32", i)})
+	}
+	if got := len(l.recent(0)); got != 8 {
+		t.Errorf("ring holds %d entries after growing to 8 and adding 4, want 8", got)
+	}
+	if l.lastSeq() != 14 {
+		t.Errorf("sequence numbers restarted across a resize: lastSeq %d, want 14", l.lastSeq())
+	}
+	// Same size is a no-op, not a rebuild.
+	l.resize(8)
+	if got := len(l.recent(0)); got != 8 {
+		t.Errorf("a same-size resize dropped entries: %d, want 8", got)
+	}
+}
+
+func keysOf(events []Event) []string {
+	out := make([]string, 0, len(events))
+	for _, e := range events {
+		out = append(out, e.Key)
+	}
+	return out
 }
 
 // url.QueryUnescape refuses the whole query at the first malformed escape, which

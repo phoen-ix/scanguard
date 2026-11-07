@@ -1299,33 +1299,39 @@ func TestEscalationClimbsAcrossABanExpiry(t *testing.T) {
 	c := newCounters(100)
 	key := netip.MustParsePrefix("203.0.113.61/32")
 	const decay = 24 * time.Hour
+	ladder := func(offence int) time.Duration {
+		switch offence {
+		case 1:
+			return time.Hour
+		case 2:
+			return 24 * time.Hour
+		}
+		return 7 * 24 * time.Hour
+	}
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 	// Rung 1: a 1h ban.
-	if got, _ := c.recordOffence(key, now, decay, nil); got != 1 {
+	if got, _ := c.recordOffence(key, now, decay, ladder); got != 1 {
 		t.Fatalf("first offence recorded as %d, want 1", got)
 	}
-	c.noteBan(key, now.Add(time.Hour))
 
 	// Re-offends an hour after that ban expired.
 	now = now.Add(2 * time.Hour)
-	if got, _ := c.recordOffence(key, now, decay, nil); got != 2 {
+	if got, _ := c.recordOffence(key, now, decay, ladder); got != 2 {
 		t.Fatalf("second offence recorded as %d, want 2", got)
 	}
-	c.noteBan(key, now.Add(24*time.Hour))
 
 	// Re-offends a minute after the 24h ban expired. Before the fix this was 1,
 	// forever, and rungs 3 and 4 were unreachable.
 	now = now.Add(24*time.Hour + time.Minute)
-	if got, _ := c.recordOffence(key, now, decay, nil); got != 3 {
+	if got, _ := c.recordOffence(key, now, decay, ladder); got != 3 {
 		t.Fatalf("third offence recorded as %d, want 3 — the ladder is pinned", got)
 	}
-	c.noteBan(key, now.Add(7*24*time.Hour))
 
 	// A source that genuinely behaves after release must still decay: two full
 	// decay periods of quiet after the ban ends drops it two rungs.
 	now = now.Add(7*24*time.Hour + 2*decay + time.Minute)
-	if got, _ := c.recordOffence(key, now, decay, nil); got != 2 {
+	if got, _ := c.recordOffence(key, now, decay, ladder); got != 2 {
 		t.Fatalf("after two quiet decay periods the offence count is %d, want 2", got)
 	}
 }
@@ -1856,5 +1862,176 @@ func TestSubnetEscalationInDryRunUsesTheShadow(t *testing.T) {
 	}
 	if e, ok := rangeBanEvent(rt, "192.0.2.0/24"); !ok || !e.DryRun {
 		t.Errorf("range ban event = %+v (found %v), want a dry-run one", e, ok)
+	}
+}
+
+// A ban the list has lost is written again on the next detection, at the same
+// rung. Three things empty the list behind the ladder's back: eviction at
+// store.maxEntries, a Redis unban made on another replica, and dryRun being
+// switched off after the shadow list took the ban. Before this the request was
+// still refused — the detection stood — but nothing was written, logged or
+// shown, and the source was re-detected on every request for the rest of its
+// rung, invisibly.
+func TestABanMissingFromTheListIsReissued(t *testing.T) {
+	h := build(t, nil)
+	rt := registry[t.Name()]
+	key := netip.MustParsePrefix("203.0.113.170/32")
+
+	if got := send(h, "GET", "/wp-login.php", "203.0.113.170:1", nil).Code; got != 403 {
+		t.Fatalf("probe returned %d, want 403", got)
+	}
+	// The list loses the ban; the ladder still says the source is banned.
+	if existed, _ := rt.store().delete(key); !existed {
+		t.Fatal("the probe did not write a ban")
+	}
+
+	if got := send(h, "GET", "/wp-admin/", "203.0.113.170:1", nil).Code; got != 403 {
+		t.Fatalf("second probe returned %d, want 403", got)
+	}
+	ban, ok := rt.store().get(key, time.Now())
+	if !ok {
+		t.Fatal("the ban was not written again after the list lost it")
+	}
+	if ban.Offences != 1 {
+		t.Errorf("re-issuing the ban moved the ladder to offence %d, want 1", ban.Offences)
+	}
+	var banEvents int
+	for _, e := range rt.events.recent(0) {
+		if e.Kind == eventBan {
+			banEvents++
+		}
+	}
+	if banEvents != 2 {
+		t.Errorf("%d ban events recorded, want 2: the original and the re-issue", banEvents)
+	}
+	// And an innocent request is now refused from the list, not from a detection.
+	if got := send(h, "GET", "/", "203.0.113.170:1", nil).Code; got != 403 {
+		t.Errorf("the re-issued ban is not enforced, got %d", got)
+	}
+}
+
+// The burst guard must survive the re-issue: sixteen concurrent probes from one
+// fresh source are still one ban and one event. The re-issue path consults
+// banRecorded before the list, and that flag is set only after the put, so a
+// sibling request in the burst sees "not recorded yet" and stands down.
+func TestReissueDoesNotReopenTheBurstRace(t *testing.T) {
+	h := build(t, nil)
+	rt := registry[t.Name()]
+
+	const conns = 16
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < conns; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			send(h, "GET", fmt.Sprintf("/wp-admin/%d.php", i), "203.0.113.171:1", nil)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	var banEvents int
+	for _, e := range rt.events.recent(0) {
+		if e.Kind == eventBan {
+			banEvents++
+		}
+	}
+	if banEvents != 1 {
+		t.Errorf("a %d-connection burst emitted %d ban events, want 1", conns, banEvents)
+	}
+}
+
+// Switching dryRun off from the console must not leave the sources the shadow
+// list holds in limbo. They are not transferred — a dry-run ban is hypothetical
+// by definition — but the next detection of such a source writes a real ban at
+// the rung the dry run reached, instead of refusing the request silently.
+func TestSwitchingOffDryRunEnforcesOnTheNextDetection(t *testing.T) {
+	h := build(t, func(c *Config) { c.DryRun = true })
+	rt := registry[t.Name()]
+	key := netip.MustParsePrefix("203.0.113.172/32")
+
+	if got := send(h, "GET", "/wp-login.php", "203.0.113.172:1", nil).Code; got != 200 {
+		t.Fatalf("dry run returned %d, want 200", got)
+	}
+	if _, ok := rt.shadow.get(key, time.Now()); !ok {
+		t.Fatal("the dry run did not record a shadow ban")
+	}
+
+	enforce := false
+	if err := rt.setOverrides(&Overrides{Version: overridesVersion, DryRun: &enforce}, "test"); err != nil {
+		t.Fatalf("switching dryRun off: %v", err)
+	}
+
+	// Nothing hypothetical became real on its own.
+	if got := send(h, "GET", "/", "203.0.113.172:1", nil).Code; got != 200 {
+		t.Fatalf("a shadow ban was enforced after the flip without a new detection, got %d", got)
+	}
+	// The next probe is detected, and this time the ban is real.
+	if got := send(h, "GET", "/wp-login.php", "203.0.113.172:1", nil).Code; got != 403 {
+		t.Fatalf("probe after the flip returned %d, want 403", got)
+	}
+	ban, ok := rt.store().get(key, time.Now())
+	if !ok {
+		t.Fatal("no real ban was written after dryRun was switched off")
+	}
+	if ban.Offences != 1 {
+		t.Errorf("the real ban is at offence %d, want the dry run's rung 1", ban.Offences)
+	}
+	if got := send(h, "GET", "/", "203.0.113.172:1", nil).Code; got != 403 {
+		t.Errorf("the real ban is not enforced, got %d", got)
+	}
+}
+
+// admin.eventLogSize lives on the console's block. The rings are sized when the
+// runtime is created, from whichever middleware Traefik happened to build first,
+// so with the detector first the setting silently did nothing.
+func TestEventLogSizeFollowsTheConsoleWhenBuiltSecond(t *testing.T) {
+	name := t.Name()
+	detector := CreateConfig()
+	detector.InstanceName = name
+	if _, err := New(context.Background(), okBackend(), detector, "detector@test"); err != nil {
+		t.Fatalf("detector: %v", err)
+	}
+	console := CreateConfig()
+	console.InstanceName = name
+	console.UIMode = true
+	console.Admin.Enabled = true
+	console.Admin.Token = "0123456789abcdef"
+	console.Admin.EventLogSize = 1200
+	if _, err := New(context.Background(), okBackend(), console, "console@test"); err != nil {
+		t.Fatalf("console: %v", err)
+	}
+
+	rt := registry[name]
+	if got := len(rt.events.all.buf); got != 1200 {
+		t.Fatalf("event ring holds %d entries, want the console's 1200", got)
+	}
+	for i := 0; i < 700; i++ {
+		rt.events.add(Event{Kind: eventBan, Key: fmt.Sprintf("203.0.113.%d/32", i%250)})
+	}
+	if got := len(rt.events.recent(0)); got != 700 {
+		t.Errorf("ring kept %d of 700 events, want all of them", got)
+	}
+}
+
+// The crawler policy is its own switch and must work with the scanner
+// user-agent detector off: it used to sit inside that detector's branch, so
+// detectors.userAgent.enabled: false turned "block" and "ban" into "ignore"
+// with nothing in the log.
+func TestCrawlerPolicyWorksWithTheUserAgentDetectorOff(t *testing.T) {
+	h := build(t, func(c *Config) {
+		c.Detectors.UserAgent.Enabled = false
+		c.Detectors.UserAgent.Crawlers = crawlersBlock
+	})
+	crawler := map[string]string{"User-Agent": "Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)"}
+	if got := send(h, "GET", "/", "203.0.113.173:1", crawler).Code; got != http.StatusForbidden {
+		t.Errorf("crawlers: block did nothing with the user-agent detector off, got %d", got)
+	}
+	// Proof that the detector really is off: a scanner's own user-agent passes.
+	scanner := map[string]string{"User-Agent": "sqlmap/1.7#stable"}
+	if got := send(h, "GET", "/", "203.0.113.174:1", scanner).Code; got != http.StatusOK {
+		t.Errorf("the user-agent detector still fired while disabled, got %d", got)
 	}
 }

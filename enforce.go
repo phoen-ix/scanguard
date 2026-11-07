@@ -42,14 +42,26 @@ func (rt *runtime) activeBan(s *settings, key netip.Prefix, now time.Time) (Ban,
 func (rt *runtime) applyBan(s *settings, res resolution, det *detection, req *http.Request, now time.Time) Ban {
 	offence, fresh := rt.counters.recordOffence(res.key, now, s.decay, s.banDuration)
 	if !fresh {
-		// Another request from the same burst already banned this source. Carrying
-		// on would overwrite that ban with an identical one and emit a second ban
-		// event: sixteen concurrent probes produced sixteen "banned source" lines
-		// and sixteen console entries for what is one ban.
+		// The ladder says this source is still inside its last ban. Two cases.
+		//
+		// Not recorded yet: another request from the same burst is writing the
+		// ban right now. Carrying on would overwrite it with an identical one and
+		// emit a second ban event — sixteen concurrent probes produced sixteen
+		// "banned source" lines and sixteen console entries for what is one ban.
+		// banRecorded is checked FIRST, because it is set only after the put, so
+		// a true here means the list was written and can be consulted.
+		if !rt.counters.banRecorded(res.key) {
+			return Ban{}
+		}
 		if existing, ok := rt.activeBan(s, res.key, now); ok {
 			return existing
 		}
-		return Ban{}
+		// Recorded, and gone: the list evicted it at store.maxEntries, a dry run
+		// was switched off after the shadow list took it, or another replica
+		// lifted it. Until now this request was still refused — the detection
+		// stands — but nothing was written, logged or shown, and the source was
+		// re-detected on every request for the rest of its rung, invisibly.
+		// Re-issue the ban at the current rung; the ladder does not move.
 	}
 	duration := s.banDuration(offence)
 
@@ -80,7 +92,9 @@ func (rt *runtime) applyBan(s *settings, res resolution, det *detection, req *ht
 	// matched anything; the pattern that fired can.
 	rt.topRules.add(det.detector + ": " + det.rule)
 
-	rt.putBan(s, ban)
+	if rt.putBan(s, ban) {
+		rt.counters.markBanRecorded(res.key)
+	}
 
 	rt.record(Event{
 		Kind:     eventBan,
@@ -123,31 +137,32 @@ func (rt *runtime) applyBan(s *settings, res resolution, det *detection, req *ht
 	return ban
 }
 
-// putBan writes a ban to the list this instance enforces from.
+// putBan writes a ban to the list this instance enforces from, and reports
+// whether it got there.
 //
 // A dry run records the ban in the shadow list instead of the real one. It is
 // still a ban as far as every counter and every report is concerned — it just
 // cannot reject anything, and it never reaches disk or Redis. Without this the
 // source is re-detected on its next request and the ladder runs away; see the
 // comment on runtime.shadow.
-func (rt *runtime) putBan(s *settings, ban Ban) {
+func (rt *runtime) putBan(s *settings, ban Ban) bool {
 	if s.dryRun {
 		if err := rt.shadow.put(ban); err != nil {
 			logWarn(rt.name, "could not record dry-run ban", map[string]interface{}{
 				"key":   ban.Key,
 				"error": err.Error(),
 			})
-			return
+			return false
 		}
 		rt.stats.BansIssued.Add(1)
-		return
+		return true
 	}
 	if err := rt.store().put(ban); err != nil {
 		logWarn(rt.name, "could not record ban", map[string]interface{}{
 			"key":   ban.Key,
 			"error": err.Error(),
 		})
-		return
+		return false
 	}
 	rt.stats.BansIssued.Add(1)
 	// Persist immediately on a ban-list change. Counter updates deliberately do
@@ -158,6 +173,7 @@ func (rt *runtime) putBan(s *settings, ban Ban) {
 			logWarn(rt.name, "could not persist state", map[string]interface{}{"error": err.Error()})
 		}
 	}
+	return true
 }
 
 // applySubnetBan bans rangeKey once enforcement.subnet.threshold of its sources
@@ -177,7 +193,14 @@ func (rt *runtime) applySubnetBan(s *settings, rangeKey netip.Prefix, members in
 	}
 	offence, fresh := rt.counters.recordOffence(rangeKey, now, s.decay, s.banDuration)
 	if !fresh {
-		return
+		// Same two cases as applyBan: a range ban still being written by a
+		// sibling request, or one that was written and has gone from the list.
+		if !rt.counters.banRecorded(rangeKey) {
+			return
+		}
+		if _, ok := rt.activeBan(s, rangeKey, now); ok {
+			return
+		}
 	}
 	duration := s.banDuration(offence)
 	rule := fmt.Sprintf("%d sources in %s within %s", s.subnet.Threshold, rangeKey, formatDuration(s.subnetWindow))
@@ -195,7 +218,9 @@ func (rt *runtime) applySubnetBan(s *settings, rangeKey netip.Prefix, members in
 	if duration != permanent {
 		ban.Expires = now.Add(duration).UTC()
 	}
-	rt.putBan(s, ban)
+	if rt.putBan(s, ban) {
+		rt.counters.markBanRecorded(rangeKey)
+	}
 
 	rt.stats.Detections.Add(1)
 	rt.topDetectors.add(detectorSubnet)

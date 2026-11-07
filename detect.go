@@ -122,8 +122,16 @@ func (rt *runtime) detectRequest(s *settings, crawlers string, req *http.Request
 			}
 		} else if s.uaMatcher.match(ua) {
 			return &detection{detector: detectorUserAgent, rule: s.uaMatcher.which(ua)}
-		} else if (crawlers == crawlersBan || crawlers == crawlersBlock) &&
-			s.crawlerMatcher != nil && s.crawlerMatcher.match(ua) {
+		}
+	}
+
+	// The crawler policy is its own switch, so it is consulted whether or not the
+	// scanner user-agent detector is on. It used to sit inside that detector's
+	// branch, and turning detectors.userAgent off silently turned "ban" and
+	// "block" into "ignore" with nothing in the log. After the scanner patterns,
+	// so a scanner naming itself as both is still reported as "user-agent".
+	if crawlers == crawlersBan || crawlers == crawlersBlock {
+		if ua := req.UserAgent(); ua != "" && s.crawlerMatcher != nil && s.crawlerMatcher.match(ua) {
 			// Reported as its own detector, not as "user-agent": a commercial
 			// crawler refused by policy is not the same finding as a scanner, and
 			// filing them together made the detector statistics lie. What the

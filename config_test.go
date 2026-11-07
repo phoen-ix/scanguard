@@ -123,6 +123,15 @@ func TestInvalidValuesAreRejected(t *testing.T) {
 		"webhook with a non-http URL": func(c *Config) {
 			c.Notify.Webhooks = []WebhookConfig{{URL: "ftp://example.com"}}
 		},
+		"webhook subscribed to an event that is never delivered": func(c *Config) {
+			c.Notify.Webhooks = []WebhookConfig{{URL: "https://example.com", Events: []string{"ban", "reject"}}}
+		},
+		"webhook with an empty event entry (a trailing comma)": func(c *Config) {
+			c.Notify.Webhooks = []WebhookConfig{{URL: "https://example.com", Events: []string{"ban", ""}}}
+		},
+		"chat subscribed to an event that is never delivered": func(c *Config) {
+			c.Notify.Chat = ChatConfig{Kind: "ntfy", URL: "https://example.com", Events: []string{"detect"}}
+		},
 		"unknown chat kind": func(c *Config) {
 			c.Notify.Chat.Kind = "telepathy"
 			c.Notify.Chat.URL = "https://example.com"

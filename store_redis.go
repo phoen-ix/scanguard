@@ -322,11 +322,10 @@ func (c *respClient) mget(keys []string) ([]string, error) {
 	return out, nil
 }
 
-// respValue is a decoded RESP2 reply.
+// respValue is a decoded RESP2 reply. Integer replies are kept as their text:
+// nothing here acts on a count, only on the status, bulk and array shapes.
 type respValue struct {
-	kind byte
 	str  string
-	num  int64
 	arr  []respValue
 	null bool
 }
@@ -343,35 +342,34 @@ func readReply(r *bufio.Reader) (respValue, error) {
 	kind, body := line[0], line[1:]
 	switch kind {
 	case '+':
-		return respValue{kind: kind, str: body}, nil
+		return respValue{str: body}, nil
 	case '-':
-		return respValue{kind: kind, str: body}, fmt.Errorf("redis: %s", body)
+		return respValue{str: body}, fmt.Errorf("redis: %s", body)
 	case ':':
-		n, cerr := strconv.ParseInt(body, 10, 64)
-		if cerr != nil {
+		if _, cerr := strconv.ParseInt(body, 10, 64); cerr != nil {
 			return respValue{}, fmt.Errorf("redis: bad integer reply %q", body)
 		}
-		return respValue{kind: kind, num: n}, nil
+		return respValue{str: body}, nil
 	case '$':
 		n, cerr := strconv.Atoi(body)
 		if cerr != nil {
 			return respValue{}, fmt.Errorf("redis: bad bulk length %q", body)
 		}
 		if n < 0 {
-			return respValue{kind: kind, null: true}, nil
+			return respValue{null: true}, nil
 		}
 		buf := make([]byte, n+2) // payload plus trailing CRLF
 		if _, err := readFull(r, buf); err != nil {
 			return respValue{}, err
 		}
-		return respValue{kind: kind, str: string(buf[:n])}, nil
+		return respValue{str: string(buf[:n])}, nil
 	case '*':
 		n, cerr := strconv.Atoi(body)
 		if cerr != nil {
 			return respValue{}, fmt.Errorf("redis: bad array length %q", body)
 		}
 		if n < 0 {
-			return respValue{kind: kind, null: true}, nil
+			return respValue{null: true}, nil
 		}
 		items := make([]respValue, 0, n)
 		for i := 0; i < n; i++ {
@@ -381,7 +379,7 @@ func readReply(r *bufio.Reader) (respValue, error) {
 			}
 			items = append(items, item)
 		}
-		return respValue{kind: kind, arr: items}, nil
+		return respValue{arr: items}, nil
 	default:
 		return respValue{}, fmt.Errorf("redis: unknown reply type %q", string(kind))
 	}

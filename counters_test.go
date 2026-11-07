@@ -152,16 +152,22 @@ func TestEscalationLadderAndDecay(t *testing.T) {
 	c := newCounters(1000)
 	k := key("203.0.113.8/32")
 	now := time.Now()
+	// Every rung is a one-hour ban; decay is one hour, measured from the ban end.
+	hour := func(int) time.Duration { return time.Hour }
 
-	if got, _ := c.recordOffence(k, now, time.Hour, nil); got != 1 {
+	if got, _ := c.recordOffence(k, now, time.Hour, hour); got != 1 {
 		t.Fatalf("first offence = %d, want 1", got)
 	}
-	if got, _ := c.recordOffence(k, now, time.Hour, nil); got != 2 {
+	// Back a minute after the ban ran out: no decay yet, one rung up.
+	now = now.Add(time.Hour + time.Minute)
+	if got, _ := c.recordOffence(k, now, time.Hour, hour); got != 2 {
 		t.Fatalf("second offence = %d, want 2", got)
 	}
 
-	// Behaving for two decay periods drops two rungs, then this offence adds one.
-	if got, _ := c.recordOffence(k, now.Add(2*time.Hour+time.Minute), time.Hour, nil); got != 1 {
+	// Behaving for two decay periods after that ban ends drops two rungs, then
+	// this offence adds one.
+	now = now.Add(time.Hour + 2*time.Hour + time.Minute)
+	if got, _ := c.recordOffence(k, now, time.Hour, hour); got != 1 {
 		t.Fatalf("offence after decay = %d, want 1", got)
 	}
 }
@@ -208,8 +214,9 @@ func TestForgetClearsLadder(t *testing.T) {
 	k := key("203.0.113.9/32")
 	now := time.Now()
 
-	_, _ = c.recordOffence(k, now, time.Hour, nil)
-	_, _ = c.recordOffence(k, now, time.Hour, nil)
+	hour := func(int) time.Duration { return time.Hour }
+	_, _ = c.recordOffence(k, now, time.Hour, hour)
+	_, _ = c.recordOffence(k, now.Add(90*time.Minute), time.Hour, hour)
 	c.forget(k)
 
 	if got := c.offences(k); got != 0 {
@@ -307,5 +314,23 @@ func TestSubnetMembers(t *testing.T) {
 		if n != tc.wantN || trip != tc.trip {
 			t.Errorf("%s: got (%d, %v), want (%d, %v)", tc.name, n, trip, tc.wantN, tc.trip)
 		}
+	}
+}
+
+// A smaller cap applied at runtime evicts at once: a reload that lowers
+// store.maxEntries used to resize the ban list and leave this table alone.
+func TestCounterCapFollowsSetMax(t *testing.T) {
+	c := newCounters(100)
+	now := time.Now()
+	for i := 0; i < 60; i++ {
+		key := netip.MustParsePrefix(fmt.Sprintf("10.2.0.%d/32", i))
+		c.noteBadPath(key, "/x", now.Add(time.Duration(i)*time.Second), 20, time.Minute)
+	}
+	c.setMax(10)
+	if got := c.size(); got > 10 {
+		t.Fatalf("table holds %d sources after setMax(10), want at most 10", got)
+	}
+	if c.evicted() == 0 {
+		t.Error("the eviction counter did not record the shrink")
 	}
 }

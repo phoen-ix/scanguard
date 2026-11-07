@@ -43,6 +43,12 @@ type sourceState struct {
 	// banUntil is when the ban issued for the last offence ran out. Decay is
 	// measured from it rather than from lastOffence; see recordOffence.
 	banUntil time.Time
+	// banRecorded reports that the ban for the current rung reached the ban list.
+	// recordOffence refuses to advance the ladder while banUntil is in the future,
+	// and applyBan needs to tell two cases of that apart: a sibling request from
+	// the same burst that is writing the ban right now (not recorded yet), and a
+	// ban that was written and has since gone missing from the list (recorded).
+	banRecorded bool
 
 	// On a RANGE key's record only: the sources inside it banned within
 	// enforcement.subnet.window, and the dry-run mode they were counted in.
@@ -306,12 +312,12 @@ func (c *counters) noteSubnetBan(rangeKey, member netip.Prefix, now time.Time, t
 // reads, at any combination of rungs and decay, instead of silently requiring
 // decay to exceed the longest rung.
 // durationFor maps the new offence number to a ban length so the ban window can
-// be recorded in the SAME critical section as the increment. It may be nil, in
-// which case the caller is responsible for calling noteBan; production always
-// passes it, and passing nil reopens the race described below.
+// be recorded in the SAME critical section as the increment; recording it in a
+// separate call afterwards reopened the race described below.
 // fresh reports whether this call actually advanced the ladder. False means the
-// source was already serving a ban, so the caller is looking at a second request
-// from a burst that has already been dealt with and should not record it again.
+// source is still inside the ban window of its last offence: either a second
+// request from a burst that has already been dealt with, or a source whose ban
+// has gone missing from the list — banRecorded tells the two apart.
 func (c *counters) recordOffence(key netip.Prefix, now time.Time, decay time.Duration, durationFor func(int) time.Duration) (offence int, fresh bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -344,19 +350,38 @@ func (c *counters) recordOffence(key netip.Prefix, now time.Time, decay time.Dur
 	st.offences++
 	st.lastOffence = now
 
-	// Recorded here, not in a separate noteBan call after the ban is built. That
-	// call sat about twenty lines later in applyBan, behind a geo lookup, and the
-	// gap was wide enough for a concurrent request to record its own offence
-	// before the first one had marked the source banned — which is the other half
-	// of the same race.
-	if durationFor != nil {
-		d := durationFor(st.offences)
-		if d == permanent {
-			d = permanentBanHorizon
-		}
-		st.banUntil = now.Add(d)
+	// Recorded here, not after the ban is built. That used to happen about twenty
+	// lines later in applyBan, behind a geo lookup, and the gap was wide enough for
+	// a concurrent request to record its own offence before the first one had
+	// marked the source banned — which is the other half of the same race.
+	d := durationFor(st.offences)
+	if d == permanent {
+		d = permanentBanHorizon
 	}
+	st.banUntil = now.Add(d)
+	// A new rung means a new ban that has yet to be written.
+	st.banRecorded = false
 	return st.offences, true
+}
+
+// markBanRecorded notes that the ban for the source's current rung reached the
+// ban list. applyBan calls it after a successful put.
+func (c *counters) markBanRecorded(key netip.Prefix) {
+	c.mu.Lock()
+	if st, ok := c.tbl[key]; ok {
+		st.banRecorded = true
+	}
+	c.mu.Unlock()
+}
+
+// banRecorded reports whether the ban for the source's current rung was written.
+func (c *counters) banRecorded(key netip.Prefix) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if st, ok := c.tbl[key]; ok {
+		return st.banRecorded
+	}
+	return false
 }
 
 // quietSince reports the instant from which this source has had the opportunity
@@ -367,21 +392,6 @@ func (st *sourceState) quietSince() time.Time {
 		return st.banUntil
 	}
 	return st.lastOffence
-}
-
-// noteBan records when the ban just issued for a source will expire, so the next
-// offence can measure decay from the end of it. A permanent ban (zero expiry)
-// records nothing: the source can never come back to re-offend.
-func (c *counters) noteBan(key netip.Prefix, expires time.Time) {
-	if expires.IsZero() {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if st, ok := c.tbl[key]; ok {
-		st.banUntil = expires
-	}
 }
 
 // seed restores a ladder position from a ban that outlived the process.
@@ -414,6 +424,23 @@ func (c *counters) seed(key netip.Prefix, offences int, created, expires, now ti
 	}
 	if expires.After(st.banUntil) {
 		st.banUntil = expires
+	}
+	// Seeded from a ban that is in the list by definition.
+	st.banRecorded = true
+}
+
+// setMax changes the table cap, evicting at once if the table is already over
+// it. Called when a configuration reload changes store.maxEntries, which used
+// to resize the ban list and leave this table at its original cap.
+func (c *counters) setMax(max int) {
+	if max <= 0 {
+		max = 50000
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.max = max
+	if len(c.tbl) > c.max {
+		c.evictLocked()
 	}
 }
 

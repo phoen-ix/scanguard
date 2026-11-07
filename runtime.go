@@ -264,6 +264,10 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 		})
 		rt.setDeps(store, rt.notifier(), rt.geo())
 		rt.storeFingerprint = newFP
+		// The counter table and the dry-run shadow list are sized from the same
+		// setting; they used to keep the cap they were created with.
+		rt.counters.setMax(s.maxEntries)
+		rt.shadow.setMax(s.maxEntries)
 		// The new backend may have brought persisted bans with it — this is the
 		// ordinary startup path whenever Traefik builds the console (memory store,
 		// no store block of its own) before the detector (file or Redis). The
@@ -342,6 +346,11 @@ func (rt *runtime) applySettings(s *settings) {
 	if cur, ok := rt.tarpitSem.Load().(chan struct{}); !ok || cap(cur) != s.tarpitMax {
 		rt.tarpitSem.Store(make(chan struct{}, s.tarpitMax))
 	}
+
+	// The rings were sized once, at runtime creation, from whichever middleware
+	// Traefik happened to build first. admin.eventLogSize lives on the console's
+	// block, so when the detector came first the setting silently did nothing.
+	rt.events.resize(s.eventLogSize)
 
 	// The store has to know how wide the detector's own keys are, so it can tell
 	// an operator's range ban from an ordinary one. Both widths are editable, so
@@ -577,9 +586,13 @@ func (rt *runtime) tick() {
 	}
 	now := time.Now()
 
+	// Through record, not events.add: an unban by expiry is an unban, and a
+	// webhook consumer that adds a firewall rule on "ban" needs the matching
+	// "unban" to take it out again. Recorded straight into the ring, these never
+	// reached a notifier, so only manual unbans were ever delivered.
 	for _, b := range rt.store().sweep(now) {
 		rt.stats.Expired.Add(1)
-		rt.events.add(Event{
+		rt.record(Event{
 			Kind:     eventUnban,
 			Key:      b.Key,
 			Detector: b.Detector,
@@ -590,9 +603,10 @@ func (rt *runtime) tick() {
 
 	// The shadow list expires on the same schedule as the real one, so a dry run
 	// re-detects a source once its hypothetical ban would have run out — which is
-	// exactly what enforcement would have done.
+	// exactly what enforcement would have done. Delivered with DryRun set, like
+	// the would-ban that preceded it.
 	for _, b := range rt.shadow.sweep(now) {
-		rt.events.add(Event{
+		rt.record(Event{
 			Kind:     eventUnban,
 			Key:      b.Key,
 			Detector: b.Detector,
@@ -792,7 +806,11 @@ func storeFingerprint(s *settings) string {
 		"redisAddr": s.redis.Address,
 		"redisDB":   strconv.Itoa(s.redis.DB),
 		"redisKey":  s.redis.KeyPrefix,
-		"max":       strconv.Itoa(s.maxEntries),
+		// The credential and the deadline are connection state the client is
+		// built with; left out, a rotated Redis password needed a Traefik restart.
+		"redisPassword": s.redis.Password,
+		"redisTimeout":  s.redisTimeout.String(),
+		"max":           strconv.Itoa(s.maxEntries),
 	})
 }
 

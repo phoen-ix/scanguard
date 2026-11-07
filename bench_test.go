@@ -107,7 +107,7 @@ func BenchmarkUserAgentMatcher(b *testing.B) {
 }
 
 func BenchmarkClientIPResolution(b *testing.B) {
-	s := mustSettingsB(b, func(c *Config) {
+	s := mustSettings(b, func(c *Config) {
 		c.ClientIP.TrustedProxies = []string{
 			"173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "10.0.0.0/8",
 		}
@@ -122,17 +122,4 @@ func BenchmarkClientIPResolution(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		s.resolve(req)
 	}
-}
-
-func mustSettingsB(b *testing.B, mutate func(*Config)) *settings {
-	b.Helper()
-	cfg := CreateConfig()
-	if mutate != nil {
-		mutate(cfg)
-	}
-	s, err := cfg.parse()
-	if err != nil {
-		b.Fatalf("parse: %v", err)
-	}
-	return s
 }
