@@ -27,6 +27,16 @@ http:
             userAgent: { enabled: true, useDefaults: true, crawlers: ignore }
 ```
 
+## Which crawlers
+
+The built-in list is twelve commercial SEO and backlink crawlers (MJ12bot,
+AhrefsBot, SemrushBot and friends); search engines are never in it. Add your
+own with `detectors.userAgent.crawlerPatterns` — regular expressions,
+case-insensitive, e.g. `\bgptbot\b` or `\bclaudebot\b`. They are part of the
+same list, so every policy below applies to them exactly as to the built-ins.
+The setting is instance-wide and editable in the console; the policy is the
+part that is per router.
+
 ## The four values
 
 **Prefer `block` to `ban` when the instance also protects a site you want

@@ -52,6 +52,9 @@ Anything that starts Docker goes through `~/repos/.fleet/scripts/slot heavy scan
   legitimate client of a site without that software would request.
 - `clientIP`, `store`, `admin`, `notify` are not editable from the console
   (`overrides.go`); edits go through the same `Config.parse` as the file.
+  Adding a field to an editable section means bumping `overridesVersion`,
+  migrating the previous version in `applyOverrides`, and recording the new
+  signature in `settings_test.go` (the test fails until you do).
 - `.traefik.yml` `testData` is executed by the plugin catalog: it must stay a
   config `New()` accepts.
 - **Harness ports are fixed**: 8800 site, 8899 webhook sink, 9900 console,

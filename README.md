@@ -343,6 +343,7 @@ notify:
 ```yaml
 enabled: true
 instanceName: default        # keys the shared state; instances sharing a name share bans
+retireAfter: 10m             # retire an instance a reload no longer builds, once quiet this long; "0" never
 dryRun: false                # detect and log, never block
 observeResponse: true        # wrap ResponseWriter; needed by badPaths and bruteForce
 uiMode: false                # serve only the console on this router (see "Turn on the console")
@@ -351,14 +352,19 @@ store:
   backend: memory            # memory | file | redis
   path: /var/lib/scanguard/state.json
   snapshotInterval: 30s      # also the janitor period: expiry sweeps and the Redis refresh run on it (30s minimum)
+  flushDebounce: 1s          # bans within this long share one snapshot write; "0" writes on every ban; at most 1m
   failOpen: true
   maxEntries: 50000          # hard cap on tracked sources (LRU) and on bans (soonest-expiring go first)
   redis:
     address: ""              # required for the redis backend, e.g. redis:6379
+    username: ""             # ACL user (Redis 6+); needs the password
     password: ""
     db: 0
     keyPrefix: "scanguard:"
     timeout: 2s              # > 0; keyPrefix may not contain * ? [ ] \
+    tls: false               # TLS, verified against tlsCAFile (PEM) or the system roots
+    tlsServerName: ""        # the name checked; default the host part of address
+    tlsCAFile: ""
 
 clientIP:
   trustedProxies: []         # NO DEFAULT — see the warning above
@@ -375,7 +381,8 @@ detectors:
   signatures:  { enabled: true,  useDefaults: true, patterns: [], exclude: [] }
   honeypots:   { enabled: true,  paths: [] }
   userAgent:   { enabled: true,  useDefaults: true, patterns: [], banEmptyUA: false,
-                 crawlers: ignore }   # ignore | ban | block | exempt — settable per router
+                 crawlers: ignore,    # ignore | ban | block | exempt — settable per router
+                 crawlerPatterns: [] }   # your own crawlers, added to the twelve built-ins
   badPaths:    { enabled: true,  capacity: 20, leak: 10s, statuses: [400,401,403,404,405,501] }   # capacity at most 128
   bruteForce:  { enabled: false, capacity: 5, window: 60s, statuses: [401,403], paths: [] }
   rateAbuse:   { enabled: false, rps: 50, burst: 100 }
@@ -385,6 +392,7 @@ detectors:
 enforcement:
   rejectStatus: 403          # 200-599; 404 hides the middleware's existence
   rejectBody: ""
+  rejectContentType: "text/plain; charset=utf-8"
   escalation: ["1h", "24h", "168h", "0"]   # "0" means permanent
   decay: 24h                 # behave this long and drop a rung
   tarpit: { enabled: false, delay: 3s, maxConcurrent: 50 }   # delay > 0 when enabled; maxConcurrent at most 10000
@@ -403,7 +411,7 @@ notify:
   abuseipdb: { enabled: false, apiKey: "", report: true, check: false, minConfidence: 75, cacheTTL: 24h,
                endpoint: https://api.abuseipdb.com }   # crawler and reputation bans are never reported
 
-geo: { enabled: false, provider: ip-api, cacheTTL: 168h, endpoint: http://ip-api.com }   # console display only
+geo: { enabled: false, provider: ip-api, cacheTTL: 168h, timeout: 3s, endpoint: http://ip-api.com }   # console display only; failed lookups are retried after 1h
 
 admin:
   enabled: false             # off by default; no default token
