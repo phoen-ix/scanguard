@@ -392,6 +392,24 @@ func TestGeoLookupIsAsyncAndCached(t *testing.T) {
 	}
 }
 
+// geo.endpoint and notify.abuseipdb.endpoint reach the clients: a self-hosted
+// stand-in, or the fakes the interpreter smoke test uses.
+func TestEndpointsAreConfigurable(t *testing.T) {
+	s := mustSettings(t, func(c *Config) {
+		c.Geo.Endpoint = "http://geo.internal:8080/"
+		c.Notify.AbuseIPDB.Endpoint = "https://abuse.internal"
+	})
+	if g := newGeoCache(s); g.base != "http://geo.internal:8080" {
+		t.Errorf("geo base = %q", g.base)
+	}
+	if n := newNotifier(s); n.abuseBase != "https://abuse.internal" {
+		t.Errorf("abuse base = %q", n.abuseBase)
+	}
+	if d := mustSettings(t, nil); newGeoCache(d).base != ipAPIBase || newNotifier(d).abuseBase != abuseIPDBBase {
+		t.Error("the defaults are not the public services")
+	}
+}
+
 func TestGeoDisabledMakesNoCalls(t *testing.T) {
 	got := &capture{}
 	srv := httptest.NewServer(got.handler(200, `{"status":"success","countryCode":"NL"}`))
@@ -417,11 +435,8 @@ func drainNotifyQueue(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(notifyQueue) == 0 {
-			notifyWorkersActive.Wait()
-			if len(notifyQueue) == 0 {
-				return
-			}
+		if notifyPending.Load() == 0 {
+			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -502,6 +517,12 @@ func TestDispatchDropsAndCountsPastTheQueue(t *testing.T) {
 		c.Notify.Webhooks = []WebhookConfig{{URL: srv.URL}}
 		c.Notify.Timeout = "10s"
 	})
+
+	// The warning is throttled process-wide; start this burst with a fresh window.
+	notifyDropWarnMu.Lock()
+	notifyDropWarnAt = time.Time{}
+	notifyDroppedSince = 0
+	notifyDropWarnMu.Unlock()
 
 	total := notifyQueueSize + notifyWorkers + 50
 	lines := captureLog(t, func() {

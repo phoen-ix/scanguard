@@ -42,10 +42,13 @@ var (
 	notifyStartOnce sync.Once
 	// notifyDropWarnMu and notifyDropWarnAt throttle the queue-full warning to
 	// one a minute, with the number dropped since the last one.
-	notifyDropWarnMu    sync.Mutex
-	notifyDropWarnAt    time.Time
-	notifyDroppedSince  int64
-	notifyWorkersActive sync.WaitGroup
+	notifyDropWarnMu   sync.Mutex
+	notifyDropWarnAt   time.Time
+	notifyDroppedSince int64
+	// notifyPending counts events queued or being delivered: raised before the
+	// send into the queue, lowered when the delivery returns (or the event is
+	// dropped). Zero means nothing is in flight anywhere.
+	notifyPending atomic.Int64
 )
 
 func startNotifyWorkers() {
@@ -53,9 +56,8 @@ func startNotifyWorkers() {
 		for i := 0; i < notifyWorkers; i++ {
 			go func() {
 				for job := range notifyQueue {
-					notifyWorkersActive.Add(1)
 					func() {
-						defer notifyWorkersActive.Done()
+						defer notifyPending.Add(-1)
 						defer recoverPanic(job.n.instance, "notifier")
 						job.n.send(job.e)
 					}()
@@ -90,9 +92,10 @@ type notifier struct {
 	cacheTTL time.Duration
 	inflight map[string]struct{}
 
-	// abuseBase is the AbuseIPDB API root. It is a field rather than a constant so
-	// the tests can point it at an httptest server: outbound calls that only ever
-	// run against a live third party are outbound calls nobody has actually tested.
+	// abuseBase is the AbuseIPDB API root (notify.abuseipdb.endpoint). A
+	// setting rather than a constant so the tests and the interpreter smoke test
+	// can point it at an httptest server: outbound calls that only ever run
+	// against a live third party are outbound calls nobody has actually tested.
 	abuseBase string
 }
 
@@ -126,7 +129,7 @@ func newNotifier(s *settings) *notifier {
 		scores:    make(map[string]abuseScore),
 		inflight:  make(map[string]struct{}),
 		cacheTTL:  s.abuseCacheTTL,
-		abuseBase: abuseIPDBBase,
+		abuseBase: s.abuseEndpoint,
 	}
 }
 
@@ -145,9 +148,11 @@ func (n *notifier) dispatch(e Event) {
 		return
 	}
 	startNotifyWorkers()
+	notifyPending.Add(1)
 	select {
 	case notifyQueue <- notifyJob{n: n, e: e}:
 	default:
+		notifyPending.Add(-1)
 		n.dropped.Add(1)
 		noteNotifyDrop(n.instance)
 	}
