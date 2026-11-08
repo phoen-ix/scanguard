@@ -31,9 +31,13 @@ type Event struct {
 	UA       string    `json:"ua,omitempty"`
 	Status   int       `json:"status,omitempty"`
 	BanFor   string    `json:"banFor,omitempty"`
-	DryRun   bool      `json:"dryRun,omitempty"`
-	Actor    string    `json:"actor,omitempty"`
-	Country  string    `json:"country,omitempty"`
+	// Expires is when the ban runs out, absent on a permanent ban. A webhook
+	// helper that keys a firewall rule off a ban can schedule its own removal
+	// from this rather than parsing BanFor.
+	Expires *time.Time `json:"expires,omitempty"`
+	DryRun  bool       `json:"dryRun,omitempty"`
+	Actor   string     `json:"actor,omitempty"`
+	Country string     `json:"country,omitempty"`
 }
 
 // eventLog holds the recent activity shown by the admin UI. Fixed size is the

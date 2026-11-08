@@ -22,6 +22,7 @@ notify:
   "event": { "seq": 1041, "time": "2026-08-16T10:00:00Z", "kind": "ban",
              "key": "203.0.113.5/32", "client": "203.0.113.5",
              "detector": "signature", "rule": "/wp-login\\.php", "banFor": "1h",
+             "expires": "2026-08-16T11:00:00Z",
              "method": "GET", "host": "example.com", "path": "/wp-login.php",
              "ua": "Mozilla/5.0 zgrab/0.x" } }
 ```
@@ -41,7 +42,8 @@ notify:
 | `client` | automatic bans of a single source | the address that was seen; absent on range bans and manual bans |
 | `detector` | ban; unban by expiry | one of `signature`, `honeypot`, `user-agent`, `crawler`, `bad-paths`, `brute-force`, `rate-abuse`, `payload`, `ua-rotation`, `reputation`, `subnet`, `manual` |
 | `rule` | ban | the pattern or threshold that fired; the operator's reason on a manual ban |
-| `banFor` | ban | `1h`, `1d`, `7d`, … or `permanent` |
+| `banFor` | ban | `1h`, `1d`, `7d`, `1h30m` when a rung is not a whole unit, or `permanent` |
+| `expires` | ban, unless permanent | RFC 3339, UTC: when the ban runs out. Schedule the rule's removal from this rather than parsing `banFor`; absent on a permanent ban |
 | `method`, `host`, `path`, `ua` | automatic bans | the request that tripped the detector; `path` and `ua` are truncated to 512 and 256 bytes |
 | `country` | ban, with `geo.enabled` | ISO country code from the display-only lookup, when the cache already had it |
 | `actor` | unban; manual ban | `expiry` when the janitor swept the ban, `token` for a console token, otherwise the `X-Forwarded-User` identity |
@@ -64,7 +66,20 @@ reporter skips it, and a range is never reported there.
   hammering your site cannot turn your webhook endpoint into a firehose.
 - **Validated at startup.** `events` may name only `ban` and `unban`; anything
   else is refused with the reason rather than accepted and never fired.
-- **Bounded and fire-and-forget.** At most 32 deliveries are in flight across the
-  process; beyond that an event is dropped rather than queued. A dead endpoint
-  costs nothing but a log line, and cannot stall a request or take Traefik down
-  with it.
+- **Queued, bounded, fire-and-forget.** Events wait in a queue of 1024 and
+  eight workers deliver them, so a janitor tick that expires hundreds of bans
+  at once delivers every unban. If the queue is full — a sustained ban flood
+  against an endpoint that answers slowly — events are dropped rather than
+  held: the count is `stats.notifyDropped` in `/api/state`, and the log says
+  so at most once a minute. A dead endpoint costs nothing but a log line, and
+  cannot stall a request or take Traefik down with it. A helper that must never
+  miss an event should reconcile against `GET /api/bans` now and then.
+- **Once per instance, not once per replica.** With `store.backend: redis`,
+  every replica's janitor notices the same expiry; one of them claims it in
+  Redis and delivers the unban, the others only record it in their own
+  console. A manual unban is delivered by the replica that performed it. If
+  Redis is unreachable at that moment, every replica delivers: duplicates beat
+  silence for a helper waiting on the unban.
+- **Dry runs are labelled everywhere.** The webhook payload carries
+  `dryRun: true`, the console shows "(dry)", and a chat message says
+  "would have banned (dry run)".

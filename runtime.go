@@ -176,7 +176,10 @@ type stats struct {
 	// performs is logged; the attempts to reach it were not, so token guessing
 	// against the gate was invisible.
 	AuthFailures atomic.Int64
-	StartedAt    time.Time
+	// NotifyDropped counts ban and unban events no notifier delivered because
+	// the delivery queue was full; see notifier.dispatch.
+	NotifyDropped atomic.Int64
+	StartedAt     time.Time
 }
 
 // acquireRuntime returns the shared runtime for this instance name, creating it
@@ -206,7 +209,7 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 			topHosts:          newTally(1000),
 			topExempt:         newTally(16),
 		}
-		rt.setDeps(store, newNotifier(s), newGeoCache(s))
+		rt.setDeps(store, rt.newNotifier(s), newGeoCache(s))
 		rt.stats.StartedAt = time.Now().UTC()
 		if s.uiMode {
 			rt.uiFP = fp
@@ -321,7 +324,7 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 	// changed; see the fingerprint fields.
 	n := rt.notifier()
 	if newFP := notifyFingerprint(&merged); newFP != rt.notifyFingerprint {
-		n = newNotifier(&merged)
+		n = rt.newNotifier(&merged)
 		rt.notifyFingerprint = newFP
 	}
 	g := rt.geo()
@@ -371,6 +374,14 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 		"ruleOverrides": ov.sections(),
 	})
 	return rt, nil
+}
+
+// newNotifier builds a notifier that counts its drops into this runtime's
+// stats, where the console can show them.
+func (rt *runtime) newNotifier(s *settings) *notifier {
+	n := newNotifier(s)
+	n.dropped = &rt.stats.NotifyDropped
+	return n
 }
 
 // carryOverridesLocked saves the console's rule edits into a store that is

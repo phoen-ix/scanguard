@@ -2,12 +2,14 @@ package scanguard
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -193,8 +195,8 @@ func TestWebhookFailuresAreSurvivable(t *testing.T) {
 func TestChatPayloadsPerProvider(t *testing.T) {
 	cases := map[string]func(t *testing.T, body string, hdr http.Header){
 		"discord": func(t *testing.T, body string, _ http.Header) {
-			var m map[string]string
-			if err := json.Unmarshal([]byte(body), &m); err != nil || m["content"] == "" {
+			var m map[string]interface{}
+			if err := json.Unmarshal([]byte(body), &m); err != nil || m["content"] == "" || m["content"] == nil {
 				t.Errorf("discord payload = %s", body)
 			}
 		},
@@ -408,46 +410,302 @@ func TestGeoDisabledMakesNoCalls(t *testing.T) {
 	}
 }
 
-// Under a ban flood, dispatch must drop notifications rather than spawn an
-// unbounded number of goroutines inside the reverse proxy.
+// drainNotifyQueue waits until every queued delivery has been handed to a
+// worker and finished. The queue is package-global, so a test that leaves jobs
+// behind would hand them to the next test's expectations.
+func drainNotifyQueue(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(notifyQueue) == 0 {
+			notifyWorkersActive.Wait()
+			if len(notifyQueue) == 0 {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the notification queue did not drain")
+}
+
+// Delivery is a bounded queue drained by a fixed pool: a flood never spawns an
+// unbounded number of goroutines inside the reverse proxy, dispatch never
+// blocks, and nothing that fits the queue is lost. The old check compared
+// len(ch) with cap(ch), which no channel can ever fail.
 func TestDispatchIsBoundedNotUnbounded(t *testing.T) {
 	release := make(chan struct{})
-	var inFlight sync.WaitGroup
-
+	var inFlight, peak atomic.Int64
+	var delivered atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		cur := inFlight.Add(1)
+		for {
+			old := peak.Load()
+			if cur <= old || peak.CompareAndSwap(old, cur) {
+				break
+			}
+		}
 		<-release
+		inFlight.Add(-1)
+		delivered.Add(1)
 		rw.WriteHeader(200)
 	}))
 	defer srv.Close()
 
 	n := notifierFor(t, func(c *Config) {
 		c.Notify.Webhooks = []WebhookConfig{{URL: srv.URL}}
-		c.Notify.Timeout = "5s"
+		c.Notify.Timeout = "10s"
 	})
 
-	// Far more events than the semaphore allows.
-	for i := 0; i < 500; i++ {
-		inFlight.Add(1)
+	const events = 500
+	var callers sync.WaitGroup
+	for i := 0; i < events; i++ {
+		callers.Add(1)
 		go func() {
-			defer inFlight.Done()
+			defer callers.Done()
 			n.dispatch(banEvent())
 		}()
 	}
-
-	// dispatch itself must return immediately whether or not it queued anything.
 	done := make(chan struct{})
-	go func() { inFlight.Wait(); close(done) }()
+	go func() { callers.Wait(); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		close(release)
-		t.Fatal("dispatch blocked instead of dropping when saturated")
+		t.Fatal("dispatch blocked instead of queueing")
 	}
 
-	if n := len(notifySem); n > cap(notifySem) {
-		t.Errorf("%d in flight exceeds the cap of %d", n, cap(notifySem))
+	// Concurrency is measured where it matters, at the receiver.
+	time.Sleep(100 * time.Millisecond)
+	if p := peak.Load(); p > notifyWorkers {
+		t.Errorf("%d deliveries were in flight at once, want at most %d workers", p, notifyWorkers)
+	}
+	if n.dropped.Load() != 0 {
+		t.Errorf("%d events dropped although %d fit a queue of %d", n.dropped.Load(), events, notifyQueueSize)
 	}
 	close(release)
+	drainNotifyQueue(t)
+	if got := delivered.Load(); got != events {
+		t.Errorf("%d of %d queued events were delivered", got, events)
+	}
+}
+
+// Past the queue, events are dropped — counted and logged — rather than
+// blocking the caller or growing without bound.
+func TestDispatchDropsAndCountsPastTheQueue(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		<-release
+		rw.WriteHeader(200)
+	}))
+	defer srv.Close()
+	n := notifierFor(t, func(c *Config) {
+		c.Notify.Webhooks = []WebhookConfig{{URL: srv.URL}}
+		c.Notify.Timeout = "10s"
+	})
+
+	total := notifyQueueSize + notifyWorkers + 50
+	lines := captureLog(t, func() {
+		for i := 0; i < total; i++ {
+			n.dispatch(banEvent())
+		}
+	})
+	if n.dropped.Load() == 0 {
+		t.Error("nothing was counted as dropped past the queue")
+	}
+	if n.dropped.Load() > 50+notifyWorkers {
+		t.Errorf("%d dropped, want only what did not fit the queue and the workers", n.dropped.Load())
+	}
+	warned := 0
+	for _, l := range lines {
+		if strings.Contains(l.Msg, "notification queue is full") {
+			warned++
+		}
+	}
+	if warned != 1 {
+		t.Errorf("the queue-full warning was logged %d times for one burst, want once (throttled)", warned)
+	}
+	close(release)
+	drainNotifyQueue(t)
+}
+
+// The failure the queue exists for: a janitor tick that expires more bans than
+// the old semaphore had slots must deliver an unban for every one of them. A
+// firewall helper that misses an unban keeps the rule forever.
+func TestEveryExpiryOfATickReachesTheWebhook(t *testing.T) {
+	var delivered atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		_, _ = io.ReadAll(req.Body)
+		delivered.Add(1)
+		rw.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	build(t, func(c *Config) {
+		c.Notify.Webhooks = []WebhookConfig{{URL: srv.URL, Events: []string{"unban"}}}
+	})
+	rt := registry[t.Name()]
+	const expired = 100
+	now := time.Now()
+	for i := 0; i < expired; i++ {
+		b := Ban{Key: fmt.Sprintf("203.0.%d.%d/32", 100+i/250, i%250), Detector: detectorSignature,
+			Created: now.Add(-2 * time.Hour), Expires: now.Add(-time.Minute), Offences: 1}
+		if err := rt.store().put(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rt.tick()
+	drainNotifyQueue(t)
+	if got := delivered.Load(); got != expired {
+		t.Fatalf("%d of %d expiry unbans were delivered", got, expired)
+	}
+	if rt.stats.NotifyDropped.Load() != 0 {
+		t.Errorf("%d events counted as dropped", rt.stats.NotifyDropped.Load())
+	}
+}
+
+// Crawler-policy and reputation bans are never filed with AbuseIPDB: the first
+// reports a commercial crawler as an attacker, the second reports an address
+// back to the service whose score banned it.
+func TestAbuseIPDBSkipsCrawlerAndReputationBans(t *testing.T) {
+	got := &capture{}
+	srv := httptest.NewServer(got.handler(200, ""))
+	defer srv.Close()
+	n := notifierFor(t, func(c *Config) {
+		c.Notify.AbuseIPDB = AbuseIPDBConfig{Enabled: true, APIKey: "key-123", Report: true}
+	})
+	n.abuseBase = srv.URL
+	for i, det := range []string{detectorCrawler, detectorReputation, detectorManual} {
+		e := banEvent()
+		e.Detector = det
+		e.Client = fmt.Sprintf("203.0.113.%d", 50+i)
+		n.send(e)
+	}
+	if got.count() != 0 {
+		t.Errorf("%d reports were filed for detectors that must not be reported", got.count())
+	}
+	e := banEvent()
+	e.Detector = detectorHoneypot
+	n.send(e)
+	snap := got.snapshot()
+	form, _ := url.ParseQuery(snap.body)
+	if snap.calls != 1 || form.Get("categories") != "21" {
+		t.Errorf("a honeypot ban was filed as %q (%d calls), want category 21 without Port Scan", form.Get("categories"), snap.calls)
+	}
+}
+
+// The chat text embeds the attacker's request path. Discord gets a message
+// that cannot mention anyone; Slack gets its control characters escaped.
+func TestChatMessagesCannotPingTheChannel(t *testing.T) {
+	for _, kind := range []string{"discord", "slack"} {
+		got := &capture{}
+		srv := httptest.NewServer(got.handler(200, ""))
+		n := notifierFor(t, func(c *Config) { c.Notify.Chat = ChatConfig{Kind: kind, URL: srv.URL} })
+		e := banEvent()
+		e.Path = "/@everyone/<!channel>/wp-login.php"
+		n.send(e)
+		body := got.snapshot().body
+		srv.Close()
+		switch kind {
+		case "discord":
+			var m struct {
+				Content         string `json:"content"`
+				AllowedMentions struct {
+					Parse []string `json:"parse"`
+				} `json:"allowed_mentions"`
+			}
+			if err := json.Unmarshal([]byte(body), &m); err != nil || m.AllowedMentions.Parse == nil || len(m.AllowedMentions.Parse) != 0 {
+				t.Errorf("discord payload does not disable mentions: %s", body)
+			}
+		case "slack":
+			var m map[string]string
+			if err := json.Unmarshal([]byte(body), &m); err != nil {
+				t.Fatalf("slack payload: %v", err)
+			}
+			if strings.Contains(m["text"], "<!channel>") || !strings.Contains(m["text"], "&lt;!channel&gt;") {
+				t.Errorf("slack text was not escaped: %s", m["text"])
+			}
+		}
+	}
+}
+
+// A chat endpoint answering 4xx is a dead webhook; it is said in the log, and a
+// dry-run would-ban is announced as one.
+func TestChatFailuresAreLoggedAndDryRunIsLabelled(t *testing.T) {
+	got := &capture{}
+	srv := httptest.NewServer(got.handler(404, "Unknown Webhook"))
+	defer srv.Close()
+	n := notifierFor(t, func(c *Config) { c.Notify.Chat = ChatConfig{Kind: "discord", URL: srv.URL} })
+	dry := banEvent()
+	dry.DryRun = true
+	lines := captureLog(t, func() { n.send(dry) })
+	if f := fieldsOf(lines, "chat endpoint rejected the notification"); f == nil || f["status"] != float64(404) {
+		t.Errorf("a 404 from the chat endpoint was not logged with its status: %v", f)
+	}
+	if body := got.snapshot().body; !strings.Contains(body, "dry run") || strings.Contains(body, "scanguard banned ") {
+		t.Errorf("a dry-run would-ban was announced as a ban: %s", body)
+	}
+}
+
+// The transport error from a failed delivery embeds the full request URL,
+// credential and all; the log line must not.
+func TestWebhookFailureLogDoesNotLeakTheURL(t *testing.T) {
+	n := notifierFor(t, func(c *Config) {
+		c.Notify.Webhooks = []WebhookConfig{{URL: "http://127.0.0.1:1/api/webhooks/1234/s3cr3t-token"}}
+		c.Notify.Timeout = "300ms"
+	})
+	lines := captureLog(t, func() { n.send(banEvent()) })
+	f := fieldsOf(lines, "webhook delivery failed")
+	if f == nil {
+		t.Fatal("the failed delivery was not logged")
+	}
+	for k, v := range f {
+		if s, _ := v.(string); strings.Contains(s, "s3cr3t") || strings.Contains(s, "/api/webhooks") {
+			t.Errorf("log field %s leaks the webhook URL: %s", k, s)
+		}
+	}
+}
+
+// Ban durations are rendered exactly when they are not a whole unit, and the
+// ban event carries the expiry itself.
+func TestDurationsAreRenderedExactly(t *testing.T) {
+	cases := map[time.Duration]string{
+		permanent:                    "permanent",
+		time.Hour:                    "1h",
+		24 * time.Hour:               "1d",
+		168 * time.Hour:              "7d",
+		90 * time.Minute:             "1h30m",
+		36 * time.Hour:               "1d12h",
+		90 * time.Second:             "1m30s",
+		45 * time.Second:             "45s",
+		25*time.Hour + 5*time.Second: "1d1h5s",
+	}
+	for d, want := range cases {
+		if got := formatDuration(d); got != want {
+			t.Errorf("formatDuration(%v) = %q, want %q", d, got, want)
+		}
+	}
+}
+
+func TestBanEventsCarryTheExpiry(t *testing.T) {
+	h := build(t, func(c *Config) { c.Enforcement.Escalation = []string{"90m", "0"} })
+	rt := registry[t.Name()]
+	send(h, "GET", "/wp-login.php", "203.0.113.185:1", nil)
+	var e Event
+	for _, ev := range rt.events.recent(0) {
+		if ev.Kind == eventBan {
+			e = ev
+		}
+	}
+	if e.BanFor != "1h30m" {
+		t.Errorf("banFor = %q, want 1h30m", e.BanFor)
+	}
+	if e.Expires == nil || e.Expires.Sub(e.Time) < 89*time.Minute || e.Expires.Sub(e.Time) > 91*time.Minute {
+		t.Errorf("expires = %v for a 90m ban issued at %v", e.Expires, e.Time)
+	}
+	buf, _ := json.Marshal(e)
+	if !strings.Contains(string(buf), "\"expires\":\"") {
+		t.Errorf("the event JSON has no expires field: %s", buf)
+	}
 }
 
 // A panic in a plugin-spawned goroutine is not recovered by Traefik and kills the

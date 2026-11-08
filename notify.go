@@ -9,16 +9,61 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-// notifySem caps how many outbound notification requests may be in flight across
-// the whole process. It is package-level on purpose: a configuration reload
-// replaces the notifier, and a worker pool owned by the notifier would leak its
-// goroutines on every reload. When the semaphore is saturated, notifications are
-// dropped rather than queued — the alternative under a ban flood is spawning an
-// unbounded number of goroutines inside the reverse proxy.
-var notifySem = make(chan struct{}, 32)
+// Delivery runs through one package-level queue drained by a fixed pool of
+// workers. Package-level on purpose: a configuration reload replaces the
+// notifier, and a pool owned by the notifier would leak its goroutines on every
+// reload. Each job carries the notifier it was queued by, so a reload mid-flight
+// delivers the old event with the old notifier's targets, which is correct.
+//
+// It used to be a semaphore with no queue: a slot or a drop. The janitor records
+// every expired ban of a tick in one tight loop, so any scan that banned more
+// than 32 sources inside a thirty-second window expired them in one tick an hour
+// later, and every unban past the 32nd was dropped — silently, with no counter
+// and no log line — while docs/webhooks.md promised a firewall helper the unban
+// for every ban. The queue absorbs a tick's worth of expiries; a drop is still
+// possible under a sustained flood against a slow endpoint, and is now counted
+// (stats.notifyDropped) and logged.
+const (
+	notifyQueueSize = 1024
+	notifyWorkers   = 8
+)
+
+type notifyJob struct {
+	n *notifier
+	e Event
+}
+
+var (
+	notifyQueue     = make(chan notifyJob, notifyQueueSize)
+	notifyStartOnce sync.Once
+	// notifyDropWarnMu and notifyDropWarnAt throttle the queue-full warning to
+	// one a minute, with the number dropped since the last one.
+	notifyDropWarnMu    sync.Mutex
+	notifyDropWarnAt    time.Time
+	notifyDroppedSince  int64
+	notifyWorkersActive sync.WaitGroup
+)
+
+func startNotifyWorkers() {
+	notifyStartOnce.Do(func() {
+		for i := 0; i < notifyWorkers; i++ {
+			go func() {
+				for job := range notifyQueue {
+					notifyWorkersActive.Add(1)
+					func() {
+						defer notifyWorkersActive.Done()
+						defer recoverPanic(job.n.instance, "notifier")
+						job.n.send(job.e)
+					}()
+				}
+			}()
+		}
+	})
+}
 
 // notifier pushes ban and unban events outside the plugin.
 //
@@ -30,8 +75,12 @@ type notifier struct {
 	webhooks []WebhookConfig
 	chat     ChatConfig
 	abuse    AbuseIPDBConfig
-	timeout  time.Duration
 	client   *http.Client
+
+	// dropped counts events this notifier could not queue. The runtime points
+	// it at stats.NotifyDropped so the console can show it; a notifier built
+	// on its own counts into a counter of its own.
+	dropped *atomic.Int64
 
 	// reported deduplicates AbuseIPDB submissions: reporting the same address
 	// repeatedly is both rude and rate-limited.
@@ -71,8 +120,8 @@ func newNotifier(s *settings) *notifier {
 		webhooks:  s.notify.Webhooks,
 		chat:      s.notify.Chat,
 		abuse:     s.notify.AbuseIPDB,
-		timeout:   s.notifyTimeout,
 		client:    &http.Client{Timeout: s.notifyTimeout},
+		dropped:   new(atomic.Int64),
 		reported:  make(map[string]time.Time),
 		scores:    make(map[string]abuseScore),
 		inflight:  make(map[string]struct{}),
@@ -88,24 +137,38 @@ func (n *notifier) enabled() bool {
 	return len(n.webhooks) > 0 || n.chat.Kind != "" || (n.abuse.Enabled && n.abuse.Report)
 }
 
-// dispatch queues an event for delivery and returns immediately.
+// dispatch queues an event for delivery and returns immediately. With the
+// queue full the event is dropped, counted and (throttled) logged: growing an
+// unbounded goroutine population inside Traefik is the worse outcome.
 func (n *notifier) dispatch(e Event) {
 	if !n.enabled() {
 		return
 	}
+	startNotifyWorkers()
 	select {
-	case notifySem <- struct{}{}:
+	case notifyQueue <- notifyJob{n: n, e: e}:
 	default:
-		// Saturated. Dropping a notification is strictly better than growing an
-		// unbounded goroutine population inside Traefik.
+		n.dropped.Add(1)
+		noteNotifyDrop(n.instance)
+	}
+}
+
+func noteNotifyDrop(instance string) {
+	notifyDropWarnMu.Lock()
+	notifyDroppedSince++
+	throttled := time.Since(notifyDropWarnAt) < time.Minute
+	dropped := notifyDroppedSince
+	if !throttled {
+		notifyDropWarnAt = time.Now()
+		notifyDroppedSince = 0
+	}
+	notifyDropWarnMu.Unlock()
+	if throttled {
 		return
 	}
-
-	go func() {
-		defer func() { <-notifySem }()
-		defer recoverPanic(n.instance, "notifier")
-		n.send(e)
-	}()
+	logWarn(instance, "notification queue is full; ban and unban events are being dropped and a webhook "+
+		"consumer may now be out of step with the ban list",
+		map[string]interface{}{"dropped": dropped, "queue": notifyQueueSize})
 }
 
 func (n *notifier) send(e Event) {
@@ -137,16 +200,21 @@ func wantsEvent(filter []string, kind string) bool {
 	return false
 }
 
+// webhookPayload is the body of a webhook delivery. A named struct, like every
+// admin response: a map[string]interface{} holding the Event encodes the event
+// as {} under Yaegi, and the smoke test could not have told (see RulesResponse).
+type webhookPayload struct {
+	Source   string `json:"source"`
+	Instance string `json:"instance"`
+	Event    Event  `json:"event"`
+}
+
 // sendWebhook posts the event as JSON. This is also the integration point for OS
 // firewall enforcement: a small privileged helper container subscribes here and
 // applies nftables rules, because os/exec does not exist under the Yaegi
 // interpreter and Traefik cannot manipulate the host firewall itself.
 func (n *notifier) sendWebhook(w WebhookConfig, e Event) {
-	payload, err := json.Marshal(map[string]interface{}{
-		"source":   "scanguard",
-		"instance": n.instance,
-		"event":    e,
-	})
+	payload, err := json.Marshal(webhookPayload{Source: "scanguard", Instance: n.instance, Event: e})
 	if err != nil {
 		return
 	}
@@ -157,7 +225,7 @@ func (n *notifier) sendWebhook(w WebhookConfig, e Event) {
 	}
 	req, err := http.NewRequest(method, w.URL, bytes.NewReader(payload))
 	if err != nil {
-		logWarn(n.instance, "webhook request could not be built", map[string]interface{}{"url": redactURL(w.URL), "error": err.Error()})
+		logWarn(n.instance, "webhook request could not be built", map[string]interface{}{"url": redactURL(w.URL), "error": errText(err)})
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -168,7 +236,7 @@ func (n *notifier) sendWebhook(w WebhookConfig, e Event) {
 
 	resp, err := n.client.Do(req)
 	if err != nil {
-		logWarn(n.instance, "webhook delivery failed", map[string]interface{}{"url": redactURL(w.URL), "error": err.Error()})
+		logWarn(n.instance, "webhook delivery failed", map[string]interface{}{"url": redactURL(w.URL), "error": errText(err)})
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -181,6 +249,18 @@ func (n *notifier) sendWebhook(w WebhookConfig, e Event) {
 	}
 }
 
+// errText renders a transport error without the URL that net/http folds into
+// it. http.Client.Do wraps every failure in a *url.Error whose Error() embeds
+// the full request URL — "Post \"https://discord.com/api/webhooks/1234/s3cr3t\":
+// dial tcp ..." — so logging err.Error() beside redactURL printed the credential
+// the redaction was added to hide.
+func errText(err error) string {
+	if ue, ok := err.(*url.Error); ok && ue.Err != nil {
+		return ue.Op + ": " + ue.Err.Error()
+	}
+	return err.Error()
+}
+
 func (n *notifier) sendChat(e Event) {
 	text := describeEvent(e)
 
@@ -191,9 +271,14 @@ func (n *notifier) sendChat(e Event) {
 	)
 	switch strings.ToLower(n.chat.Kind) {
 	case "discord":
-		body, err = json.Marshal(map[string]string{"content": text})
+		// allowed_mentions with nothing in parse: the text embeds the request
+		// path, which the attacker chose, and "/@everyone/wp-login.php" pinged
+		// the whole channel.
+		body, err = json.Marshal(discordMessage{Content: text, AllowedMentions: discordMentions{Parse: []string{}}})
 	case "slack":
-		body, err = json.Marshal(map[string]string{"text": text})
+		// Slack's message text is mrkdwn; a path carrying <!channel> is a
+		// channel-wide ping unless the control characters are escaped.
+		body, err = json.Marshal(map[string]string{"text": slackEscape(text)})
 	case "gotify":
 		body, err = json.Marshal(map[string]interface{}{
 			"title":    "scanguard",
@@ -223,16 +308,50 @@ func (n *notifier) sendChat(e Event) {
 
 	resp, err := n.client.Do(req)
 	if err != nil {
-		logWarn(n.instance, "chat notification failed", map[string]interface{}{"kind": n.chat.Kind, "error": err.Error()})
+		logWarn(n.instance, "chat notification failed", map[string]interface{}{"kind": n.chat.Kind, "error": errText(err)})
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 400 {
+		// A deleted Discord webhook answers 404 forever; said in the log, as the
+		// generic webhook path already did, instead of failing silently.
+		logWarn(n.instance, "chat endpoint rejected the notification", map[string]interface{}{
+			"kind":   n.chat.Kind,
+			"status": resp.StatusCode,
+		})
+	}
+}
+
+// discordMessage and discordMentions are the Discord webhook body. Named
+// structs for the reason webhookPayload is one.
+type discordMessage struct {
+	Content         string          `json:"content"`
+	AllowedMentions discordMentions `json:"allowed_mentions"`
+}
+
+type discordMentions struct {
+	Parse []string `json:"parse"`
+}
+
+// slackEscape applies Slack's three required escapes to text destined for a
+// message body.
+func slackEscape(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	return strings.ReplaceAll(s, ">", "&gt;")
 }
 
 func describeEvent(e Event) string {
 	switch e.Kind {
 	case eventBan:
-		msg := fmt.Sprintf("🛡️ scanguard banned %s (%s)", e.Key, e.Detector)
+		verb := "banned"
+		if e.DryRun {
+			// The webhook payload carries dryRun and the console says "(dry)";
+			// the chat message used to announce a stream of bans that did not
+			// happen during exactly the dry-run rollout the README recommends.
+			verb = "would have banned (dry run)"
+		}
+		msg := fmt.Sprintf("🛡️ scanguard %s %s (%s)", verb, e.Key, e.Detector)
 		if e.Path != "" {
 			msg += fmt.Sprintf(" for %s %s", e.Method, e.Path)
 		}
@@ -248,32 +367,47 @@ func describeEvent(e Event) string {
 		if who == "" {
 			who = "unknown"
 		}
+		if e.DryRun {
+			return fmt.Sprintf("✅ scanguard dry-run ban on %s ran out (by %s)", e.Key, who)
+		}
 		return fmt.Sprintf("✅ scanguard unbanned %s (by %s)", e.Key, who)
 	default:
 		return fmt.Sprintf("scanguard %s: %s", e.Kind, e.Key)
 	}
 }
 
-// abuseCategories maps a detector to AbuseIPDB category IDs.
-// 14 = Port Scan, 18 = Brute-Force, 19 = Bad Web Bot, 21 = Web App Attack.
+// abuseCategories maps a detector to AbuseIPDB category IDs, or "" for a
+// detector whose bans are not AbuseIPDB's business.
+// 18 = Brute-Force, 19 = Bad Web Bot, 21 = Web App Attack.
+//
+// Two detectors are never reported. A crawler refused by policy is a commercial
+// crawler, not an attacker, and filing AhrefsBot as a web-app attack is a false
+// report under the operator's name. A reputation ban exists because AbuseIPDB
+// said the address was bad; reporting it back is a feedback loop that confirms
+// AbuseIPDB's own score to it. Port Scan (14) is gone from the default: an HTTP
+// probe is not a port scan.
 func abuseCategories(detector string) string {
 	switch detector {
+	case detectorCrawler, detectorReputation, detectorManual:
+		return ""
 	case detectorBruteForce:
 		return "18"
 	case detectorUserAgent, detectorUARotation:
 		return "19"
 	case detectorRateAbuse:
 		return "18,19"
-	case detectorPayload:
-		return "21"
 	default:
-		return "21,14"
+		return "21"
 	}
 }
 
 func (n *notifier) reportAbuse(e Event) {
 	ip := e.Client
 	if ip == "" {
+		return
+	}
+	categories := abuseCategories(e.Detector)
+	if categories == "" {
 		return
 	}
 
@@ -295,7 +429,7 @@ func (n *notifier) reportAbuse(e Event) {
 
 	form := url.Values{}
 	form.Set("ip", ip)
-	form.Set("categories", abuseCategories(e.Detector))
+	form.Set("categories", categories)
 	form.Set("comment", truncate(comment, 900))
 
 	req, err := http.NewRequest(http.MethodPost, n.abuseBase+"/api/v2/report",
@@ -309,7 +443,7 @@ func (n *notifier) reportAbuse(e Event) {
 
 	resp, err := n.client.Do(req)
 	if err != nil {
-		logWarn(n.instance, "abuseipdb report failed", map[string]interface{}{"error": err.Error()})
+		logWarn(n.instance, "abuseipdb report failed", map[string]interface{}{"error": errText(err)})
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -408,6 +542,10 @@ func (n *notifier) fetchScore(ip string) {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		// A body that is not the documented shape is a failed lookup too, and is
+		// remembered as one, or the address was asked about again on every
+		// request.
+		n.rememberFailure(ip)
 		return
 	}
 
@@ -431,19 +569,38 @@ func (n *notifier) minConfidence() int {
 	return n.abuse.MinConfidence
 }
 
-// formatDuration renders a ban duration for humans and for the event log.
+// formatDuration renders a ban duration for humans and for the event log:
+// "1h", "1d", "7d", and for anything that is not a whole unit the exact value,
+// "1h30m", "1d12h". It used to truncate to the largest whole unit, so a 90m rung
+// was reported as "1h" and a 36h one as "1d" — in banFor, which is the only
+// duration a webhook helper is given, and in the ban log line.
 func formatDuration(d time.Duration) string {
 	if d == permanent {
 		return "permanent"
 	}
-	if d < time.Minute {
-		return strconv.Itoa(int(d.Seconds())) + "s"
+	if d < time.Second {
+		return "0s"
 	}
-	if d < time.Hour {
-		return strconv.Itoa(int(d.Minutes())) + "m"
+	d = d.Round(time.Second)
+	days := int(d / (24 * time.Hour))
+	d -= time.Duration(days) * 24 * time.Hour
+	hours := int(d / time.Hour)
+	d -= time.Duration(hours) * time.Hour
+	minutes := int(d / time.Minute)
+	seconds := int((d - time.Duration(minutes)*time.Minute) / time.Second)
+
+	var sb strings.Builder
+	if days > 0 {
+		sb.WriteString(strconv.Itoa(days) + "d")
 	}
-	if d < 24*time.Hour {
-		return strconv.Itoa(int(d.Hours())) + "h"
+	if hours > 0 {
+		sb.WriteString(strconv.Itoa(hours) + "h")
 	}
-	return strconv.Itoa(int(d.Hours()/24)) + "d"
+	if minutes > 0 {
+		sb.WriteString(strconv.Itoa(minutes) + "m")
+	}
+	if seconds > 0 {
+		sb.WriteString(strconv.Itoa(seconds) + "s")
+	}
+	return sb.String()
 }

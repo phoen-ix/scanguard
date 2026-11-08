@@ -172,10 +172,20 @@ func (rt *runtime) issueBan(s *settings, key netip.Prefix, client string, det *d
 		Path:     f.path,
 		UA:       f.ua,
 		BanFor:   formatDuration(duration),
+		Expires:  ban.expiresAt(),
 		DryRun:   s.dryRun,
 		Country:  ban.Country,
 	})
 	return ban, true
+}
+
+// expiresAt is the ban's expiry for an event, nil for a permanent ban.
+func (b Ban) expiresAt() *time.Time {
+	if b.Permanent() {
+		return nil
+	}
+	exp := b.Expires
+	return &exp
 }
 
 // putBan writes a ban to the list this instance enforces from, and reports
@@ -292,6 +302,7 @@ func (rt *runtime) banManual(s *settings, key netip.Prefix, duration time.Durati
 		Detector: detectorManual,
 		Rule:     reason,
 		BanFor:   formatDuration(duration),
+		Expires:  ban.expiresAt(),
 		Actor:    actor,
 	})
 	return ban
