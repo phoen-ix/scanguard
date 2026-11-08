@@ -155,6 +155,7 @@ test('every kind of field in every group round-trips: checkbox, choice, number, 
     // group, label, typed, shown after the reload
     ['Path signatures', 'Exclusions', '^/e2e-excluded/\n\n', '^/e2e-excluded/'],
     ['Scanner user-agents', 'SEO crawlers', 'block', 'block'],
+    ['Scanner user-agents', 'Extra crawlers', 'e2e-crawlerbot', 'e2e-crawlerbot'],
     ['Distinct failing paths', 'Distinct paths to trip', '9', '9'],
     ['Distinct failing paths', 'Leak interval', '30s', '30s'],
     ['Distinct failing paths', 'Statuses counted', '404,  410,', '404, 410'],
@@ -166,6 +167,7 @@ test('every kind of field in every group round-trips: checkbox, choice, number, 
     ['Allowlist', 'Never-ban user-agents', 'e2e-uptime-monitor', 'e2e-uptime-monitor'],
     ['Enforcement', 'Ban ladder', '2h, 0', '2h, 0'],
     ['Enforcement', 'Reject body', 'Go away (e2e)', 'Go away (e2e)'],
+    ['Enforcement', 'Reject content type', 'text/x-e2e; charset=utf-8', 'text/x-e2e; charset=utf-8'],
     // Range escalation stays off: the widths and threshold round-trip without it.
     ['Enforcement', 'Banned sources per range', '4', '4'],
     ['Enforcement', 'Within', '12h', '12h'],
@@ -200,6 +202,11 @@ test('every kind of field in every group round-trips: checkbox, choice, number, 
   const res = await request.get(SITE + '/wp-login.php', { headers: { 'X-Real-Ip': uniqueIp() } })
   expect(res.status()).toBe(403)
   expect(await res.text()).toBe('Go away (e2e)\n')
+  expect(res.headers()['content-type']).toBe('text/x-e2e; charset=utf-8')
+  // The extra crawler pattern is in the compiled list, and "block" refuses it.
+  await expect(page.locator('#rules > div').filter({ hasText: /^SEO crawlers \(\d+\)/ }).locator('li').filter({ hasText: 'e2e-crawlerbot' })).toHaveCount(1)
+  const crawler = await request.get(SITE + '/', { headers: { 'X-Real-Ip': uniqueIp(), 'User-Agent': 'e2e-crawlerbot/1.0' } })
+  expect(crawler.status()).toBe(403)
 })
 
 test('an allowlist edit exempts the range at once, and the ban form refuses it', async ({ page, request }) => {

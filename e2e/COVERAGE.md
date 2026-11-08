@@ -28,7 +28,7 @@ or `Authorization: Bearer`), **read-only operator** (`admin.readOnly`), **SSO us
 `e2e/fixtures/consoles.yml`, added to the running harness for the length of the run;
 two Traefik replicas sharing a Redis come from the overlay `examples/docker-compose.e2e.yml`.
 
-**Totals: 170 items — ✅ 149, ❌ 21** ((a) 2, (c) 19).
+**Totals: 172 items — ✅ 151, ❌ 21** ((a) 2, (c) 19).
 
 Test names are `file › [describe ›] title`.
 
@@ -115,7 +115,7 @@ Test names are `file › [describe ›] title`.
 | 44 | toast "Banned …" (and "Unblocked …", "No ban found for …") | ✅ `bans.spec.ts › a manual ban from the form is listed, enforced, and lifted by unblock`, `› unblocking a ban that is already gone says so` |
 | 45 | Health (failed logins, evicted sources, dropped notifications, expired bans) | ✅ `panels.spec.ts › health shows the counters that used to be sent and never shown` |
 
-## Cross-cutting flows and states (31)
+## Cross-cutting flows and states (33)
 
 | Item | Test |
 |---|---|
@@ -129,6 +129,8 @@ Test names are `file › [describe ›] title`.
 | the Blocked list is newest first | ✅ `tiles.spec.ts › the blocked list is newest first, like the feed` |
 | keyboard focus survives the three-second poll (tiles, unblock) | ✅ `tiles.spec.ts › an open tile and its list survive the poll without losing focus`, `bans.spec.ts › focus on an unblock button survives the poll` |
 | the ban-list tile note says whether the list is complete | ✅ `tiles.spec.ts › each list says what it holds` |
+| lost connection: badge, backoff, recovery | ✅ `panels.spec.ts › a lost connection is shown, polling backs off, and it recovers by itself` |
+| editor fields for extra crawlers and the reject content type | ✅ `rules.spec.ts › every kind of field in every group round-trips: …` (iterates RULE_SCHEMA) |
 | stale remembered token → gate with the reason | ✅ `gate.spec.ts › a remembered token that stopped working sends the session back to the gate` |
 | gate error other than 401 (misrouted prefix) | ✅ `gate.spec.ts › a gate failure other than a refused token is shown, not a blank page` |
 | SSO: unlock without a token, stay unlocked across a reload, Lock | ✅ `sso.spec.ts › the signed-in user unlocks without a token and stays unlocked across a reload` |

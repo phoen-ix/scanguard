@@ -70,6 +70,17 @@ test('health shows the counters that used to be sent and never shown', async ({ 
   await expect(kv('expired bans')).toHaveText(/^\d+$/)
 })
 
+test('a lost connection is shown, polling backs off, and it recovers by itself', async ({ page }) => {
+  await unlock(page)
+  await expect(page.locator('#offline')).toBeHidden()
+  await page.route('**/api/state', (route) => route.abort())
+  await expect(page.locator('#offline')).toContainText('disconnected', { timeout: 15_000 })
+  await expect(page.locator('#pulse')).toHaveClass(/down/)
+  await page.unroute('**/api/state')
+  await expect(page.locator('#offline')).toBeHidden({ timeout: 40_000 })
+  await expect(page.locator('#pulse')).not.toHaveClass(/down/)
+})
+
 test('header and footer name the instance and its state backend', async ({ page }) => {
   await unlock(page)
   await expect(page.locator('#subtitle')).toHaveText(/^default · up \S+$/)

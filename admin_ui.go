@@ -52,6 +52,7 @@ const indexHTML = `<!doctype html>
     <div class="topbar-right">
       <span id="dryrun" class="badge badge-warn" hidden>DRY RUN &mdash; nothing is blocked</span>
       <span id="readonly" class="badge" hidden>read only</span>
+      <span id="offline" class="badge badge-warn" role="status" hidden></span>
       <span id="pulse" class="pulse" title="live"></span>
       <button id="lock" class="ghost" type="button">Lock</button>
     </div>
@@ -259,6 +260,7 @@ button.link { background: none; border: none; color: var(--danger); padding: 2px
 .badge-warn { color: var(--warn); border-color: currentColor; }
 .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); opacity: 0.35; transition: opacity 0.3s; }
 .pulse.on { opacity: 1; }
+.pulse.down { background: var(--danger); opacity: 1; }
 
 main { padding: 20px; display: grid; gap: 16px; max-width: 1400px; margin: 0 auto; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
@@ -387,6 +389,12 @@ var TOKEN_KEY = "scanguard.token";
 var token = sessionStorage.getItem(TOKEN_KEY) || "";
 var lastSeq = 0;
 var timer = null;
+// pollDelay is the wait before the next poll: three seconds while the server
+// answers, doubling to thirty while it does not, so a console left open
+// through an outage neither hammers the proxy nor toasts every three seconds.
+var POLL_MS = 3000;
+var POLL_MAX_MS = 30000;
+var pollDelay = POLL_MS;
 
 function $(id) { return document.getElementById(id); }
 
@@ -455,7 +463,9 @@ function fail(err) {
 }
 
 function lock(message) {
-  if (timer) { clearInterval(timer); timer = null; }
+  if (timer) { clearTimeout(timer); timer = null; }
+  pollDelay = POLL_MS;
+  setOffline(false);
   token = "";
   sessionStorage.removeItem(TOKEN_KEY);
   // Locking means forget everything, including the drilled-down source addresses
@@ -501,7 +511,17 @@ function unlock() {
   $("gate").hidden = true;
   $("app").hidden = false;
   refresh();
-  if (!timer) { timer = setInterval(tick, 3000); }
+  if (!timer) { schedule(); }
+}
+
+function schedule() {
+  timer = setTimeout(function () { timer = null; tick(); }, pollDelay);
+}
+
+function setOffline(down) {
+  $("pulse").classList.toggle("down", down);
+  $("offline").hidden = !down;
+  if (down) { $("offline").textContent = "disconnected \u2014 retrying in " + Math.round(pollDelay / 1000) + "s"; }
 }
 
 function cell(row, text, cls) {
@@ -1440,14 +1460,22 @@ function refresh() {
 function tick() {
   // A background tab polls nothing: three requests every three seconds from a
   // console nobody is looking at, all day, buys no one anything.
-  if (document.hidden) { return; }
+  if (document.hidden) { schedule(); return; }
   api("api/state").then(function (s) {
+    pollDelay = POLL_MS;
+    setOffline(false);
     renderState(s);
     fetchDetail();
     pulse();
     syncRules(s.rulesStamp, !!s.readOnly);
     return pollEvents();
-  }).catch(fail);
+  }).then(schedule, function (err) {
+    // A 401 has sent the session to the gate; the poll ends there.
+    if (err && err.message === "unauthorized") { return; }
+    pollDelay = Math.min(pollDelay * 2, POLL_MAX_MS);
+    setOffline(true);
+    schedule();
+  });
 }
 
 // pollEvents appends everything the ring has produced since the last poll. A
