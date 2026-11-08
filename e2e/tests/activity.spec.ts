@@ -50,11 +50,14 @@ test('Lock resets the kind filter, so the next session starts on "all"', async (
   await chip(page, 'bans').click()
   await expect(chip(page, 'bans')).toHaveAttribute('aria-pressed', 'true')
   await page.getByRole('button', { name: 'Lock', exact: true }).click()
-  await expect(chip(page, 'all')).toHaveAttribute('aria-pressed', 'true')
-  await expect(chip(page, 'bans')).toHaveAttribute('aria-pressed', 'false')
+  await expect(page.locator('#app')).toBeHidden()
 
+  // The chips are hidden with the app while locked; they are checked once the
+  // next session is open.
   await page.getByLabel('Access token').fill(TOKEN)
   await page.getByRole('button', { name: 'Unlock' }).click()
+  await expect(chip(page, 'all')).toHaveAttribute('aria-pressed', 'true')
+  await expect(chip(page, 'bans')).toHaveAttribute('aria-pressed', 'false')
   // Both kinds under the "all" chip, not every kind under a pressed "bans".
   await expect(eventRows(page, `${ip}/32`).filter({ has: page.locator('td.k-reject') })).toHaveCount(1)
   await expect(eventRows(page, `${ip}/32`).filter({ has: page.locator('td.k-ban') })).toHaveCount(1)

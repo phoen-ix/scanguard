@@ -117,7 +117,7 @@ http:
       basicAuth:
         # dev / dev
         users:
-          - "dev:$apr1$Q8kV1Zqm$xVsvGx1CxK/g5T8Q2yqBn1"
+          - "dev:$apr1$Q8kV1Zqm$f/F3qNpV/M2xlEaRNansm/"
 
   routers:
     # No Host in the rule, so this also answers hostnames nothing else serves.

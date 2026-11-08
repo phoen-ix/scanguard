@@ -94,7 +94,7 @@ for (const [group, label, value, message] of [
   ['Path signatures', 'Extra patterns', '([unclosed', 'is not a valid regular expression'],
   ['Distinct failing paths', 'Leak interval', 'soon', '"soon" is not a valid duration'],
   ['Allowlist', 'Never-ban CIDRs', '10.0.0.0/33', '"10.0.0.0/33" is not a valid CIDR'],
-  ['Enforcement', 'Reject status', '99', '99 is not a valid HTTP status code'],
+  ['Enforcement', 'Reject status', '99', '99 is not a final HTTP status code (200-599)'],
 ]) {
   test(`a rejected edit (${label}: ${value}) shows the parser's reason and changes nothing`, async ({ page, request }) => {
     await editorReady(page)

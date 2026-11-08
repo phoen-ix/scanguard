@@ -1039,7 +1039,7 @@ func (rt *runtime) syncOverrides() {
 		// saved version rather than once per janitor tick.
 		warnOnce(rt.name, "overrides-schema:"+stored.Updated.UTC().Format(time.RFC3339Nano),
 			"the shared rule set was written by a different version of the rule schema and is "+
-				"ignored on this replica; the file configuration is in force here",
+				"ignored on this replica, which keeps running the rules it had",
 			map[string]interface{}{"error": err.Error(), "savedAt": stored.Updated})
 		return
 	}

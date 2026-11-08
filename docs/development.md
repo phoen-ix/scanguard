@@ -20,9 +20,10 @@ Two whole classes of bug:
   - That is why the console is a string constant, and why the smoke test asserts
     the page is non-empty.
 
-## Four more traps this project hit
+## Five more traps this project hit
 
-All invisible to `go test`, all now asserted by the smoke test:
+All invisible to `go test`; four are asserted by the smoke test, the fifth by a
+source check:
 
 - **`map[string]interface{}` with structs as values encoded as
   `{"effective":{}}`** under Yaegi: the nested structs lost every field, with no
@@ -43,6 +44,13 @@ All invisible to `go test`, all now asserted by the smoke test:
   code, and in `setKeyWidths`.
   - Asserted by a manual range ban, and by switching range escalation off on a
     reload with a range ban in place.
+- **A tagless switch case with several expressions tests only the first.**
+  `switch { case a, b, c: }` behaves as `case a:` under Yaegi v0.16.1, so a
+  Redis replica decoded a published revert (`"null"`) as an empty rule set,
+  refused it, and kept enforcing the reverted rules. Tagged switches
+  (`switch x { case 1, 2: }`) are fine.
+  - `TestNoMultiExpressionCasesInTaglessSwitches` parses the plugin's source
+    and refuses the construct; the e2e replicas test covers the revert.
 - **mapstructure merges into a pre-populated slice instead of replacing it.**
   - A default of `[400,401,403,404,405,501]` plus a configured `[404]` yields
     `[404,401,403,404,405,501]`.

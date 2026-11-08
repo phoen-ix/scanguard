@@ -374,15 +374,24 @@ func (r *redisStore) refreshOverrides() {
 	if err != nil {
 		return
 	}
+	// A revert on any replica publishes JSON null: no console rules anywhere.
+	// Decoded into an Overrides it became an empty rule set of schema version 0,
+	// which every other replica refused as "a different version of the rule
+	// schema" while it kept enforcing the reverted rules.
+	//
+	// Three separate tests, NOT one `case a, b, c:` in a tagless switch: Yaegi
+	// v0.16.1 evaluates only the first expression of such a case, so "null"
+	// fell through to the decoder under Traefik while every compiled test
+	// passed. TestNoMultiExpressionCasesInTaglessSwitches keeps it out.
 	var shared *Overrides
-	switch {
-	case reply.null, reply.str == "", reply.str == "null":
-		// A revert on any replica publishes JSON null: no console rules anywhere.
-		// Decoded into an Overrides it became an empty rule set of schema version
-		// 0, which every other replica refused as "a different version of the
-		// rule schema" while it kept enforcing the reverted rules.
-		shared = nil
-	default:
+	empty := reply.null
+	if reply.str == "" {
+		empty = true
+	}
+	if reply.str == "null" {
+		empty = true
+	}
+	if !empty {
 		var ov Overrides
 		if err := json.Unmarshal([]byte(reply.str), &ov); err != nil {
 			logWarn(r.instance, "shared rule set in redis could not be decoded; keeping the local one",

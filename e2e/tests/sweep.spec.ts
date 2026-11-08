@@ -70,7 +70,7 @@ test.describe('admin routes', () => {
     ['POST', '/api/sources', 'GET only'],
     ['POST', '/api/rules/compiled', 'GET only'],
     ['PATCH', '/api/bans', 'GET, POST or DELETE'],
-    ['PATCH', '/api/rules', 'GET, PUT or DELETE'],
+    ['PATCH', '/api/rules', 'GET, PUT (POST is accepted as an alias) or DELETE'],
   ]) {
     test(`${method} ${path} is refused with 405`, async ({ request }) => {
       const res = await request.fetch(CONSOLE + path, { method, headers: { ...CALLERS['the token'], 'X-Scanguard-Action': '1' } })
