@@ -556,7 +556,7 @@ func TestAManualBanNarrowerThanTheKeyWidthIsRefused(t *testing.T) {
 	}
 
 	for _, raw := range []string{"2001:db8::5/128", "203.0.113.5/32"} {
-		if _, err := parseBanKey(s, raw); err == nil {
+		if _, err := parseBanKey(s, raw, true); err == nil {
 			t.Errorf("%s was accepted; it can never match a request key", raw)
 		} else if !strings.Contains(err.Error(), "never match") {
 			t.Errorf("%s: the error should say why, got: %v", raw, err)
@@ -565,11 +565,11 @@ func TestAManualBanNarrowerThanTheKeyWidthIsRefused(t *testing.T) {
 
 	// At or wider than the key width is fine, and so is a bare address.
 	for _, raw := range []string{"2001:db8::/64", "2001:db8::/48", "203.0.113.0/24", "203.0.113.0/16"} {
-		if _, err := parseBanKey(s, raw); err != nil {
+		if _, err := parseBanKey(s, raw, true); err != nil {
 			t.Errorf("%s was refused: %v", raw, err)
 		}
 	}
-	got, err := parseBanKey(s, "2001:db8::5")
+	got, err := parseBanKey(s, "2001:db8::5", true)
 	if err != nil {
 		t.Fatalf("a bare address was refused: %v", err)
 	}

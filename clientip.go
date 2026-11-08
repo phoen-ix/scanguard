@@ -61,8 +61,11 @@ func (s *settings) resolve(req *http.Request) resolution {
 	}
 
 	// The peer is a trusted proxy, so its forwarded headers may be believed.
+	sawConfigured := false
 	if s.clientIPHeader != "" {
-		if addr, found := firstAddrIn(req.Header.Get(s.clientIPHeader)); found {
+		values := req.Header.Values(s.clientIPHeader)
+		sawConfigured = len(values) > 0
+		if addr, found := lastAddrIn(values); found {
 			res.client = addr
 			res.key = banKey(addr, s.ipv4Prefix, s.ipv6Prefix)
 			res.source = s.clientIPHeader
@@ -115,17 +118,23 @@ func (s *settings) resolve(req *http.Request) resolution {
 		return res
 	}
 
-	if !sawHeader && s.clientIPHeader == "" {
+	if !sawHeader && !sawConfigured {
 		// Almost always a Traefik-side misconfiguration rather than a scanguard one.
 		// If entryPoints.<name>.forwardedHeaders.trustedIPs is not set, Traefik
 		// DELETES every X-Forwarded-* header before any middleware runs, so a
 		// correctly-configured scanguard sees nothing and silently bans nobody.
-		warnOnce(s.instanceName, "no-forwarded-headers",
-			"the peer is a trusted proxy but the request carries no forwarded headers; "+
-				"set entryPoints.<name>.forwardedHeaders.trustedIPs (or enable proxyProtocol) "+
-				"on the Traefik entrypoint, otherwise Traefik strips those headers before scanguard runs "+
-				"and no client can ever be identified",
-			map[string]interface{}{"peer": peer.String()})
+		// A configured clientIP.header that never arrives is the same silence
+		// with a different cause, and used to be the one case this did not say.
+		msg := "the peer is a trusted proxy but the request carries no forwarded headers; " +
+			"set entryPoints.<name>.forwardedHeaders.trustedIPs (or enable proxyProtocol) " +
+			"on the Traefik entrypoint, otherwise Traefik strips those headers before scanguard runs " +
+			"and no client can ever be identified"
+		if s.clientIPHeader != "" {
+			msg = "the peer is a trusted proxy but the request carries neither clientIP.header (" + s.clientIPHeader +
+				") nor X-Forwarded-For; check that the proxy sets that header and that " +
+				"entryPoints.<name>.forwardedHeaders.trustedIPs lets it through, otherwise no client can ever be identified"
+		}
+		warnOnce(s.instanceName, "no-forwarded-headers", msg, map[string]interface{}{"peer": peer.String()})
 	}
 
 	// The peer is trusted and no untrusted client could be identified. Banning the
@@ -159,21 +168,27 @@ func parsePeer(remoteAddr string) (netip.Addr, bool) {
 	return addr.Unmap().WithZone(""), true
 }
 
-// firstAddrIn parses the leftmost address from a possibly comma-separated header
-// value. Single-value client-IP headers such as Cf-Connecting-Ip carry exactly
-// one address, but a misbehaving upstream may append.
-func firstAddrIn(value string) (netip.Addr, bool) {
-	if value == "" {
-		return netip.Addr{}, false
+// lastAddrIn parses the rightmost address in a header that may have arrived as
+// several lines and as comma-separated values. The configured client-IP header
+// is SET or APPENDED by the trusted proxy, so the proxy's own value is the last
+// one; the first value — the end a client gets to write when the proxy appends
+// — is the one it used to read, which handed back the "ban anyone you name"
+// primitive the trustedProxies rule exists to prevent. parsePeer rather than a
+// bare ParseAddr, because proxies write "ip:port" and bracketed IPv6 here too.
+// An unreadable rightmost entry ends the search: moving left is moving toward
+// what the client wrote.
+func lastAddrIn(values []string) (netip.Addr, bool) {
+	for i := len(values) - 1; i >= 0; i-- {
+		parts := strings.Split(values[i], ",")
+		for j := len(parts) - 1; j >= 0; j-- {
+			part := strings.TrimSpace(parts[j])
+			if part == "" {
+				continue
+			}
+			return parsePeer(part)
+		}
 	}
-	if idx := strings.IndexByte(value, ','); idx >= 0 {
-		value = value[:idx]
-	}
-	addr, err := netip.ParseAddr(strings.TrimSpace(value))
-	if err != nil {
-		return netip.Addr{}, false
-	}
-	return addr.Unmap().WithZone(""), true
+	return netip.Addr{}, false
 }
 
 // containsAddr reports whether addr falls inside any of the prefixes.

@@ -25,6 +25,9 @@ type Ban struct {
 	Country  string    `json:"country,omitempty"`
 	// Hits counts requests rejected since this ban was created.
 	Hits int64 `json:"hits"`
+	// DryRun marks a ban from the dry-run shadow list in an API listing: a
+	// would-ban that rejects nothing. Never set on a stored ban.
+	DryRun bool `json:"dryRun,omitempty"`
 }
 
 // active reports whether the ban is still in force at now.

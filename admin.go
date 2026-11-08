@@ -1,6 +1,7 @@
 package scanguard
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -54,7 +55,7 @@ func underPrefix(path, prefix string) bool {
 // line a minute per instance so a token-guessing loop cannot turn the log into its
 // own flood. The running count is stats.authFailures, so a rising number is
 // visible from the console between log lines.
-func (rt *runtime) noteAuthFailure(req *http.Request) {
+func (rt *runtime) noteAuthFailure(s *settings, req *http.Request) {
 	total := rt.stats.AuthFailures.Add(1)
 
 	now := time.Now()
@@ -68,14 +69,21 @@ func (rt *runtime) noteAuthFailure(req *http.Request) {
 		return
 	}
 
+	// The resolved client, not only the TCP peer: behind a trusted proxy the
+	// peer is the proxy, and a line naming it is a line naming nobody.
 	peer := ""
 	if addr, ok := parsePeer(req.RemoteAddr); ok {
 		peer = addr.String()
 	}
+	client := peer
+	if res := s.resolve(req); res.client.IsValid() {
+		client = res.client.String()
+	}
 	logWarn(rt.name, "admin authentication failed", map[string]interface{}{
-		"peer":  peer,
-		"path":  req.URL.Path,
-		"total": total,
+		"client": client,
+		"peer":   peer,
+		"path":   truncate(req.URL.Path, 512),
+		"total":  total,
 	})
 }
 
@@ -84,6 +92,14 @@ func (rt *runtime) noteAuthFailure(req *http.Request) {
 func (rt *runtime) serveAdmin(s *settings, uiMode bool, rw http.ResponseWriter, req *http.Request) {
 	path := req.URL.Path
 	if !uiMode {
+		if path == s.adminPrefix {
+			// The page loads its assets by relative reference ("app.css"), so
+			// served at the bare prefix they resolved to /app.css on the backend
+			// and the console was a blank page. One redirect to the directory
+			// form fixes every relative reference at once.
+			http.Redirect(rw, req, s.adminPrefix+"/", http.StatusPermanentRedirect)
+			return
+		}
 		path = strings.TrimPrefix(path, s.adminPrefix)
 	}
 	if path == "" {
@@ -116,11 +132,16 @@ func (rt *runtime) serveAdmin(s *settings, uiMode bool, rw http.ResponseWriter, 
 	case "/app.js":
 		rt.serveAsset(rw, req, "application/javascript; charset=utf-8", appJS)
 		return
+	case "/favicon.ico":
+		// Browsers ask for it on every open of a uiMode console, without a
+		// token; answered below, that request was a failed login every time.
+		rw.WriteHeader(http.StatusNotFound)
+		return
 	}
 
 	actor, ok := rt.authenticate(s, req)
 	if !ok {
-		rt.noteAuthFailure(req)
+		rt.noteAuthFailure(s, req)
 		rw.Header().Set("WWW-Authenticate", `Bearer realm="scanguard"`)
 		writeJSON(rw, http.StatusUnauthorized, map[string]string{
 			"error": "authentication required: send the configured token in the " + headerToken + " header",
@@ -181,19 +202,30 @@ func (rt *runtime) authenticate(s *settings, req *http.Request) (string, bool) {
 
 	presented := strings.TrimSpace(req.Header.Get(headerToken))
 	if presented == "" {
-		if auth := req.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-			presented = strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+		// The scheme is case-insensitive (RFC 9110); curl and most clients send
+		// "Bearer", some send "bearer".
+		if auth := req.Header.Get("Authorization"); len(auth) > 7 && strings.EqualFold(auth[:7], "Bearer ") {
+			presented = strings.TrimSpace(auth[7:])
 		}
 	}
 	if presented == "" {
 		return "", false
 	}
-	// Constant time, so the comparison cannot be used as an oracle to recover the
-	// token one character at a time.
-	if subtle.ConstantTimeCompare([]byte(presented), []byte(s.adminToken)) != 1 {
+	if !tokenMatches(presented, s.adminToken) {
 		return "", false
 	}
 	return "token", true
+}
+
+// tokenMatches compares a presented token with the configured one in constant
+// time, so the comparison cannot be used as an oracle to recover the token one
+// character at a time. The digests are compared rather than the strings:
+// ConstantTimeCompare returns at once when the lengths differ, which leaked
+// the token's length.
+func tokenMatches(presented, want string) bool {
+	a := sha256.Sum256([]byte(presented))
+	b := sha256.Sum256([]byte(want))
+	return subtle.ConstantTimeCompare(a[:], b[:]) == 1
 }
 
 // authorizeMutation gates every state-changing request.
@@ -278,7 +310,7 @@ func (rt *runtime) apiState(s *settings, rw http.ResponseWriter, req *http.Reque
 	}
 	now := time.Now()
 
-	bans := rt.store().list(now)
+	bans := rt.listBans(s, now)
 	bansTotal := len(bans)
 	if len(bans) > maxStateBans {
 		bans = bans[:maxStateBans]
@@ -316,6 +348,51 @@ func (rt *runtime) apiState(s *settings, rw http.ResponseWriter, req *http.Reque
 		TopExempt:  rt.topExempt.top(10),
 		Config:     configSummary(s),
 	})
+}
+
+// listBans is the ban list as the API shows it: newest first, countries filled
+// from the geo cache, and in a dry run the shadow list as well, flagged.
+//
+// The shadow bans used to be invisible: /api/bans and the console listed the
+// real store only, so during exactly the dry-run rollout the README recommends
+// the operator could see the would-ban events but never the would-ban LIST, and
+// could not lift one (see runtime.unban).
+func (rt *runtime) listBans(s *settings, now time.Time) []Ban {
+	bans := rt.store().list(now)
+	if s.dryRun {
+		for _, b := range rt.shadow.list(now) {
+			b.DryRun = true
+			bans = append(bans, b)
+		}
+		sort.Slice(bans, func(i, j int) bool { return bans[i].Created.After(bans[j].Created) })
+	}
+	rt.fillCountries(bans)
+	return bans
+}
+
+// fillCountries completes the Country column from the geo cache at read time.
+//
+// A source is banned the first time it is seen, so at ban time the cache has
+// never heard of it: lookup schedules the fetch and returns "", and the ban
+// record froze that "" — the column was blank for almost every ban, and the
+// answer that arrived a moment later was written nowhere the console read.
+// Filling on read costs one map lookup per listed ban and shows the answer on
+// the poll after it lands; a miss schedules the fetch, so the column fills in.
+func (rt *runtime) fillCountries(bans []Ban) {
+	g := rt.geo()
+	if g == nil || !g.enabled {
+		return
+	}
+	for i := range bans {
+		if bans[i].Country != "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(bans[i].Key)
+		if err != nil {
+			continue
+		}
+		bans[i].Country = g.lookup(p.Addr().String())
+	}
 }
 
 // SourcesResponse is the tracked-source table. A named struct, like every other
@@ -406,7 +483,7 @@ type banRequest struct {
 func (rt *runtime) apiBans(s *settings, rw http.ResponseWriter, req *http.Request, actor string) {
 	switch req.Method {
 	case http.MethodGet:
-		writeJSON(rw, http.StatusOK, BanListResponse{Bans: rt.store().list(time.Now())})
+		writeJSON(rw, http.StatusOK, BanListResponse{Bans: rt.listBans(s, time.Now())})
 
 	case http.MethodPost:
 		if !rt.authorizeMutation(s, rw, req) {
@@ -417,7 +494,7 @@ func (rt *runtime) apiBans(s *settings, rw http.ResponseWriter, req *http.Reques
 			writeJSON(rw, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 			return
 		}
-		key, err := parseBanKey(s, body.Key)
+		key, err := parseBanKey(s, body.Key, true)
 		if err != nil {
 			writeJSON(rw, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -452,7 +529,10 @@ func (rt *runtime) apiBans(s *settings, rw http.ResponseWriter, req *http.Reques
 		if !rt.authorizeMutation(s, rw, req) {
 			return
 		}
-		key, err := parseBanKey(s, req.URL.Query().Get("key"))
+		// Not strict: a ban persisted at an earlier, narrower key width is
+		// listed as active and matches nothing, and the only thing left to do
+		// with it is remove it. Refusing the DELETE made it immortal.
+		key, err := parseBanKey(s, req.URL.Query().Get("key"), false)
 		if err != nil {
 			writeJSON(rw, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -647,8 +727,9 @@ func refuseDangerousBan(s *settings, key netip.Prefix) (int, string) {
 
 // parseBanKey accepts an address or a CIDR and normalises it to the configured
 // ban-key width, so an operator typing "1.2.3.4" and the detector that banned
-// "1.2.3.4/32" agree about what to unban.
-func parseBanKey(s *settings, raw string) (netip.Prefix, error) {
+// "1.2.3.4/32" agree about what to unban. mustMatchRequests adds the check that
+// a new ban could ever match a request; a DELETE skips it.
+func parseBanKey(s *settings, raw string, mustMatchRequests bool) (netip.Prefix, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return netip.Prefix{}, errKeyRequired
@@ -669,11 +750,12 @@ func parseBanKey(s *settings, raw string) (netip.Prefix, error) {
 		//
 		// Refused rather than silently widened: widening bans more than the
 		// operator typed, and doing that quietly to a ban is not a kindness.
-		if bits := keyWidth(p.Addr(), s); p.Bits() > bits {
+		if bits := keyWidth(p.Addr(), s); mustMatchRequests && p.Bits() > bits {
 			w := strconv.Itoa(bits)
 			return netip.Prefix{}, adminError(p.String() +
 				" is narrower than the /" + w + " that requests are keyed at, so it could never match;" +
-				" ban the /" + w + " instead, or lower clientIP." + prefixSettingName(p.Addr()))
+				" ban the /" + w + " instead, or set clientIP." + prefixSettingName(p.Addr()) +
+				" to " + strconv.Itoa(p.Bits()))
 		}
 		return p, nil
 	}

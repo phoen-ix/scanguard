@@ -433,8 +433,13 @@ func TestAdminPrefixNeedsAPathBoundary(t *testing.T) {
 	if rec := send(h, "GET", "/admin/api/health", "203.0.113.51:1", nil); rec.Code != http.StatusUnauthorized {
 		t.Errorf("/admin/api/health without a token returned %d, want 401", rec.Code)
 	}
-	if rec := send(h, "GET", "/admin", "203.0.113.51:1", nil); !strings.Contains(rec.Body.String(), "gate-form") {
-		t.Errorf("the bare prefix no longer serves the console: %d", rec.Code)
+	// The bare prefix redirects to the directory form: served there, the page's
+	// relative asset references resolved to /app.css on the backend.
+	if rec := send(h, "GET", "/admin", "203.0.113.51:1", nil); rec.Code != http.StatusPermanentRedirect || rec.Header().Get("Location") != "/admin/" {
+		t.Errorf("the bare prefix returned %d with Location %q, want a 308 to /admin/", rec.Code, rec.Header().Get("Location"))
+	}
+	if rec := send(h, "GET", "/admin/", "203.0.113.51:1", nil); !strings.Contains(rec.Body.String(), "gate-form") {
+		t.Errorf("the prefix with a slash no longer serves the console: %d", rec.Code)
 	}
 }
 

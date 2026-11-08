@@ -800,8 +800,11 @@ func (rt *runtime) unban(key netip.Prefix, actor string) bool {
 		logWarn(rt.name, "could not remove ban", map[string]interface{}{"key": key.String(), "error": err.Error()})
 		return false
 	}
+	// The shadow list too: a dry run's would-ban is listed (see listBans) and
+	// an operator who lifts it means it, exactly as for a real one.
+	shadowHad, _ := rt.shadow.delete(key)
 	rt.counters.forget(key)
-	if !existed {
+	if !existed && !shadowHad {
 		return false
 	}
 
