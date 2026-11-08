@@ -55,8 +55,9 @@ Anything that starts Docker goes through `~/repos/.fleet/scripts/slot heavy scan
 - `.traefik.yml` `testData` is executed by the plugin catalog: it must stay a
   config `New()` accepts.
 - **Harness ports are fixed**: 8800 site, 8899 webhook sink, 9900 console,
-  18081 Traefik dashboard (`SG_WEB`/`SG_HOOKS`/`SG_CONSOLE`/`SG_DASHBOARD`
-  move them, but the examples/ scripts and CI assume these). One harness at a
+  18081 Traefik dashboard, bound to 127.0.0.1 by default
+  (`SG_WEB`/`SG_HOOKS`/`SG_CONSOLE`/`SG_DASHBOARD` take a full `address:port`
+  and move them, but the examples/ scripts and CI assume these). One harness at a
   time; fleet runs them `exclusive`. Compose project names are always explicit
   (`scanguard_e2e`, `scanguard_docs`, fleet's `fleet-scanguard`); never
   `phytotron*`, `vib`, `fileheron`, `keyb-dev`.

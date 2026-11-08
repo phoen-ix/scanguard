@@ -210,6 +210,12 @@ func TestInvalidValuesAreRejected(t *testing.T) {
 		"eventLogSize above the ceiling": func(c *Config) {
 			c.Admin.EventLogSize = maxEventLogSize + 1
 		},
+		"geo endpoint that is not a URL": func(c *Config) {
+			c.Geo.Endpoint = "ip-api.com"
+		},
+		"abuseipdb endpoint that is not a URL": func(c *Config) {
+			c.Notify.AbuseIPDB.Endpoint = "ftp://api.abuseipdb.com"
+		},
 	}
 
 	for name, mutate := range cases {

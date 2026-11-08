@@ -18,8 +18,8 @@ jobs:
     name: unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           # Must match the go directive in go.mod. Traefik interprets this plugin
           # with Yaegi v0.16.1, which exposes only the Go 1.22 standard library —
@@ -34,30 +34,45 @@ jobs:
           if [ -n "$unformatted" ]; then
             echo "these files are not gofmt'd:"; echo "$unformatted"; exit 1
           fi
+      - name: the Traefik pin is one version everywhere
+        run: |
+          # The pin lives in the compose file, the e2e overlay, and in this
+          # workflow (the matrix, the sed, the render-check steps' `if:`). A
+          # compose bump that forgot the matrix quietly weakened the integration job.
+          pin=$(sed -nE 's/^ *image: traefik:(v[0-9.]+)$/\1/p' examples/docker-compose.yml | head -1)
+          echo "compose pin: $pin"
+          test -n "$pin"
+          test "$(grep -c "image: traefik:$pin" examples/docker-compose.e2e.yml)" -eq 2
+          grep -qF "traefik: [\"$pin\"," .github/workflows/ci.yml
+          grep -qF "image: traefik:$pin|" .github/workflows/ci.yml
+          test "$(grep -cF "matrix.traefik == '$pin'" .github/workflows/ci.yml)" -eq 3
 
   yaegi:
     name: interpreter smoke test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Yaegi resolves the plugin from a GOPATH source tree, so it has to live
           # at the import path Traefik would use.
           path: go/src/github.com/phoen-ix/scanguard
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.22"
       - name: run the plugin under Yaegi
         working-directory: go/src/github.com/phoen-ix/scanguard/tools/yaegi-smoke
         env:
           SMOKE_GOPATH: ${{ github.workspace }}/go
+          # Wait one janitor tick out (about 35s): the sweep, the expiry claim
+          # and the expiry notification run under the interpreter nowhere else.
+          SMOKE_JANITOR: "1"
         run: go run .
 
   dependencies:
     name: no third-party dependencies
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: the plugin module must stay dependency-free
         run: |
           # Every dependency has to be vendored for the plugin catalog AND has to
@@ -74,8 +89,8 @@ jobs:
     name: console e2e
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "26"
       - name: install Playwright
@@ -85,7 +100,7 @@ jobs:
           npx playwright install --with-deps chromium
       - name: console e2e suite
         run: ARTIFACTS="$RUNNER_TEMP/e2e-run" scripts/e2e.sh
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: e2e-run
@@ -104,7 +119,7 @@ jobs:
       matrix:
         traefik: ["v3.7.17", "v3.7", "v3.6"]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: start the harness
         working-directory: examples
@@ -122,10 +137,16 @@ jobs:
           # A plugin that failed to load shows up as "invalid middleware type or
           # middleware does not exist", and routes using it silently 404 — which
           # is exactly how this breaks on a Traefik upgrade.
-          if docker compose logs traefik 2>&1 | grep -qiE 'invalid middleware type|middleware does not exist|plugin.*error'; then
-            docker compose logs traefik; exit 1
+          #
+          # The log goes to a file first. `docker compose logs | grep -q` under
+          # the runner's `bash -eo pipefail` fails whenever grep MATCHES: grep
+          # exits at the first hit, docker gets SIGPIPE, the pipeline is non-zero,
+          # so a found warning passed this gate and a found "initialised" failed it.
+          docker compose logs traefik > "$RUNNER_TEMP/traefik.log" 2>&1
+          if grep -qiE 'invalid middleware type|middleware does not exist|plugin.*error' "$RUNNER_TEMP/traefik.log"; then
+            cat "$RUNNER_TEMP/traefik.log"; exit 1
           fi
-          docker compose logs traefik 2>&1 | grep -q 'scanguard initialised'
+          grep -q 'scanguard initialised' "$RUNNER_TEMP/traefik.log"
 
       - name: detection and enforcement
         working-directory: examples
@@ -133,7 +154,7 @@ jobs:
 
       # The docs tour (e2e/docs/) as a render check of the console, while
       # scanner-sim.sh's bans are there to render. Once, on the pinned Traefik.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: matrix.traefik == 'v3.7.17'
         with:
           node-version: "26"
@@ -145,7 +166,7 @@ jobs:
           npx playwright install --with-deps chromium
           DOCS_SCREENSHOT_DIR="$RUNNER_TEMP/screenshots" \
             npx playwright test -c playwright.docs.config.ts --output "$RUNNER_TEMP/docs-run"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure() && matrix.traefik == 'v3.7.17'
         with:
           name: docs-run
@@ -179,9 +200,10 @@ jobs:
       - name: no degraded-streaming warnings
         working-directory: examples
         run: |
-          if docker compose logs traefik 2>&1 | grep -qE 'flusher-unavailable|hijacker-unavailable'; then
+          docker compose logs traefik > "$RUNNER_TEMP/traefik.log" 2>&1
+          if grep -qE 'flusher-unavailable|hijacker-unavailable' "$RUNNER_TEMP/traefik.log"; then
             echo "the ResponseWriter wrapper lost an interface on this Traefik version"
-            docker compose logs traefik | grep -E 'flusher|hijacker'
+            grep -E 'flusher|hijacker' "$RUNNER_TEMP/traefik.log"
             exit 1
           fi
 

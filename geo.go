@@ -26,7 +26,7 @@ type geoCache struct {
 	entries  map[string]geoEntry
 	inflight map[string]struct{}
 
-	// base is the lookup API root, injectable for the same reason as abuseBase.
+	// base is the lookup API root: geo.endpoint, ip-api.com unless configured.
 	base string
 }
 
@@ -52,7 +52,7 @@ func newGeoCache(s *settings) *geoCache {
 		client:   &http.Client{Timeout: 3 * time.Second},
 		entries:  make(map[string]geoEntry),
 		inflight: make(map[string]struct{}),
-		base:     ipAPIBase,
+		base:     s.geoEndpoint,
 	}
 }
 

@@ -27,14 +27,18 @@ case "$COMPOSE_PROJECT_NAME" in
 esac
 
 export SG_WEB=127.0.0.1:8800 SG_HOOKS=127.0.0.1:8899 SG_CONSOLE=127.0.0.1:9900 SG_DASHBOARD=127.0.0.1:18081
-export COMPOSE_FILE=docker-compose.yml:docker-compose.e2e.yml
+# Absolute, because teardown runs after the cd into e2e/ below: relative to
+# that directory compose found no file and the fixture copy was removed from
+# the wrong directory.
+export COMPOSE_FILE="$ROOT/examples/docker-compose.yml:$ROOT/examples/docker-compose.e2e.yml"
 TOKEN=dev-token-change-me-0123456789 # examples/dynamic/scanguard.yml
 
 cd "$ROOT/examples"
 teardown() {
   rc=$?
+  cd "$ROOT/examples"
   [ "$rc" = 0 ] || docker compose logs --tail=300 >"$ARTIFACTS/stack.log" 2>&1 || true
-  rm -f dynamic/zz-e2e-consoles.yml # the suite's extra consoles, should it have died mid-run
+  rm -f "$ROOT/examples/dynamic/zz-e2e-consoles.yml" # the suite's extra consoles, should it have died mid-run
   docker compose down -v --remove-orphans --rmi local || true
   exit "$rc"
 }

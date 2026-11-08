@@ -97,8 +97,16 @@ clear_received
 # no new ban, the wait below timed out quietly, and before == after held
 # without anything having been tested.
 src2="198.51.100.$((RANDOM % 50 + 150))"
-curl -s -o /dev/null --max-time 10 -H "X-Real-Ip: $src2" "$BASE/.env"
-wait_for 'len(d)>0' 10 >/dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H "X-Real-Ip: $src2" "$BASE/.env")
+if [[ "$code" == "403" ]]; then
+  ok "the probe from $src2 was refused, so there is a ban to be rejected under"
+else
+  bad "the probe from $src2 returned $code; the step below would be vacuous"
+fi
+# The baseline is taken only once BOTH deliveries of that ban have landed (the
+# webhook and the chat message go out one after the other); taken between them
+# it moved by one on its own.
+wait_for 'any(x["path"]=="/ban" for x in d) and any(x["path"]=="/ntfy" for x in d)' 10 >/dev/null
 before=$(received | jqp 'print(len(d))')
 for _ in $(seq 1 15); do curl -s -o /dev/null --max-time 5 -H "X-Real-Ip: $src2" "$BASE/" ; done
 sleep 2
@@ -108,6 +116,9 @@ if [[ "$before" == "$after" ]]; then
 else
   bad "notification count grew from $before to $after; rejects are being delivered"
 fi
+# Lift the ban, so a rerun inside the hour starts from a source that can be banned.
+curl -s -X DELETE --max-time 10 -H "X-Scanguard-Token: $TOKEN" -H "X-Scanguard-Action: 1" \
+  "$CONSOLE/api/bans?key=$src2%2F32" >/dev/null
 
 say "A dead endpoint does not take Traefik with it"
 # Point a webhook at a black hole, trigger bans, and confirm the proxy is fine.
@@ -118,6 +129,11 @@ say "A dead endpoint does not take Traefik with it"
 # It trusts the same proxies as the main instance so X-Real-Ip is believed, and
 # the sources are real addresses — "198.51.100.9$RANDOM" produced strings like
 # 198.51.100.912345, which no parser accepts, so nothing was ever bannable.
+#
+# The probe is a HONEYPOT only this instance knows, with its signatures off. A
+# probe for /deadhook/.git/config was refused by the MAIN instance whenever the
+# router had not loaded yet (its .git/config signature matched), so the step
+# passed without the dead-webhook instance ever having run.
 cat > /tmp/scanguard-deadhook.yml <<'EOF'
 http:
   routers:
@@ -136,6 +152,11 @@ http:
           clientIP:
             trustedProxies: [127.0.0.1/32, 172.16.0.0/12]
             header: X-Real-Ip
+          detectors:
+            signatures: {enabled: false}
+            userAgent: {enabled: false}
+            badPaths: {enabled: false}
+            honeypots: {enabled: true, paths: [/deadhook/trap]}
           admin: {enabled: false}
           notify:
             timeout: 1s
@@ -143,16 +164,29 @@ http:
               - url: http://127.0.0.1:1/nowhere
 EOF
 cp /tmp/scanguard-deadhook.yml dynamic/zz-deadhook.yml
-sleep 3
+# Wait for the router instead of sleeping: until it loads, the probe reaches
+# nginx and comes back 404.
+for _ in $(seq 1 40); do
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "X-Real-Ip: 198.51.100.200" "$BASE/deadhook/trap")
+  [[ "$code" == "403" ]] && break
+  sleep 0.5
+done
 deadhook_bans=0
 for n in $(seq 1 5); do
-  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5     -H "X-Real-Ip: 198.51.100.$((200 + n))" "$BASE/deadhook/.git/config")
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5     -H "X-Real-Ip: 198.51.100.$((200 + n))" "$BASE/deadhook/trap")
   [[ "$code" == "403" ]] && deadhook_bans=$((deadhook_bans + 1))
 done
 if [[ "$deadhook_bans" -eq 5 ]]; then
   ok "five sources were banned by the instance with the dead webhook"
 else
   bad "only $deadhook_bans of 5 probes were refused by the dead-webhook instance; the step is not exercising it"
+fi
+# And by THAT instance: the main console must know nothing about them.
+main_bans=$(curl -s --max-time 10 -H "X-Scanguard-Token: $TOKEN" "$CONSOLE/api/bans" | grep -o '"key":"198.51.100.20[0-5]/32"' | wc -l)
+if [[ "$main_bans" -eq 0 ]]; then
+  ok "the main instance did not ban the dead-webhook probes"
+else
+  bad "the main instance banned $main_bans of the dead-webhook probes; the step was measuring the wrong instance"
 fi
 sleep 3
 if curl -sf -o /dev/null --max-time 5 "$BASE/"; then

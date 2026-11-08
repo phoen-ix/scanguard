@@ -37,8 +37,11 @@ expect() { # expect <description> <expected> <actual>
 blocked() { # blocked <description> <status>
   if [[ "$2" == "403" ]]; then ok "$1 (blocked)"; else bad "$1 — expected a block, got $2"; fi
 }
+# curl reports 000 when it got no HTTP answer at all (refused, timed out):
+# neither blocked nor served, and it used to count as served.
 served() { # served <description> <status>
-  if [[ "$2" != "403" ]]; then ok "$1 (passed through, $2)"; else bad "$1 — scanguard blocked it"; fi
+  if [[ "$2" == "000" ]]; then bad "$1 — no HTTP answer (is the harness up?)"
+  elif [[ "$2" != "403" ]]; then ok "$1 (passed through, $2)"; else bad "$1 — scanguard blocked it"; fi
 }
 
 console() { curl -s --max-time 10 -H "X-Scanguard-Token: $TOKEN" "$CONSOLE$1"; }

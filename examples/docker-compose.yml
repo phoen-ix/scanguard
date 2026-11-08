@@ -6,8 +6,12 @@
 #   open http://localhost:9900           the console (token in dynamic/scanguard.yml)
 #   open http://localhost:18081          the Traefik dashboard
 #
-# Host ports are set through the environment so they can be moved out of the way
-# of whatever else you are running:  SG_WEB=9000 docker compose up -d
+# Host ports are bound to 127.0.0.1 and set through the environment, so they
+# can be moved out of the way of whatever else you are running:
+#   SG_WEB=127.0.0.1:9000 docker compose up -d
+# Each value is the full host side ("address:port"; a bare port binds every
+# interface). The harness runs an insecure Traefik dashboard, a console with a
+# public test token and a webhook sink: expose them on purpose, never by default.
 #
 # The plugin source is mounted at the path Traefik's localPlugins loader expects,
 # which is ./plugins-local/src/<module path> relative to Traefik's working
@@ -21,9 +25,9 @@ services:
     command:
       - --configFile=/etc/traefik/traefik.yml
     ports:
-      - "${SG_WEB:-8800}:80" # the protected site
-      - "${SG_DASHBOARD:-18081}:8080" # Traefik dashboard (harness only)
-      - "${SG_CONSOLE:-9900}:9900" # scanguard console
+      - "${SG_WEB:-127.0.0.1:8800}:80" # the protected site
+      - "${SG_DASHBOARD:-127.0.0.1:18081}:8080" # Traefik dashboard (harness only)
+      - "${SG_CONSOLE:-127.0.0.1:9900}:9900" # scanguard console
     volumes:
       - ./traefik.yml:/etc/traefik/traefik.yml:ro
       - ./dynamic:/etc/traefik/dynamic:ro
@@ -59,7 +63,7 @@ services:
     image: python:3.15.2-alpine3.24
     expose: ["8080"]
     ports:
-      - "${SG_HOOKS:-8899}:8080"
+      - "${SG_HOOKS:-127.0.0.1:8899}:8080"
     command: ["python", "/srv/hookrecv.py"]
     volumes:
       - ./hookrecv.py:/srv/hookrecv.py:ro

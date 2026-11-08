@@ -347,6 +347,11 @@ type AbuseIPDBConfig struct {
 	Check         bool   `json:"check,omitempty"`
 	MinConfidence int    `json:"minConfidence,omitempty"`
 	CacheTTL      string `json:"cacheTTL,omitempty"`
+	// Endpoint is the API root, https://api.abuseipdb.com unless you run a
+	// compatible proxy or stand-in. The interpreter smoke test points it at a
+	// fake, which is how the decoding of a live answer gets exercised under
+	// Yaegi at all.
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 // GeoConfig enriches the admin UI with country information. Display only: a
@@ -355,6 +360,9 @@ type GeoConfig struct {
 	Enabled  bool   `json:"enabled,omitempty"`
 	Provider string `json:"provider,omitempty"`
 	CacheTTL string `json:"cacheTTL,omitempty"`
+	// Endpoint is the lookup root: http://ip-api.com by default, the pro
+	// endpoint or a self-hosted compatible service if you have one.
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 // AdminConfig exposes the web GUI. Disabled by default and shipped with no
@@ -475,12 +483,14 @@ func CreateConfig() *Config {
 				Check:         false,
 				MinConfidence: 75,
 				CacheTTL:      "24h",
+				Endpoint:      abuseIPDBBase,
 			},
 		},
 		Geo: GeoConfig{
 			Enabled:  false,
 			Provider: "ip-api",
 			CacheTTL: "168h",
+			Endpoint: ipAPIBase,
 		},
 		Admin: AdminConfig{
 			Enabled:      false,
@@ -663,10 +673,12 @@ type settings struct {
 	notify        NotifyConfig
 	notifyTimeout time.Duration
 	abuseCacheTTL time.Duration
+	abuseEndpoint string
 
 	geoEnabled  bool
 	geoProvider string
 	geoCacheTTL time.Duration
+	geoEndpoint string
 
 	// uaCrawlers is the instance-wide detectors.userAgent.crawlers policy: the
 	// fallback for a middleware definition that does not state one of its own.
@@ -1145,6 +1157,13 @@ func (c *Config) parseNotify(s *settings) error {
 		// request re-queued a lookup against a thousand-a-day quota.
 		return errors.New("notify.abuseipdb.cacheTTL must be a positive duration")
 	}
+	s.abuseEndpoint = strings.TrimRight(strings.TrimSpace(c.Notify.AbuseIPDB.Endpoint), "/")
+	if s.abuseEndpoint == "" {
+		s.abuseEndpoint = abuseIPDBBase
+	}
+	if !isHTTPURL(s.abuseEndpoint) {
+		return fmt.Errorf("notify.abuseipdb.endpoint must be an http(s) URL, got %q", c.Notify.AbuseIPDB.Endpoint)
+	}
 
 	s.geoEnabled = c.Geo.Enabled
 	s.geoProvider = strings.ToLower(strings.TrimSpace(c.Geo.Provider))
@@ -1160,6 +1179,13 @@ func (c *Config) parseNotify(s *settings) error {
 	if s.geoCacheTTL == permanent {
 		// Same failure as above, against ip-api's 45 lookups a minute.
 		return errors.New("geo.cacheTTL must be a positive duration")
+	}
+	s.geoEndpoint = strings.TrimRight(strings.TrimSpace(c.Geo.Endpoint), "/")
+	if s.geoEndpoint == "" {
+		s.geoEndpoint = ipAPIBase
+	}
+	if !isHTTPURL(s.geoEndpoint) {
+		return fmt.Errorf("geo.endpoint must be an http(s) URL, got %q", c.Geo.Endpoint)
 	}
 	return nil
 }

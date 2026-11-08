@@ -26,6 +26,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mitchellh/mapstructure"
@@ -226,9 +227,12 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 		"instanceName":    "smoke",
 		"observeResponse": true,
 		"store": map[string]interface{}{
-			"backend":          "file",
-			"path":             statePath,
-			"snapshotInterval": "1s",
+			"backend": "file",
+			"path":    statePath,
+			// The janitor floors this to 30s whatever is written here; the
+			// snapshot checks below rely on putBan flushing on every ban, not on
+			// the janitor, which janitorChecks exercises on its own.
+			"snapshotInterval": "30s",
 		},
 		"clientIP": map[string]interface{}{
 			"ipv4Prefix": 32,
@@ -396,8 +400,9 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 	check("the range ban is lifted", rec.Code == 200 && strings.Contains(rec.Body.String(), "\"unbanned\":true"),
 		"got status %d body %s", rec.Code, rec.Body.String())
 
-	// Persistence. The janitor snapshots on a timer, and applyBan flushes
-	// immediately, so the file must already exist and hold the remaining bans.
+	// Persistence. putBan flushes the snapshot on every ban (the janitor, every
+	// 30s at the least, never ticks inside this process), so the file must
+	// already exist and hold the remaining bans.
 	waitFor(2*time.Second, func() bool {
 		info, serr := os.Stat(statePath)
 		return serr == nil && info.Size() > 0
@@ -599,8 +604,14 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 	// slice that already holds elements instead of replacing it. The smoke config
 	// sets a single status; anything more than that means a default leaked in and
 	// every operator who narrows a list would silently get the defaults back.
-	if detectors, ok := rules.Effective["detectors"].(map[string]interface{}); ok {
-		if bad, ok := detectors["badPaths"].(map[string]interface{}); ok {
+	// Each shape assertion is a check in its own right: a response that no longer
+	// has the shape used to skip these two silently and look like a pass.
+	detectors, ok := rules.Effective["detectors"].(map[string]interface{})
+	check("the effective rules carry a detectors section", ok, "effective=%v", rules.Effective)
+	if ok {
+		bad, ok := detectors["badPaths"].(map[string]interface{})
+		check("the effective rules carry badPaths", ok, "detectors=%v", detectors)
+		if ok {
 			statuses, _ := bad["statuses"].([]interface{})
 			check("a configured list replaces the default instead of merging into it",
 				len(statuses) == 1, "badPaths.statuses is %v, want exactly [404]", statuses)
@@ -608,7 +619,9 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 	}
 	// The same trap for the ban ladder: two configured rungs must not come back
 	// with the two default rungs appended.
-	if enf, ok := rules.Effective["enforcement"].(map[string]interface{}); ok {
+	enf, ok := rules.Effective["enforcement"].(map[string]interface{})
+	check("the effective rules carry an enforcement section", ok, "effective=%v", rules.Effective)
+	if ok {
 		ladder, _ := enf["escalation"].([]interface{})
 		check("a configured escalation ladder replaces the default instead of merging into it",
 			len(ladder) == 2 && ladder[0] == "1h" && ladder[1] == "24h",
@@ -630,9 +643,15 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 	rec = doBody(h, "PUT", "/__scanguard/api/rules", "203.0.113.60:5000", string(edited),
 		map[string]string{"X-Scanguard-Token": token, "X-Scanguard-Action": "1"})
 	check("a rule change is accepted", rec.Code == 200, "got status %d body %s", rec.Code, truncate(rec.Body.String(), 300))
+	// Decoded, not substring-matched: "detectors" appears in every rules
+	// response, so the old check could not fail.
+	var applied struct {
+		Overridden []string `json:"overridden"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &applied)
 	check("the changed section is reported as console-managed",
-		strings.Contains(rec.Body.String(), "\"detectors\""),
-		"overridden sections missing from the response")
+		len(applied.Overridden) == 1 && applied.Overridden[0] == "detectors",
+		"overridden = %v, want [detectors]", applied.Overridden)
 
 	rec = do(h, "GET", "/console-trap", "203.0.113.70:5000", nil)
 	check("a honeypot added from the console blocks at once, with no restart",
@@ -661,6 +680,7 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 	check("the reverted honeypot no longer blocks", rec.Code == 200, "got status %d", rec.Code)
 
 	subnetChecks(build, token)
+	roundTwoChecks(build, token)
 
 	// A read-only console serves everything and refuses every mutation.
 	ro, err := build(map[string]interface{}{
@@ -785,6 +805,343 @@ func subnetChecks(build func(map[string]interface{}) (http.Handler, error), toke
 		"got status %d body %s", rec.Code, rec.Body.String())
 	rec = do(h, "GET", "/", "192.0.2.99:5000", nil)
 	check("a lifted range ban serves its addresses again", rec.Code == 200, "got status %d", rec.Code)
+}
+
+// roundTwoChecks covers what the second audit found this gate never
+// interpreted: trusted-proxy attribution, the notifier's outbound payload, the
+// uiMode console and Bearer credentials, a dry run with its shadow list, the
+// tarpit, rate abuse, body scanning, an empty user-agent, signature exclusions,
+// the user-agent and path allowlists, brute-force paths, and the geo and
+// AbuseIPDB decoding against fakes. Each instance has its own name, so its
+// settings cannot disturb the main instance's.
+func roundTwoChecks(build func(map[string]interface{}) (http.Handler, error), token string) {
+	auth := map[string]string{"X-Scanguard-Token": token}
+	authAction := map[string]string{"X-Scanguard-Token": token, "X-Scanguard-Action": "1"}
+	base := func(name string, extra map[string]interface{}) map[string]interface{} {
+		cfg := map[string]interface{}{
+			"instanceName": name,
+			"store":        map[string]interface{}{"backend": "memory"},
+			"admin":        map[string]interface{}{"enabled": true, "pathPrefix": "/__scanguard", "token": token},
+		}
+		for k, v := range extra {
+			cfg[k] = v
+		}
+		return cfg
+	}
+	mustBuild := func(what string, cfg map[string]interface{}) http.Handler {
+		h, err := build(cfg)
+		if err != nil {
+			fatal("New rejected the %s configuration: %v", what, err)
+		}
+		return h
+	}
+
+	// Trusted proxy: the configured header, then the X-Forwarded-For walk. The
+	// main instance trusts no proxy, so resolve() returned before either was
+	// read and the "spoofed header" check passed for an implementation with no
+	// trust logic at all.
+	proxy := mustBuild("trusted-proxy", base("smoke-proxy", map[string]interface{}{
+		"clientIP": map[string]interface{}{"trustedProxies": []string{"10.0.0.0/8"}, "header": "X-Real-Ip"},
+	}))
+	do(proxy, "GET", "/wp-login.php", "10.0.0.5:5000", map[string]string{"X-Real-Ip": "203.0.113.140"})
+	rec := do(proxy, "GET", "/", "10.0.0.5:5000", map[string]string{"X-Real-Ip": "203.0.113.140"})
+	check("the client named by the trusted proxy's header is banned", rec.Code == 403, "got status %d", rec.Code)
+	rec = do(proxy, "GET", "/", "10.0.0.5:5000", map[string]string{"X-Real-Ip": "203.0.113.141"})
+	check("another client behind the same proxy is served", rec.Code == 200, "got status %d", rec.Code)
+	do(proxy, "GET", "/wp-login.php", "10.0.0.5:5000", map[string]string{"X-Forwarded-For": "203.0.113.142, 10.0.0.9"})
+	rec = do(proxy, "GET", "/", "10.0.0.5:5000", map[string]string{"X-Forwarded-For": "203.0.113.142, 10.0.0.9"})
+	check("the X-Forwarded-For walk attributes the rightmost untrusted hop", rec.Code == 403,
+		"got status %d — the chain was not walked from the proxy's end", rec.Code)
+	rec = do(proxy, "GET", "/", "10.0.0.9:5000", nil)
+	check("a trusted hop is never banned itself", rec.Code == 200, "got status %d", rec.Code)
+	rec = do(proxy, "GET", "/__scanguard", "10.0.0.5:5000", nil)
+	check("the bare admin prefix redirects to the directory form",
+		rec.Code == 308 && rec.Header().Get("Location") == "/__scanguard/", "got status %d location %q", rec.Code, rec.Header().Get("Location"))
+
+	// The notifier: an outbound call from an interpreted goroutine, and a body
+	// that is a named struct holding the Event. Encoded through a map it came
+	// out as {} under Yaegi, with no error.
+	var sinkMu sync.Mutex
+	var payloads []string
+	sink := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		b, _ := io.ReadAll(req.Body)
+		sinkMu.Lock()
+		payloads = append(payloads, string(b))
+		sinkMu.Unlock()
+		rw.WriteHeader(http.StatusOK)
+	}))
+	defer sink.Close()
+	received := func(n int) bool {
+		sinkMu.Lock()
+		defer sinkMu.Unlock()
+		return len(payloads) >= n
+	}
+	notifying := mustBuild("notifier", base("smoke-notify", map[string]interface{}{
+		"notify": map[string]interface{}{
+			"timeout":  "5s",
+			"webhooks": []interface{}{map[string]interface{}{"url": sink.URL + "/ban", "headers": map[string]interface{}{"X-Harness": "smoke"}}},
+		},
+	}))
+	do(notifying, "GET", "/wp-login.php", "203.0.113.150:5000", nil)
+	waitFor(5*time.Second, func() bool { return received(1) })
+	var hook struct {
+		Source   string `json:"source"`
+		Instance string `json:"instance"`
+		Event    struct {
+			Seq      uint64  `json:"seq"`
+			Kind     string  `json:"kind"`
+			Key      string  `json:"key"`
+			Detector string  `json:"detector"`
+			BanFor   string  `json:"banFor"`
+			Expires  *string `json:"expires"`
+			Actor    string  `json:"actor"`
+		} `json:"event"`
+	}
+	sinkMu.Lock()
+	first := ""
+	if len(payloads) > 0 {
+		first = payloads[0]
+	}
+	sinkMu.Unlock()
+	if jerr := json.Unmarshal([]byte(first), &hook); jerr != nil || first == "" {
+		check("a ban reaches the webhook as JSON", false, "%d payloads, first %q: %v", len(payloads), truncate(first, 200), jerr)
+	} else {
+		check("the webhook payload carries the event, not an empty object",
+			hook.Source == "scanguard" && hook.Instance == "smoke-notify" && hook.Event.Kind == "ban" &&
+				hook.Event.Key == "203.0.113.150/32" && hook.Event.Detector == "signature" && hook.Event.BanFor == "1h" &&
+				hook.Event.Seq > 0 && hook.Event.Expires != nil,
+			"payload %s", truncate(first, 300))
+	}
+	rec = do(notifying, "DELETE", "/__scanguard/api/bans?key=203.0.113.150/32", "203.0.113.60:5000", authAction)
+	check("the notifying instance lifts the ban", rec.Code == 200, "got status %d", rec.Code)
+	waitFor(5*time.Second, func() bool { return received(2) })
+	sinkMu.Lock()
+	second := ""
+	if len(payloads) > 1 {
+		second = payloads[1]
+	}
+	sinkMu.Unlock()
+	hook.Event.Kind = ""
+	_ = json.Unmarshal([]byte(second), &hook)
+	check("the unban reaches the webhook with its actor", hook.Event.Kind == "unban" && hook.Event.Actor == "token",
+		"second payload %s", truncate(second, 300))
+
+	// A uiMode console beside its detector, with Bearer credentials.
+	detector := mustBuild("ui detector", map[string]interface{}{
+		"instanceName": "smoke-ui",
+		"store":        map[string]interface{}{"backend": "memory"},
+	})
+	console := mustBuild("ui console", map[string]interface{}{
+		"instanceName": "smoke-ui",
+		"uiMode":       true,
+		"admin":        map[string]interface{}{"enabled": true, "token": token},
+	})
+	do(detector, "GET", "/wp-login.php", "203.0.113.160:5000", nil)
+	rec = do(console, "GET", "/api/bans", "203.0.113.60:5000", map[string]string{"Authorization": "bearer " + token})
+	check("a uiMode console lists the detector's bans to a Bearer credential",
+		rec.Code == 200 && strings.Contains(rec.Body.String(), "203.0.113.160/32"), "got status %d body %s", rec.Code, truncate(rec.Body.String(), 200))
+	rec = do(console, "GET", "/", "203.0.113.60:5000", nil)
+	check("a uiMode console serves the page at its root without a token",
+		rec.Code == 200 && strings.Contains(rec.Body.String(), "gate-form"), "got status %d", rec.Code)
+	rec = do(console, "GET", "/favicon.ico", "203.0.113.60:5000", nil)
+	check("the favicon is a plain 404", rec.Code == 404, "got status %d", rec.Code)
+	rec = do(console, "GET", "/api/state", "203.0.113.60:5000", auth)
+	var uiState struct {
+		Stats map[string]int64 `json:"stats"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &uiState)
+	check("the favicon request did not count as a failed login", rec.Code == 200 && uiState.Stats["authFailures"] == 0,
+		"status %d authFailures=%d", rec.Code, uiState.Stats["authFailures"])
+	rec = do(console, "GET", "/somewhere-else", "203.0.113.60:5000", nil)
+	check("a uiMode console refuses an unauthenticated non-asset path", rec.Code == 401, "got status %d", rec.Code)
+	rec = do(detector, "GET", "/", "203.0.113.161:5000", nil)
+	check("the detector beside a uiMode console still proxies", rec.Code == 200 && rec.Header().Get("X-Backend") == "reached",
+		"got status %d", rec.Code)
+
+	// A dry run: nothing refused, the would-ban recorded once, listed flagged.
+	dry := mustBuild("dry-run", base("smoke-dry", map[string]interface{}{"dryRun": true}))
+	rec = do(dry, "GET", "/wp-login.php", "203.0.113.170:5000", nil)
+	check("a dry run passes a probe to the backend", rec.Code == 200 && rec.Header().Get("X-Backend") == "reached", "got status %d", rec.Code)
+	rec = do(dry, "GET", "/wp-admin/", "203.0.113.170:5000", nil)
+	check("a dry run passes the second probe too", rec.Code == 200, "got status %d", rec.Code)
+	rec = do(dry, "GET", "/__scanguard/api/bans", "203.0.113.60:5000", auth)
+	check("a dry run lists its would-ban, flagged",
+		strings.Contains(rec.Body.String(), `"key":"203.0.113.170/32"`) && strings.Contains(rec.Body.String(), `"dryRun":true`),
+		"body %s", truncate(rec.Body.String(), 300))
+	rec = do(dry, "GET", "/__scanguard/api/events?kind=ban", "203.0.113.60:5000", auth)
+	check("a dry run detects a source once, not on every probe",
+		strings.Count(rec.Body.String(), `"key":"203.0.113.170/32"`) == 1, "body %s", truncate(rec.Body.String(), 300))
+
+	// The tarpit: an atomic.Value holding a channel, and a select on a timer.
+	tar := mustBuild("tarpit", base("smoke-tarpit", map[string]interface{}{
+		"enforcement": map[string]interface{}{"tarpit": map[string]interface{}{"enabled": true, "delay": "300ms", "maxConcurrent": 5}},
+	}))
+	do(tar, "GET", "/wp-login.php", "203.0.113.180:5000", nil)
+	started := time.Now()
+	rec = do(tar, "GET", "/", "203.0.113.180:5000", nil)
+	elapsed := time.Since(started)
+	check("a rejected request is held in the tarpit", rec.Code == 403 && elapsed >= 250*time.Millisecond,
+		"got status %d after %v", rec.Code, elapsed)
+
+	// Rate abuse: the token bucket.
+	rate := mustBuild("rate-abuse", base("smoke-rate", map[string]interface{}{
+		"detectors": map[string]interface{}{
+			"signatures": map[string]interface{}{"enabled": false},
+			"userAgent":  map[string]interface{}{"enabled": false},
+			"badPaths":   map[string]interface{}{"enabled": false},
+			"rateAbuse":  map[string]interface{}{"enabled": true, "rps": 1, "burst": 3},
+		},
+	}))
+	for n := 0; n < 3; n++ {
+		rec = do(rate, "GET", "/", "203.0.113.190:5000", nil)
+	}
+	check("requests within the burst allowance are served", rec.Code == 200, "got status %d", rec.Code)
+	rec = do(rate, "GET", "/", "203.0.113.190:5000", nil)
+	check("the request past the burst allowance is banned", rec.Code == 403, "got status %d", rec.Code)
+
+	// Body scanning: peekBody reads and rewinds the request body.
+	bodyScan := mustBuild("payload body", base("smoke-body", map[string]interface{}{
+		"detectors": map[string]interface{}{
+			"payload": map[string]interface{}{"enabled": true, "useDefaults": true, "scanQuery": false, "scanBody": true, "maxBodyBytes": 4096},
+		},
+	}))
+	rec = doBody(bodyScan, "POST", "/form", "203.0.113.200:5000", "q=1 UNION SELECT password FROM users", nil)
+	check("an injection payload in the request body is blocked", rec.Code == 403, "got status %d", rec.Code)
+	rec = doBody(bodyScan, "POST", "/form", "203.0.113.201:5000", "name=hello world", nil)
+	check("an ordinary body is passed through", rec.Code == 200, "got status %d", rec.Code)
+
+	// An empty user-agent, when that is configured to be a detection.
+	emptyUA := mustBuild("empty user-agent", base("smoke-emptyua", map[string]interface{}{
+		"detectors": map[string]interface{}{
+			"userAgent": map[string]interface{}{"enabled": true, "useDefaults": true, "banEmptyUA": true},
+		},
+	}))
+	rec = do(emptyUA, "GET", "/", "203.0.113.210:5000", nil)
+	check("a request with no user-agent is banned when banEmptyUA is on", rec.Code == 403, "got status %d", rec.Code)
+	rec = do(emptyUA, "GET", "/", "203.0.113.211:5000", map[string]string{"User-Agent": "Mozilla/5.0 (X11; Linux) Firefox/128.0"})
+	check("a request with a user-agent is served", rec.Code == 200, "got status %d", rec.Code)
+
+	// Signature exclusions, the user-agent and path allowlists, brute-force paths.
+	rules := mustBuild("exclusions and allowlists", base("smoke-rules", map[string]interface{}{
+		"allowlist": map[string]interface{}{"userAgents": []string{"uptime-robot"}, "paths": []string{"^/health$"}},
+		"detectors": map[string]interface{}{
+			"signatures": map[string]interface{}{"enabled": true, "useDefaults": true, "exclude": []string{"^/wp-login\\.php$"}},
+			"bruteForce": map[string]interface{}{"enabled": true, "capacity": 2, "window": "60s", "statuses": []int{401}, "paths": []string{"^/login$"}},
+			"badPaths":   map[string]interface{}{"enabled": false},
+		},
+	}))
+	rec = do(rules, "GET", "/wp-login.php", "203.0.113.220:5000", nil)
+	check("an excluded signature does not fire", rec.Code == 200, "got status %d", rec.Code)
+	rec = do(rules, "GET", "/wp-config.php", "203.0.113.220:5000", nil)
+	check("the other signatures still fire beside an exclusion", rec.Code == 403, "got status %d", rec.Code)
+	rec = do(rules, "GET", "/health", "203.0.113.220:5000", nil)
+	check("an allowlisted path is not a way around a ban", rec.Code == 403, "got status %d", rec.Code)
+	rec = do(rules, "GET", "/health", "203.0.113.220:5000", map[string]string{"User-Agent": "uptime-robot/2.0"})
+	check("an allowlisted user-agent bypasses the ban, on an allowlisted path too", rec.Code == 200, "got status %d", rec.Code)
+	rec = do(rules, "GET", "/.env", "203.0.113.221:5000", map[string]string{"User-Agent": "uptime-robot/2.0"})
+	check("an allowlisted user-agent is never banned", rec.Code == 200, "got status %d", rec.Code)
+	for n := 0; n < 2; n++ {
+		do(rules, "POST", "/login", "203.0.113.224:5000", nil)
+	}
+	rec = do(rules, "GET", "/", "203.0.113.224:5000", nil)
+	check("brute force on the configured login path bans", rec.Code == 403, "got status %d", rec.Code)
+
+	// Geo and AbuseIPDB against fakes: decoding a third party's JSON under the
+	// interpreter, the Country column filled on read, a reputation ban.
+	geoSrv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		_, _ = rw.Write([]byte(`{"status":"success","countryCode":"AT"}`))
+	}))
+	defer geoSrv.Close()
+	var abuseMu sync.Mutex
+	var reported []string
+	abuseSrv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/api/v2/check":
+			_, _ = rw.Write([]byte(`{"data":{"abuseConfidenceScore":100}}`))
+		case "/api/v2/report":
+			b, _ := io.ReadAll(req.Body)
+			abuseMu.Lock()
+			reported = append(reported, string(b))
+			abuseMu.Unlock()
+			_, _ = rw.Write([]byte(`{"data":{"abuseConfidenceScore":100}}`))
+		default:
+			rw.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer abuseSrv.Close()
+	enriched := mustBuild("geo and abuseipdb", base("smoke-geo", map[string]interface{}{
+		"geo": map[string]interface{}{"enabled": true, "provider": "ip-api", "cacheTTL": "1h", "endpoint": geoSrv.URL},
+		"notify": map[string]interface{}{
+			"abuseipdb": map[string]interface{}{
+				"enabled": true, "apiKey": "smoke-key", "report": true, "check": true,
+				"minConfidence": 75, "cacheTTL": "1h", "endpoint": abuseSrv.URL,
+			},
+		},
+	}))
+	do(enriched, "GET", "/wp-login.php", "203.0.113.230:5000", nil)
+	waitFor(5*time.Second, func() bool {
+		abuseMu.Lock()
+		defer abuseMu.Unlock()
+		return len(reported) > 0
+	})
+	abuseMu.Lock()
+	report := strings.Join(reported, "\n")
+	abuseMu.Unlock()
+	check("a ban is reported to AbuseIPDB with the client address and a category",
+		strings.Contains(report, "ip=203.0.113.230") && strings.Contains(report, "categories=21"), "reports: %q", truncate(report, 200))
+	countryShown := false
+	waitFor(5*time.Second, func() bool {
+		rec = do(enriched, "GET", "/__scanguard/api/bans", "203.0.113.60:5000", auth)
+		countryShown = strings.Contains(rec.Body.String(), `"country":"AT"`)
+		return countryShown
+	})
+	check("the ban list shows the country once the lookup has landed", countryShown, "body %s", truncate(rec.Body.String(), 300))
+	// Reputation: the first request schedules the lookup, the next one is banned.
+	do(enriched, "GET", "/", "203.0.113.231:5000", nil)
+	banned := false
+	waitFor(5*time.Second, func() bool {
+		rec = do(enriched, "GET", "/", "203.0.113.231:5000", nil)
+		banned = rec.Code == 403
+		return banned
+	})
+	rec = do(enriched, "GET", "/__scanguard/api/bans", "203.0.113.60:5000", auth)
+	check("a source AbuseIPDB scores as abusive is banned by the reputation detector",
+		banned && strings.Contains(rec.Body.String(), `"detector":"reputation"`), "banned=%v body %s", banned, truncate(rec.Body.String(), 300))
+
+	janitorChecks(build, token, sink.URL, received)
+}
+
+// janitorChecks waits out one janitor tick, so the sweep, the expiry claim and
+// the expiry notification run under the interpreter at least once. Thirty-odd
+// seconds, so it runs only when SMOKE_JANITOR=1 (CI sets it); the snapshot
+// checks above never see a tick.
+func janitorChecks(build func(map[string]interface{}) (http.Handler, error), token, sinkURL string, received func(int) bool) {
+	if os.Getenv("SMOKE_JANITOR") != "1" {
+		fmt.Println("SKIP  janitor tick (set SMOKE_JANITOR=1 to wait one out)")
+		return
+	}
+	// The sink already holds the notifying instance's two deliveries.
+	h, err := build(map[string]interface{}{
+		"instanceName": "smoke-janitor",
+		"store":        map[string]interface{}{"backend": "memory"},
+		"enforcement":  map[string]interface{}{"escalation": []string{"2s"}},
+		"notify": map[string]interface{}{
+			"timeout":  "5s",
+			"webhooks": []interface{}{map[string]interface{}{"url": sinkURL + "/janitor", "events": []string{"unban"}}},
+		},
+		"admin": map[string]interface{}{"enabled": true, "pathPrefix": "/__scanguard", "token": token},
+	})
+	if err != nil {
+		fatal("New rejected the janitor configuration: %v", err)
+	}
+	rec := do(h, "GET", "/wp-login.php", "203.0.113.240:5000", nil)
+	check("the janitor instance bans a probe", rec.Code == 403, "got status %d", rec.Code)
+	fmt.Println("....  waiting for a janitor tick (up to 40s)")
+	waitFor(40*time.Second, func() bool { return received(3) })
+	check("the expiry unban reaches the webhook after the janitor swept the ban", received(3),
+		"no unban was delivered within 40s of a 2s ban")
+	rec = do(h, "GET", "/__scanguard/api/state", "203.0.113.60:5000", map[string]string{"X-Scanguard-Token": token})
+	check("the expired ban is counted", strings.Contains(rec.Body.String(), `"expired":1`), "body %s", truncate(rec.Body.String(), 300))
 }
 
 // doBody issues a request with an explicit JSON body, for the console's write endpoints.

@@ -45,7 +45,10 @@ first_byte=$(curl -s --no-buffer --max-time 6 \
   -w '%{time_starttransfer}' -o /tmp/scanguard-sse.$$ "$BASE/sse" 2>/dev/null)
 end=$(date +%s%N)
 total_ms=$(( (end - start) / 1000000 ))
-ticks=$(grep -c '^data: tick' /tmp/scanguard-sse.$$ 2>/dev/null || echo 0)
+# grep -c prints 0 itself when nothing matches (and exits 1), so "|| echo 0"
+# yielded "0\n0" and the comparison below errored into the wrong diagnosis.
+ticks=$(grep -c '^data: tick' /tmp/scanguard-sse.$$ 2>/dev/null)
+ticks=${ticks:-0}
 rm -f /tmp/scanguard-sse.$$
 
 ttfb_ms=$(awk -v t="$first_byte" 'BEGIN { printf "%d", t * 1000 }')
