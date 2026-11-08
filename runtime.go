@@ -985,6 +985,10 @@ func storeFingerprint(s *settings) string {
 		// built with; left out, a rotated Redis password needed a Traefik restart.
 		m["redisPassword"] = s.redis.Password
 		m["redisTimeout"] = s.redisTimeout.String()
+		m["redisUsername"] = s.redis.Username
+		m["redisTLS"] = strconv.FormatBool(s.redis.TLS)
+		m["redisTLSName"] = s.redis.TLSServerName
+		m["redisTLSCA"] = s.redis.TLSCAFile
 	}
 	return mapFingerprint(m)
 }

@@ -8,8 +8,18 @@ package scanguard
 
 import (
 	"bufio"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,6 +48,7 @@ type fakeRedis struct {
 	closeAfter int
 	// scanPage is how many keys one SCAN reply carries.
 	scanPage int
+	username string
 	password string
 
 	live   sync.Mutex
@@ -50,6 +61,49 @@ func newFakeRedis(t *testing.T) *fakeRedis {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	return serveFakeRedis(t, ln)
+}
+
+// newFakeRedisTLS is newFakeRedis behind TLS, with a certificate for
+// "redis.test" signed by a throwaway CA; the CA's PEM path is returned.
+func newFakeRedisTLS(t *testing.T) (*fakeRedis, string) {
+	t.Helper()
+	caKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	caTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "scanguard test CA"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, _ := x509.ParseCertificate(caDER)
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	leafTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "redis.test"},
+		DNSNames:  []string{"redis.test"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, ca, &key.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caPath := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cert := tls.Certificate{Certificate: [][]byte{leafDER}, PrivateKey: key}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	return serveFakeRedis(t, ln), caPath
+}
+
+func serveFakeRedis(t *testing.T, ln net.Listener) *fakeRedis {
+	t.Helper()
 	f := &fakeRedis{
 		ln:       ln,
 		data:     make(map[string]string),
@@ -169,8 +223,19 @@ func (f *fakeRedis) liveKeys() []string {
 func (f *fakeRedis) dispatch(args []string) string {
 	switch strings.ToUpper(args[0]) {
 	case "AUTH":
-		if f.password != "" && (len(args) < 2 || args[1] != f.password) {
-			return "-WRONGPASS invalid password\r\n"
+		user, pass := "default", ""
+		switch len(args) {
+		case 2:
+			pass = args[1]
+		case 3:
+			user, pass = args[1], args[2]
+		}
+		wantUser := f.username
+		if wantUser == "" {
+			wantUser = "default"
+		}
+		if f.password != "" && (user != wantUser || pass != f.password) {
+			return "-WRONGPASS invalid username-password pair or user is disabled.\r\n"
 		}
 		return respOK
 	case "SELECT", "PING":
@@ -666,5 +731,73 @@ func TestRedisAuthAndPrefix(t *testing.T) {
 	})
 	if _, err := newRedisStore(wrong); err == nil {
 		t.Error("a wrong password with failOpen false did not fail the store")
+	}
+}
+
+// An ACL user authenticates with AUTH user pass; a wrong user is refused.
+func TestRedisACLUsername(t *testing.T) {
+	f := newFakeRedis(t)
+	f.username = "scanguard"
+	f.password = "acl-password-0123"
+	ok := redisSettings(t, f, func(c *Config) {
+		c.Store.Redis.Username = "scanguard"
+		c.Store.Redis.Password = "acl-password-0123"
+		c.Store.FailOpen = false
+	})
+	if _, err := newRedisStore(ok); err != nil {
+		t.Fatalf("the ACL user was refused: %v", err)
+	}
+	wrong := redisSettings(t, f, func(c *Config) {
+		c.Store.Redis.Username = "someone-else"
+		c.Store.Redis.Password = "acl-password-0123"
+		c.Store.FailOpen = false
+	})
+	if _, err := newRedisStore(wrong); err == nil {
+		t.Error("a wrong ACL user was accepted")
+	}
+	cfg := CreateConfig()
+	cfg.Store.Backend = "redis"
+	cfg.Store.Redis.Address = "127.0.0.1:6379"
+	cfg.Store.Redis.Username = "scanguard"
+	if _, err := cfg.parse(); err == nil {
+		t.Error("a username without a password was accepted")
+	}
+}
+
+// TLS: the certificate is verified against tlsCAFile under tlsServerName;
+// without the CA, or under another name, the connection is refused.
+func TestRedisTLS(t *testing.T) {
+	f, caPath := newFakeRedisTLS(t)
+	tlsSettings := func(name, ca string) *settings {
+		return redisSettings(t, f, func(c *Config) {
+			c.Store.Redis.TLS = true
+			c.Store.Redis.TLSServerName = name
+			c.Store.Redis.TLSCAFile = ca
+			c.Store.FailOpen = false
+		})
+	}
+	r, err := newRedisStore(tlsSettings("redis.test", caPath))
+	if err != nil {
+		t.Fatalf("TLS with the right CA and name failed: %v", err)
+	}
+	_ = r.put(ban("203.0.113.40/32", time.Now().Add(time.Hour)))
+	eventually(t, "the ban in redis over TLS", func() bool { _, ok := f.get("t:ban:203.0.113.40/32"); return ok })
+
+	if _, err := newRedisStore(tlsSettings("not-the-name.test", caPath)); err == nil {
+		t.Error("a certificate for another name was accepted")
+	}
+	if _, err := newRedisStore(tlsSettings("redis.test", "")); err == nil {
+		t.Error("a certificate from an unknown CA was accepted against the system roots")
+	}
+
+	bad := filepath.Join(t.TempDir(), "empty.pem")
+	_ = os.WriteFile(bad, []byte("not a certificate"), 0o600)
+	cfg := CreateConfig()
+	cfg.Store.Backend = "redis"
+	cfg.Store.Redis.Address = f.addr()
+	cfg.Store.Redis.TLS = true
+	cfg.Store.Redis.TLSCAFile = bad
+	if _, err := cfg.parse(); err == nil {
+		t.Error("a CA file with no certificate was accepted")
 	}
 }

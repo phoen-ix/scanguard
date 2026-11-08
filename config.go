@@ -1,10 +1,14 @@
 package scanguard
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -80,11 +84,21 @@ type StoreConfig struct {
 
 // RedisConfig configures the shared-state backend used for multi-replica setups.
 type RedisConfig struct {
-	Address   string `json:"address,omitempty"`
+	Address string `json:"address,omitempty"`
+	// Username is the ACL user (Redis 6+); empty authenticates with the
+	// password alone, as the "default" user.
+	Username  string `json:"username,omitempty"`
 	Password  string `json:"password,omitempty"`
 	DB        int    `json:"db,omitempty"`
 	KeyPrefix string `json:"keyPrefix,omitempty"`
 	Timeout   string `json:"timeout,omitempty"`
+	// TLS connects with TLS (managed Redis services require it). The server
+	// certificate is verified against TLSCAFile, a PEM bundle, or the system
+	// roots when that is empty; TLSServerName overrides the name checked,
+	// which otherwise is the host part of Address.
+	TLS           bool   `json:"tls,omitempty"`
+	TLSServerName string `json:"tlsServerName,omitempty"`
+	TLSCAFile     string `json:"tlsCAFile,omitempty"`
 }
 
 // ClientIPConfig controls how the true client address is resolved and how wide a
@@ -656,6 +670,8 @@ type settings struct {
 	maxEntries       int
 	redis            RedisConfig
 	redisTimeout     time.Duration
+	// redisTLS is the client configuration when store.redis.tls is on.
+	redisTLS *tls.Config
 
 	trustedProxies []netip.Prefix
 	clientIPHeader string
@@ -842,7 +858,46 @@ func (c *Config) parseStore(s *settings) error {
 	if strings.ContainsAny(s.redis.KeyPrefix, `*?[]\`) {
 		return fmt.Errorf("store.redis.keyPrefix: %q must not contain the glob characters * ? [ ] or \\", s.redis.KeyPrefix)
 	}
+	if s.storeBackend == "redis" {
+		if s.redis.Username != "" && s.redis.Password == "" {
+			return errors.New("store.redis.username is set but store.redis.password is empty")
+		}
+		if s.redis.TLS {
+			tc, err := redisTLSConfig(s.redis)
+			if err != nil {
+				return err
+			}
+			s.redisTLS = tc
+		}
+	}
 	return nil
+}
+
+// redisTLSConfig builds the client side of store.redis.tls. The CA bundle is
+// read here, at parse time, so a missing or unreadable file is a startup
+// error rather than a connection that fails on every janitor tick.
+func redisTLSConfig(rc RedisConfig) (*tls.Config, error) {
+	name := strings.TrimSpace(rc.TLSServerName)
+	if name == "" {
+		host, _, err := net.SplitHostPort(rc.Address)
+		if err != nil {
+			host = rc.Address
+		}
+		name = host
+	}
+	tc := &tls.Config{ServerName: name, MinVersion: tls.VersionTLS12}
+	if path := strings.TrimSpace(rc.TLSCAFile); path != "" {
+		pem, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("store.redis.tlsCAFile: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("store.redis.tlsCAFile: %s holds no PEM certificate", path)
+		}
+		tc.RootCAs = pool
+	}
+	return tc, nil
 }
 
 func (c *Config) parseClientIP(s *settings) error {

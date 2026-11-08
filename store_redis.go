@@ -2,6 +2,7 @@ package scanguard
 
 import (
 	"bufio"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -72,6 +73,8 @@ const unbanClaimTTL = 2 * time.Minute
 func newRedisStore(s *settings) (*redisStore, error) {
 	client := &respClient{
 		addr:     s.redis.Address,
+		username: s.redis.Username,
+		tls:      s.redisTLS,
 		password: s.redis.Password,
 		db:       s.redis.DB,
 		timeout:  s.redisTimeout,
@@ -428,9 +431,12 @@ type respClient struct {
 	conn     net.Conn
 	rw       *bufio.ReadWriter
 	addr     string
+	username string
 	password string
-	db       int
-	timeout  time.Duration
+	// tls, when set, wraps every connection in a TLS client.
+	tls     *tls.Config
+	db      int
+	timeout time.Duration
 }
 
 // errRedisDown is what doConnected returns when there is no connection to use.
@@ -456,11 +462,24 @@ func (c *respClient) dialLocked() error {
 	if err != nil {
 		return fmt.Errorf("dial redis %s: %w", c.addr, err)
 	}
+	if c.tls != nil {
+		tc := tls.Client(conn, c.tls)
+		_ = tc.SetDeadline(time.Now().Add(c.timeout))
+		if err := tc.Handshake(); err != nil {
+			_ = conn.Close()
+			return fmt.Errorf("redis TLS handshake with %s: %w", c.addr, err)
+		}
+		conn = tc
+	}
 	c.conn = conn
 	c.rw = bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 
 	if c.password != "" {
-		if _, err := c.commandLocked("AUTH", c.password); err != nil {
+		auth := []string{"AUTH", c.password}
+		if c.username != "" {
+			auth = []string{"AUTH", c.username, c.password}
+		}
+		if _, err := c.commandLocked(auth...); err != nil {
 			c.closeLocked()
 			return fmt.Errorf("redis AUTH failed: %w", err)
 		}
