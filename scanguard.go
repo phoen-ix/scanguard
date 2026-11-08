@@ -297,6 +297,11 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			h.rt.reject(s, rw, req)
 			return
 		}
+		// A dry run passes the request on, but unobserved: enforcement would
+		// have refused it, so the response detectors must not count its answer
+		// either, or a dry run reports detections enforcement would never make.
+		h.next.ServeHTTP(rw, req)
+		return
 	}
 
 	// Response observation is opt-in and skipped for protocol upgrades, so a

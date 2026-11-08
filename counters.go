@@ -388,6 +388,17 @@ func (c *counters) banRecorded(key netip.Prefix) bool {
 	return false
 }
 
+// banWindow reports when the source's current rung ends, if it is still
+// running.
+func (c *counters) banWindow(key netip.Prefix) (time.Time, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if st, ok := c.tbl[key]; ok && !st.banUntil.IsZero() {
+		return st.banUntil, true
+	}
+	return time.Time{}, false
+}
+
 // claimReissue is the re-issue path's one-shot ticket. When a source's rung is
 // still running but its ban has gone from the list, exactly one of the requests
 // that notice may write it again: the first caller flips banRecorded off and

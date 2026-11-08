@@ -127,6 +127,20 @@ func (rt *runtime) issueBan(s *settings, key netip.Prefix, client string, det *d
 		}
 	}
 	duration := s.banDuration(offence)
+	// A re-issued ban ends where the ladder says the rung ends, not a full rung
+	// from now: the ladder's window did not move, and a ban running past it
+	// would be time decay later credits as good behaviour.
+	var reissueUntil time.Time
+	if !fresh {
+		if until, ok := rt.counters.banWindow(key); ok {
+			reissueUntil = until
+			if until.Sub(now) >= permanentBanHorizon-time.Hour {
+				duration = permanent
+			} else {
+				duration = until.Sub(now)
+			}
+		}
+	}
 
 	ban = Ban{
 		Key:      key.String(),
@@ -143,6 +157,9 @@ func (rt *runtime) issueBan(s *settings, key netip.Prefix, client string, det *d
 	}
 	if duration != permanent {
 		ban.Expires = now.Add(duration).UTC()
+		if !reissueUntil.IsZero() {
+			ban.Expires = reissueUntil.UTC()
+		}
 	}
 	// The ban window was recorded inside recordOffence, in the same critical
 	// section as the increment — see the comment there. Decay is measured from the
