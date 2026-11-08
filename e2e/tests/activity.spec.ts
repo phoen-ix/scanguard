@@ -1,4 +1,4 @@
-import { api, cells, eventRows, expect, probe, test, uniqueIp, unlock } from './helpers'
+import { TOKEN, api, cells, eventRows, expect, probe, test, uniqueIp, unlock } from './helpers'
 
 /* Live activity: the event feed, its kind filter and the follow toggle. */
 
@@ -40,6 +40,36 @@ test('the kind filter shows one kind at a time', async ({ page, request }) => {
 
   await chip(page, 'all').click()
   await expect(mine).toHaveCount(3)
+})
+
+test('Lock resets the kind filter, so the next session starts on "all"', async ({ page, request }) => {
+  const ip = uniqueIp()
+  expect(await probe(request, ip, '/.env')).toBe(403)
+  expect(await probe(request, ip, '/')).toBe(403)
+  await unlock(page)
+  await chip(page, 'bans').click()
+  await expect(chip(page, 'bans')).toHaveAttribute('aria-pressed', 'true')
+  await page.getByRole('button', { name: 'Lock', exact: true }).click()
+  await expect(chip(page, 'all')).toHaveAttribute('aria-pressed', 'true')
+  await expect(chip(page, 'bans')).toHaveAttribute('aria-pressed', 'false')
+
+  await page.getByLabel('Access token').fill(TOKEN)
+  await page.getByRole('button', { name: 'Unlock' }).click()
+  // Both kinds under the "all" chip, not every kind under a pressed "bans".
+  await expect(eventRows(page, `${ip}/32`).filter({ has: page.locator('td.k-reject') })).toHaveCount(1)
+  await expect(eventRows(page, `${ip}/32`).filter({ has: page.locator('td.k-ban') })).toHaveCount(1)
+})
+
+test('a filter click racing the poll does not duplicate rows', async ({ page, request }) => {
+  const ip = uniqueIp()
+  expect(await probe(request, ip, '/.git/config')).toBe(403)
+  await unlock(page)
+  // Click the same filter the poll is about to answer for, several times in a row.
+  for (const name of ['rejects', 'bans', 'all', 'bans']) await chip(page, name).click()
+  await expect(chip(page, 'bans')).toHaveAttribute('aria-pressed', 'true')
+  await page.waitForResponse((r) => r.url().includes('/api/events'))
+  await page.waitForResponse((r) => r.url().includes('/api/events'))
+  await expect(eventRows(page, `${ip}/32`)).toHaveCount(1)
 })
 
 test('follow keeps the newest event in view; unticked, the feed stays where it was scrolled', async ({ page, request }) => {

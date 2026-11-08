@@ -139,6 +139,8 @@ const indexHTML = `<!doctype html>
         <div id="detectors" class="chips"></div>
         <div class="panel-head"><h2>Configuration</h2></div>
         <div id="config" class="kv"></div>
+        <div class="panel-head"><h2>Health</h2></div>
+        <div id="health" class="kv"></div>
       </div>
       <div class="panel">
         <div class="panel-head"><h2>Compiled ruleset</h2></div>
@@ -268,10 +270,6 @@ main { padding: 20px; display: grid; gap: 16px; max-width: 1400px; margin: 0 aut
 .tile:hover { border-color: var(--accent); }
 .tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .tile[aria-expanded="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
-/* A tile with nothing recorded behind it stays a plain figure, and says so by
-   not offering an affordance it cannot honour. */
-.tile[disabled] { cursor: default; opacity: 1; }
-.tile[disabled]:hover { border-color: var(--line); }
 .tile .n { font-size: 24px; font-weight: 660; font-variant-numeric: tabular-nums; }
 .tile .l { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
 .tile.alert .n { color: var(--danger); }
@@ -317,7 +315,7 @@ td.wrap { max-width: 420px; word-break: break-all; }
 .k-ban { color: var(--danger); font-weight: 650; }
 .k-unban { color: var(--ok); font-weight: 650; }
 .k-reject { color: var(--warn); }
-.k-detect { color: var(--accent); }
+.kv dd.alert { color: var(--danger); font-weight: 650; }
 
 .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 16px; }
 /* Detector chips. A different class from the event-filter .chip above: sharing
@@ -402,16 +400,31 @@ function headers(mutating) {
   return h;
 }
 
+// Credentials are the browser's default (same-origin). The call used to set the
+// credentials option to "omit", which per the Fetch standard strips cookies AND the
+// HTTP-auth entry, so behind the basicAuth or forwardAuth the README tells
+// operators to chain in front of the console, the page loaded (with
+// credentials) and then every API call reached the proxy without them, was
+// answered 401, and the gate reported "That token was not accepted" for the
+// right token. Cross-site request forgery is covered by X-Scanguard-Action,
+// which no cross-origin form can set, not by withholding credentials.
 function api(path, options) {
   var opts = options || {};
   return fetch(BASE + path, {
     method: opts.method || "GET",
     headers: headers(!!opts.method && opts.method !== "GET"),
     body: opts.body ? JSON.stringify(opts.body) : undefined,
-    credentials: "omit",
     cache: "no-store"
   }).then(function (r) {
-    if (r.status === 401) { lock("That token was not accepted."); throw new Error("unauthorized"); }
+    if (r.status === 401) {
+      // The plugin's own 401 names its realm. One without it came from
+      // whatever sits in front of the console, and the token is not to blame.
+      var challenge = r.headers.get("WWW-Authenticate") || "";
+      lock(challenge.indexOf("realm=\"scanguard\"") >= 0
+        ? "That token was not accepted."
+        : "The proxy in front of the console refused the request (HTTP 401). Sign in to it and reload.");
+      throw new Error("unauthorized");
+    }
     // Read as text first: an error from in front of the plugin (a 502 page from
     // Traefik, a gateway's HTML) is not JSON, and r.json() on it surfaced
     // "Unexpected token <" where "HTTP 502" is the useful message.
@@ -433,6 +446,14 @@ function toast(msg) {
   el.dataset.t = setTimeout(function () { el.hidden = true; }, 3200);
 }
 
+// fail is the one error handler: a 401 has already sent the session to the
+// gate with its own message, anything else is worth a toast. Nine copies of
+// this used to exist, and the two that lacked the check toasted
+// "unauthorized" over the gate.
+function fail(err) {
+  if (err && err.message !== "unauthorized") { toast(err.message); }
+}
+
 function lock(message) {
   if (timer) { clearInterval(timer); timer = null; }
   token = "";
@@ -443,17 +464,36 @@ function lock(message) {
   lastState = null;
   sourcesData = { sources: [], total: 0, truncated: false };
   detectionsData = [];
+  rendered = {};
   // And the tables: #app is only hidden, so without this a second session
   // unlocked with a different token saw the first one's events and bans.
   $("events").tBodies[0].textContent = "";
   $("bans").tBodies[0].textContent = "";
+  ["top-paths", "top-sources", "top-rules"].forEach(function (id) { $(id).tBodies[0].textContent = ""; });
+  ["tiles", "detectors", "config", "health", "rules", "tile-detail-body"].forEach(function (id) { $(id).textContent = ""; });
   eventsPainted = false;
   lastSeq = 0;
+  // The filter too: locked with "bans" pressed and unlocked again, the feed
+  // painted every kind under the pressed chip.
+  setChips("");
+  eventKind = "";
+  // And the rule editor, or a locked session handed its half-typed draft and
+  // "unsaved" badge to the next one, whose Save would have submitted it.
+  ruleModel = null;
+  ruleFromFile = null;
+  rulesStamp = "";
+  setRulesDirty(false);
+  $("rules-form").textContent = "";
+  $("rules-meta").textContent = "";
+  $("rules-error").hidden = true;
+  $("rules-badge").hidden = true;
   $("tile-detail").hidden = true;
   $("app").hidden = true;
   $("gate").hidden = false;
   var err = $("gate-error");
   if (message) { err.textContent = message; err.hidden = false; } else { err.hidden = true; }
+  // The field kept its value, so Enter or Unlock reopened the console at once.
+  $("token").value = "";
   $("token").focus();
 }
 
@@ -472,10 +512,16 @@ function cell(row, text, cls) {
   return td;
 }
 
-function fmtTime(iso) {
+// fmtWhen is the time of day for today and date plus time for anything older:
+// the detections list, the tracked sources and a 500-entry feed all span days.
+function fmtWhen(iso) {
   var d = new Date(iso);
   if (isNaN(d.getTime())) { return ""; }
-  return d.toLocaleTimeString();
+  var now = new Date();
+  if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()) {
+    return d.toLocaleTimeString();
+  }
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " + d.toLocaleTimeString();
 }
 
 function fmtExpiry(ban) {
@@ -490,39 +536,66 @@ function fmtExpiry(ban) {
   return "in " + Math.round(hours / 24) + "d";
 }
 
-function tile(container, label, value, alert, kind) {
-  var d = document.createElement("button");
-  d.type = "button";
-  d.className = alert ? "tile alert" : "tile";
-  if (kind) {
-    d.dataset.kind = kind;
-    d.setAttribute("aria-expanded", openTile === kind ? "true" : "false");
-    d.setAttribute("aria-controls", "tile-detail");
-  } else {
-    // No data is recorded behind this number, so it does not pretend to be
-    // clickable. Better an honest figure than a control that opens an empty box.
-    d.disabled = true;
-  }
-  var n = document.createElement("div");
-  n.className = "n";
-  n.textContent = String(value);
-  var l = document.createElement("div");
-  l.className = "l";
-  l.textContent = label;
-  d.appendChild(n);
-  d.appendChild(l);
-  container.appendChild(d);
+// rendered remembers, per panel, what was last drawn, so a poll that changes
+// nothing redraws nothing. Rebuilding every table every three seconds threw
+// away the operator's text selection and keyboard focus each time.
+var rendered = {};
+
+function unchanged(id, rows) {
+  var key = JSON.stringify(rows);
+  if (rendered[id] === key) { return true; }
+  rendered[id] = key;
+  return false;
 }
 
+var TILE_ORDER = [
+  ["requests", "requests seen"],
+  ["blocked", "blocked"],
+  ["detections", "detections"],
+  ["bans", "active bans"],
+  ["sources", "tracked sources"],
+  ["exempt", "exempt"]
+];
+
+function tileValues(s) {
+  return {
+    requests: s.stats.requests,
+    blocked: s.stats.rejected,
+    detections: s.stats.detections,
+    bans: s.bansTotal || s.bans.length,
+    sources: s.trackedSources,
+    exempt: s.stats.exempt
+  };
+}
+
+// renderTiles builds the six buttons once and then updates them in place, so
+// the tile the operator has focused or expanded stays the same element.
 function renderTiles(s) {
   var tiles = $("tiles");
-  tiles.textContent = "";
-  tile(tiles, "requests seen", s.stats.requests, false, "requests");
-  tile(tiles, "blocked", s.stats.rejected, s.stats.rejected > 0, "blocked");
-  tile(tiles, "detections", s.stats.detections, false, "detections");
-  tile(tiles, "active bans", s.bansTotal || s.bans.length, false, "bans");
-  tile(tiles, "tracked sources", s.trackedSources, false, "sources");
-  tile(tiles, "exempt", s.stats.exempt, false, "exempt");
+  var values = tileValues(s);
+  if (!tiles.children.length) {
+    TILE_ORDER.forEach(function (pair) {
+      var d = document.createElement("button");
+      d.type = "button";
+      d.className = "tile";
+      d.dataset.kind = pair[0];
+      d.setAttribute("aria-controls", "tile-detail");
+      var n = document.createElement("div");
+      n.className = "n";
+      var l = document.createElement("div");
+      l.className = "l";
+      l.textContent = pair[1];
+      d.appendChild(n);
+      d.appendChild(l);
+      tiles.appendChild(d);
+    });
+  }
+  TILE_ORDER.forEach(function (pair, i) {
+    var d = tiles.children[i];
+    d.className = pair[0] === "blocked" && values.blocked > 0 ? "tile alert" : "tile";
+    d.setAttribute("aria-expanded", openTile === pair[0] ? "true" : "false");
+    d.firstChild.textContent = String(values[pair[0]]);
+  });
 }
 
 // ── Tile drill-down ──────────────────────────────────────────────────────────
@@ -545,7 +618,13 @@ var TILE_DETAIL = {
     title: "Blocked requests",
     cols: ["time", "source", "path", "rule"],
     events: "reject",
-    rows: function (s) { return eventRows(s, "reject"); }
+    // Newest first, like the Detections list and the feed; this one was the
+    // other way round.
+    rows: function (s) {
+      return (s.events || []).filter(function (e) { return e.kind === "reject"; }).map(function (e) {
+        return [fmtWhen(e.time) + (e.dryRun ? " (dry)" : ""), e.client || e.key, e.path, e.rule];
+      });
+    }
   },
   "detections": {
     title: "Detections",
@@ -561,26 +640,25 @@ var TILE_DETAIL = {
       // leaves them out, so the list does as well. Newest first.
       return detectionsData.filter(function (e) { return e.kind === "ban" && e.detector !== "manual"; })
         .slice().reverse().map(function (e) {
-          return [fmtTime(e.time) + (e.dryRun ? " (dry)" : ""), e.client || e.key, e.detector, e.path];
+          return [fmtWhen(e.time) + (e.dryRun ? " (dry)" : ""), e.client || e.key, e.detector, e.path];
         });
     }
   },
   "bans": {
     title: "Active bans",
-    note: "The complete ban list \u2014 the same rows as the Active bans panel below.",
     cols: ["source", "detector", "rule", "expires"],
     rows: function (s) {
-      return (s.bans || []).map(function (b) { return [b.key, b.detector, b.rule, fmtExpiry(b)]; });
+      return (s.bans || []).map(function (b) { return [b.key, b.detector + (b.dryRun ? " (dry)" : ""), b.rule, fmtExpiry(b)]; });
     }
   },
   "sources": {
     title: "Tracked sources",
-    note: "Most recently seen first. Fetched on demand \u2014 this table is capped at maxEntries and is not part of the three-second poll.",
+    note: "Most recently seen first. Fetched on demand and refreshed while this list is open; the table is capped at maxEntries.",
     cols: ["source", "last seen", "offences", "distinct bad paths"],
     fetch: fetchSources,
     rows: function () {
       return (sourcesData.sources || []).map(function (r) {
-        return [r.key, fmtTime(r.lastSeen), r.offences, r.badPaths];
+        return [r.key, fmtWhen(r.lastSeen), r.offences, r.badPaths];
       });
     }
   },
@@ -595,16 +673,10 @@ var TILE_DETAIL = {
 var sourcesData = { sources: [], total: 0, truncated: false };
 var detectionsData = [];
 
-function eventRows(s, kind) {
-  return (s.events || []).filter(function (e) { return e.kind === kind; })
-    .slice().reverse().map(function (e) {
-      return [fmtTime(e.time), e.client || e.key, e.path, e.rule];
-    });
-}
-
 function toggleTile(kind) {
   if (openTile === kind) { closeDetail(); return; }
   openTile = kind;
+  delete rendered["detail"];
   fetchDetail();
   renderDetail();
   if (lastState) { renderTiles(lastState); }
@@ -626,18 +698,47 @@ function fetchSources() {
   api("api/sources?limit=50").then(function (r) {
     sourcesData = r;
     if (openTile === "sources") { renderDetail(); }
-  }).catch(function (err) {
-    if (err.message !== "unauthorized") { toast(err.message); }
-  });
+  }).catch(fail);
 }
 
 function fetchDetections() {
   api("api/events?since=0&kind=ban&limit=500").then(function (r) {
     detectionsData = r.events || [];
     if (openTile === "detections") { renderDetail(); }
-  }).catch(function (err) {
-    if (err.message !== "unauthorized") { toast(err.message); }
-  });
+  }).catch(fail);
+}
+
+// detailNote says what a list is, and above all what it is NOT. The tile
+// counters are all-time; an event-backed list is a recent window, never the
+// whole history, and the windows differ: Blocked is drawn from the hundred
+// events the state payload carries, Detections from the ban ring.
+function detailNote(spec, rows) {
+  if (openTile === "blocked") {
+    if (lastState.dryRun) {
+      return "Dry run: " + rows.length + " would-have-been-blocked requests in the recent log. Nothing was refused.";
+    }
+    var blocked = lastState.stats.rejected;
+    return rows.length >= blocked
+      ? "All " + blocked + " so far."
+      : "The " + rows.length + " most recent of " + blocked + ". Older entries are not in this view.";
+  }
+  if (openTile === "detections") {
+    var total = lastState.stats.detections;
+    return rows.length >= total
+      ? "All " + total + " so far."
+      : "The " + rows.length + " most recent of " + total + ". Older entries have left the event log.";
+  }
+  if (openTile === "bans") {
+    var shown = (lastState.bans || []).length;
+    var all = lastState.bansTotal || shown;
+    return all > shown
+      ? "The newest " + shown + " of " + all + " active bans — the same rows as the Active bans panel below."
+      : "The complete ban list — the same rows as the Active bans panel below.";
+  }
+  if (openTile === "sources" && sourcesData.truncated) {
+    return spec.note + " Showing " + rows.length + " of " + sourcesData.total + ".";
+  }
+  return spec.note || "";
 }
 
 function renderDetail() {
@@ -647,21 +748,11 @@ function renderDetail() {
 
   $("tile-detail-title").textContent = spec.title;
   var rows = spec.rows(lastState) || [];
-
-  // Say what this list is, and above all what it is NOT. The tile counters are
-  // all-time; the event ring holds only the last eventLogSize entries, so a
-  // detail drawn from it is a recent window, never the whole history.
-  var note = spec.note || "";
-  if (spec.events) {
-    var total = openTile === "blocked" ? lastState.stats.rejected : lastState.stats.detections;
-    note = rows.length >= total
-      ? "All " + total + " so far."
-      : "The " + rows.length + " most recent of " + total + ". Older entries have left the event log.";
-  } else if (openTile === "sources" && sourcesData.truncated) {
-    note = spec.note + " Showing " + rows.length + " of " + sourcesData.total + ".";
-  }
+  var note = detailNote(spec, rows);
   $("tile-detail-note").textContent = note;
   $("tile-detail-note").hidden = !note;
+  panel.hidden = false;
+  if (unchanged("detail", [spec.title, rows])) { return; }
 
   var body = $("tile-detail-body");
   body.textContent = "";
@@ -670,7 +761,6 @@ function renderDetail() {
     p.className = "empty";
     p.textContent = "Nothing recorded yet.";
     body.appendChild(p);
-    panel.hidden = false;
     return;
   }
 
@@ -692,7 +782,6 @@ function renderDetail() {
   });
   table.appendChild(tbody);
   body.appendChild(table);
-  panel.hidden = false;
 }
 
 function renderState(s) {
@@ -717,6 +806,7 @@ function renderState(s) {
   renderTop("top-sources", s.topSources);
   renderDetectors(s.config.detectors, s.topDetectors);
   renderConfig(s.config);
+  renderHealth(s);
 
   // First paint only. After that the table is fed incrementally from
   // api/events?since=, which is why lastSeq and appendEvents exist — repainting
@@ -731,38 +821,60 @@ function renderState(s) {
   $("events-empty").hidden = $("events").tBodies[0].rows.length > 0;
 }
 
+function banRowCells(row, b, readOnly) {
+  row.textContent = "";
+  cell(row, b.key, "mono");
+  cell(row, b.detector + (b.dryRun ? " (dry)" : ""));
+  cell(row, b.rule || b.reason || "", "mono wrap");
+  cell(row, b.country || "");
+  cell(row, b.offences || "", "num");
+  cell(row, b.hits || 0, "num");
+  cell(row, fmtExpiry(b));
+
+  var td = document.createElement("td");
+  var btn = document.createElement("button");
+  btn.className = "link";
+  btn.type = "button";
+  btn.textContent = "unblock";
+  btn.disabled = readOnly;
+  btn.addEventListener("click", function () { unban(b.key); });
+  td.appendChild(btn);
+  row.appendChild(td);
+}
+
+// renderBans keeps the row for each key between polls: a new ban is inserted
+// at its place, a lifted one removed, an unchanged one left alone. Rebuilding
+// the table dropped keyboard focus on an unblock button every three seconds.
 function renderBans(bans, total, readOnly) {
   var body = $("bans").tBodies[0];
-  body.textContent = "";
   total = total || bans.length;
   $("ban-count").textContent = !bans.length ? "" :
     total > bans.length ? "(newest " + bans.length + " of " + total + ")" : "(" + bans.length + ")";
   $("bans-empty").hidden = bans.length > 0;
 
-  bans.forEach(function (b) {
-    var row = document.createElement("tr");
-    cell(row, b.key, "mono");
-    cell(row, b.detector);
-    cell(row, b.rule || b.reason || "", "mono wrap");
-    cell(row, b.country || "");
-    cell(row, b.offences || "", "num");
-    cell(row, b.hits || 0, "num");
-    cell(row, fmtExpiry(b));
-
-    var td = document.createElement("td");
-    var btn = document.createElement("button");
-    btn.className = "link";
-    btn.type = "button";
-    btn.textContent = "unblock";
-    btn.disabled = readOnly;
-    btn.addEventListener("click", function () { unban(b.key); });
-    td.appendChild(btn);
-    row.appendChild(td);
-    body.appendChild(row);
+  var existing = {};
+  for (var i = 0; i < body.rows.length; i++) { existing[body.rows[i].dataset.key] = body.rows[i]; }
+  bans.forEach(function (b, idx) {
+    var row = existing[b.key];
+    var fingerprint = JSON.stringify([b.key, b.detector, b.rule, b.reason, b.country, b.offences, b.hits, b.expires, b.dryRun, readOnly]);
+    if (!row) {
+      row = document.createElement("tr");
+      row.dataset.key = b.key;
+    } else {
+      delete existing[b.key];
+    }
+    if (row.dataset.fp !== fingerprint) {
+      banRowCells(row, b, readOnly);
+      row.dataset.fp = fingerprint;
+    }
+    var at = body.rows[idx];
+    if (at !== row) { body.insertBefore(row, at || null); }
   });
+  Object.keys(existing).forEach(function (k) { body.removeChild(existing[k]); });
 }
 
 function renderTop(id, rows) {
+  if (unchanged(id, rows)) { return; }
   var body = $(id).tBodies[0];
   body.textContent = "";
   (rows || []).forEach(function (r) {
@@ -774,6 +886,7 @@ function renderTop(id, rows) {
 }
 
 function renderDetectors(detectors, top) {
+  if (unchanged("detectors", [detectors, top])) { return; }
   var counts = {};
   (top || []).forEach(function (t) { counts[t.key] = t.count; });
 
@@ -788,10 +901,23 @@ function renderDetectors(detectors, top) {
   });
 }
 
-function renderConfig(cfg) {
-  var dl = $("config");
+function renderKV(id, rows) {
+  if (unchanged(id, rows)) { return; }
+  var dl = $(id);
   dl.textContent = "";
-  var rows = [
+  rows.forEach(function (pair) {
+    var dt = document.createElement("dt");
+    dt.textContent = pair[0];
+    var dd = document.createElement("dd");
+    dd.textContent = String(pair[1]);
+    if (pair[2]) { dd.className = pair[2]; }
+    dl.appendChild(dt);
+    dl.appendChild(dd);
+  });
+}
+
+function renderConfig(cfg) {
+  renderKV("config", [
     ["state backend", cfg.storeBackend],
     ["observe responses", cfg.observeResponse ? "yes" : "no"],
     ["ban key width", "IPv4 /" + cfg.ipv4Prefix + " · IPv6 /" + cfg.ipv6Prefix],
@@ -807,22 +933,33 @@ function renderConfig(cfg) {
     // console is reachable from. Change it in the plugin configuration.
     ["console on detection routes",
       cfg.adminOnDetectionRoutes
-        ? "YES \u2014 also served on every route the detector protects"
-        : "no \u2014 this router only"],
+        ? "YES — also served on every route the detector protects"
+        : "no — this router only"],
     ["max tracked", cfg.maxEntries],
+    ["country lookup", cfg.geo ? "on" : "off"],
     ["notifications", Object.keys(cfg.notify || {}).filter(function (k) { return cfg.notify[k]; }).join(", ") || "none"]
-  ];
-  rows.forEach(function (pair) {
-    var dt = document.createElement("dt");
-    dt.textContent = pair[0];
-    var dd = document.createElement("dd");
-    dd.textContent = String(pair[1]);
-    dl.appendChild(dt);
-    dl.appendChild(dd);
-  });
+  ]);
+}
+
+// renderHealth shows the counters that say something is wrong: failed logins
+// (token guessing against this console), sources evicted at the table cap
+// (the cap is too small for the traffic) and notifications dropped (a webhook
+// consumer may be out of step with the ban list). All three used to be sent on
+// every poll and shown nowhere.
+function renderHealth(s) {
+  var failed = s.stats.authFailures || 0;
+  var evicted = s.evictedSources || 0;
+  var dropped = s.stats.notifyDropped || 0;
+  renderKV("health", [
+    ["failed logins", failed, failed > 0 ? "alert" : ""],
+    ["evicted sources", evicted, evicted > 0 ? "alert" : ""],
+    ["dropped notifications", dropped, dropped > 0 ? "alert" : ""],
+    ["expired bans", s.stats.expired || 0]
+  ]);
 }
 
 function renderRules(rules) {
+  if (unchanged("rules", rules)) { return; }
   var box = $("rules");
   box.textContent = "";
   var groups = [
@@ -866,6 +1003,15 @@ var eventsPainted = false;
 // its result if the epoch has moved on.
 var feedEpoch = 0;
 
+function setChips(kind) {
+  var buttons = document.querySelectorAll("#event-filter button");
+  for (var i = 0; i < buttons.length; i++) {
+    var on = buttons[i].getAttribute("data-kind") === kind;
+    buttons[i].className = on ? "chip on" : "chip";
+    buttons[i].setAttribute("aria-pressed", on ? "true" : "false");
+  }
+}
+
 function setEventKind(kind) {
   if (eventKind === kind) { return; }
   eventKind = kind;
@@ -874,12 +1020,7 @@ function setEventKind(kind) {
   feedEpoch++;
   var epoch = feedEpoch;
   $("events").tBodies[0].textContent = "";
-  var buttons = document.querySelectorAll("#event-filter button");
-  for (var i = 0; i < buttons.length; i++) {
-    var on = buttons[i].getAttribute("data-kind") === kind;
-    buttons[i].className = on ? "chip on" : "chip";
-    buttons[i].setAttribute("aria-pressed", on ? "true" : "false");
-  }
+  setChips(kind);
   // Repaint straight from the ring rather than waiting for the next state poll,
   // so the filter feels like a filter and not like a three-second stall.
   var url = "api/events?since=0&limit=500";
@@ -888,18 +1029,22 @@ function setEventKind(kind) {
     if (epoch !== feedEpoch) { return; }
     appendEvents(r.events);
     $("events-empty").hidden = $("events").tBodies[0].rows.length > 0;
-  }).catch(function () {});
+  }).catch(fail);
 }
 
+// appendEvents adds what the ring produced after lastSeq. Rows at or below it
+// are dropped: a filter click (since=0) and the three-second poll (also since=0
+// after the reset) could both answer with the same page and append it twice.
 function appendEvents(events) {
   if (!events || !events.length) { return; }
   var table = $("events");
   var body = table.tBodies[0];
 
   events.forEach(function (e) {
-    if (e.seq > lastSeq) { lastSeq = e.seq; }
+    if (e.seq <= lastSeq) { return; }
+    lastSeq = e.seq;
     var row = document.createElement("tr");
-    cell(row, fmtTime(e.time), "mono");
+    cell(row, fmtWhen(e.time), "mono");
     var k = cell(row, e.kind + (e.dryRun ? " (dry)" : ""));
     k.className = "k-" + e.kind;
     cell(row, e.key || e.client || "", "mono");
@@ -953,11 +1098,11 @@ var RULE_SCHEMA = [
     { p: "detectors.userAgent.patterns", t: "lines", l: "Extra patterns" },
     { p: "detectors.userAgent.crawlers", t: "select", l: "SEO crawlers",
       opts: ["ignore", "ban", "block", "exempt"],
-      h: "MJ12bot, AhrefsBot, SemrushBot and friends \u2014 crawlers, not scanners. ignore: no opinion. ban: refuse them AND write a ban, which applies on every router this instance protects. block: refuse them on the router they hit, writing nothing shared \u2014 prefer this when the instance also protects a site you want crawled. exempt: never ban them by any detector, and forgive an existing ban \u2014 convenient for a content site, but a User-Agent is trivially forged, so it is a free pass past everything. Search engines are never in this list. NOTE: a router may override this in its own middleware definition; this value is the fallback for those that do not." }
+      h: "MJ12bot, AhrefsBot, SemrushBot and friends — crawlers, not scanners. ignore: no opinion. ban: refuse them AND write a ban, which applies on every router this instance protects. block: refuse them on the router they hit, writing nothing shared — prefer this when the instance also protects a site you want crawled. exempt: never ban them by any detector, and forgive an existing ban — convenient for a content site, but a User-Agent is trivially forged, so it is a free pass past everything. Search engines are never in this list. NOTE: a router may override this in its own middleware definition; this value is the fallback for those that do not." }
   ]},
   { title: "Distinct failing paths", fields: [
     { p: "detectors.badPaths.enabled", t: "bool", l: "Enabled" },
-    { p: "detectors.badPaths.capacity", t: "int", l: "Distinct paths to trip" },
+    { p: "detectors.badPaths.capacity", t: "int", l: "Distinct paths to trip", h: "At most 128." },
     { p: "detectors.badPaths.leak", t: "text", l: "Leak interval",
       h: "One remembered path drains per interval, e.g. 10s. Counts DISTINCT paths, so one broken link hammered by a real user never bans them." },
     { p: "detectors.badPaths.statuses", t: "ints", l: "Statuses counted", h: "Comma separated." }
@@ -988,7 +1133,7 @@ var RULE_SCHEMA = [
     { p: "detectors.payload.useDefaults", t: "bool", l: "Include built-in patterns" },
     { p: "detectors.payload.scanQuery", t: "bool", l: "Scan the query string" },
     { p: "detectors.payload.scanBody", t: "bool", l: "Scan the request body" },
-    { p: "detectors.payload.maxBodyBytes", t: "int", l: "Max body bytes" },
+    { p: "detectors.payload.maxBodyBytes", t: "int", l: "Max body bytes", h: "Buffered per request; at most 1048576." },
     { p: "detectors.payload.patterns", t: "lines", l: "Extra patterns" }
   ]},
   { title: "Allowlist", fields: [
@@ -999,14 +1144,14 @@ var RULE_SCHEMA = [
   ]},
   { title: "Enforcement", fields: [
     { p: "enforcement.rejectStatus", t: "int", l: "Reject status",
-      h: "403 is honest; 404 hides that the middleware exists." },
+      h: "200-599. 403 is honest; 404 hides that the middleware exists." },
     { p: "enforcement.rejectBody", t: "text", l: "Reject body" },
     { p: "enforcement.escalation", t: "strs", l: "Ban ladder",
       h: "Comma separated durations, one rung per repeat offence. 0 means permanent." },
     { p: "enforcement.decay", t: "text", l: "Offence decay",
       h: "Behave this long and drop one rung." },
     { p: "enforcement.tarpit.enabled", t: "bool", l: "Tarpit instead of rejecting at once" },
-    { p: "enforcement.tarpit.delay", t: "text", l: "Tarpit delay" },
+    { p: "enforcement.tarpit.delay", t: "text", l: "Tarpit delay", h: "A positive duration, e.g. 3s." },
     { p: "enforcement.tarpit.maxConcurrent", t: "int", l: "Max concurrent tarpits",
       h: "Every tarpitted request holds a connection open. Too high and a scanner turns this into a denial of service against you." },
     { p: "enforcement.subnet.enabled", t: "bool", l: "Ban the whole range of repeat offenders",
@@ -1023,6 +1168,12 @@ var RULE_SCHEMA = [
 var ruleModel = null;
 var ruleFromFile = null;
 var rulesDirty = false;
+// rulesStamp is the server's fingerprint of the rule set the editor shows
+// (api/state rulesStamp). When it moves and the editor is clean, the editor is
+// reloaded; when it moves and the editor is dirty, the operator is told before
+// a Save overwrites what somebody else saved.
+var rulesStamp = "";
+var rulesBehind = false;
 
 function getPath(obj, path) {
   var parts = path.split(".");
@@ -1154,6 +1305,7 @@ function renderRuleEditor(data, readOnly) {
   ruleModel = data.effective || {};
   ruleFromFile = data.fromFile || {};
   setRulesDirty(false);
+  rulesBehind = false;
   $("rules-error").hidden = true;
 
   var owned = data.overridden || [];
@@ -1171,6 +1323,17 @@ function renderRuleEditor(data, readOnly) {
   } else {
     meta.textContent = "Running Traefik's file configuration. Saving here takes over these sections " +
       "until you revert; changes apply immediately, with no Traefik restart.";
+  }
+  // Two things the server may have to say about the saved set: that a reload
+  // of the file configuration made it inapplicable (the file runs; what the
+  // form shows is the file), or that it is in force here but could not be
+  // persisted or published.
+  if (data.stale) {
+    showRuleError("The rules saved here no longer apply to the reloaded file configuration, so the file " +
+      "configuration is running and the form shows it. Reason: " + data.stale +
+      ". Save again to replace the saved rules, or revert to discard them.");
+  } else if (data.unsaved) {
+    showRuleError("These rules are in force on this replica but could not be saved: " + data.unsaved);
   }
 
   var box = $("rules-form");
@@ -1202,7 +1365,10 @@ function loadRules(readOnly) {
 }
 
 function saveRules() {
-  if (!ruleModel) { return; }
+  if (!ruleModel) {
+    toast("The rule editor has not loaded; reload the page.");
+    return;
+  }
   $("rules-error").hidden = true;
   api("api/rules", { method: "PUT", body: ruleModel })
     .then(function (data) {
@@ -1228,12 +1394,34 @@ function revertRules() {
     });
 }
 
+// syncRules reacts to the server's rule-set fingerprint moving underneath the
+// editor: a save from another tab or operator, a Traefik reload, saved edits
+// going stale. A clean editor is simply reloaded, along with the compiled
+// ruleset beside it; a dirty one is warned, once, that Save would overwrite.
+function syncRules(stamp, readOnly) {
+  if (!stamp || stamp === rulesStamp) { return null; }
+  var first = rulesStamp === "";
+  rulesStamp = stamp;
+  if (first) { return null; }
+  var compiled = api("api/rules/compiled").then(renderRules).catch(fail);
+  if (!rulesDirty) {
+    return Promise.all([compiled, loadRules(readOnly)]);
+  }
+  if (!rulesBehind) {
+    rulesBehind = true;
+    showRuleError("The rule set changed on the server while you were editing (another tab, another operator, or a " +
+      "Traefik reload). Saving now overwrites it; reload the page to see it instead.");
+  }
+  return compiled;
+}
+
 function refresh() {
   var readOnly = false;
   return api("api/state").then(function (s) {
     readOnly = !!s.readOnly;
     renderState(s);
     pulse();
+    rulesStamp = s.rulesStamp || "";
     return api("api/rules/compiled");
   }).then(function (compiled) {
     renderRules(compiled);
@@ -1242,9 +1430,7 @@ function refresh() {
     // its own small betrayal.
     if (!rulesDirty) { return loadRules(readOnly); }
     return null;
-  }).catch(function (err) {
-    if (err.message !== "unauthorized") { toast(err.message); }
-  });
+  }).catch(fail);
 }
 
 function tick() {
@@ -1252,15 +1438,19 @@ function tick() {
     renderState(s);
     fetchDetail();
     pulse();
+    syncRules(s.rulesStamp, !!s.readOnly);
     return pollEvents();
-  }).catch(function (err) {
-    if (err.message !== "unauthorized") { toast(err.message); }
-  });
+  }).catch(fail);
 }
 
 // pollEvents appends everything the ring has produced since the last poll. A
 // failure here is deliberately silent: the activity feed falling behind is not
 // worth a toast on top of whatever already failed.
+//
+// A server whose lastSeq is BELOW ours has restarted: its sequence began again
+// at 0, and polling with the old large since= returned nothing forever, so the
+// tiles kept updating while the feed stayed silent until the page was reloaded.
+// The feed starts over from the ring.
 function pollEvents() {
   if (!eventsPainted) { return; }
   var epoch = feedEpoch;
@@ -1268,6 +1458,11 @@ function pollEvents() {
   if (eventKind) { url += "&kind=" + encodeURIComponent(eventKind); }
   return api(url).then(function (r) {
     if (epoch !== feedEpoch) { return; }
+    if (r.lastSeq < lastSeq) {
+      lastSeq = 0;
+      $("events").tBodies[0].textContent = "";
+      return pollEvents();
+    }
     appendEvents(r.events);
   }).catch(function () {});
 }
@@ -1278,7 +1473,7 @@ function unban(key) {
       toast(r.unbanned ? "Unblocked " + r.key : "No ban found for " + r.key);
       return refresh();
     })
-    .catch(function (err) { toast(err.message); });
+    .catch(fail);
 }
 
 document.addEventListener("DOMContentLoaded", function () {
@@ -1301,7 +1496,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
   $("lock").addEventListener("click", function () { lock(""); });
 
-  // Delegated, because renderTiles() rebuilds the buttons on every poll.
+  // Delegated, so a tile keeps working however the row is redrawn.
   $("tiles").addEventListener("click", function (ev) {
     var btn = ev.target.closest ? ev.target.closest(".tile") : null;
     if (btn && btn.dataset.kind) { toggleTile(btn.dataset.kind); }
@@ -1337,7 +1532,7 @@ document.addEventListener("DOMContentLoaded", function () {
       $("ban-key").value = "";
       $("ban-reason").value = "";
       return refresh();
-    }).catch(function (err) { toast(err.message); });
+    }).catch(fail);
   });
 
   // An empty string is a session too: behind an auth proxy (trustForwardedUser)

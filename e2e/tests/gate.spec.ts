@@ -38,6 +38,8 @@ test('the right token unlocks, a reload keeps the session, Lock forgets it', asy
 
   await page.getByRole('button', { name: 'Lock', exact: true }).click()
   await expect(page.getByLabel('Access token')).toBeFocused()
+  // Empty, not the token that was typed: Enter alone must not reopen the console.
+  await expect(page.getByLabel('Access token')).toHaveValue('')
   await expect(page.locator('#app')).toBeHidden()
   await expect(page.getByRole('alert')).toHaveCount(0)
   expect(await stored(page)).toBeNull()
@@ -48,6 +50,17 @@ test('the right token unlocks, a reload keeps the session, Lock forgets it', asy
   await page.reload()
   await expect(page.getByLabel('Access token')).toBeVisible()
   await expect(page.locator('#app')).toBeHidden()
+})
+
+test('a 401 from a proxy in front of the console is not blamed on the token', async ({ page }) => {
+  // What chained basicAuth answers when the browser's credentials are missing:
+  // a 401 without the plugin's realm.
+  await page.route('**/api/health', (route) => route.fulfill({ status: 401, headers: { 'WWW-Authenticate': 'Basic realm="traefik"' }, body: '401 Unauthorized' }))
+  await page.goto('/')
+  await page.getByLabel('Access token').fill(TOKEN)
+  await page.getByRole('button', { name: 'Unlock' }).click()
+  await expect(page.getByRole('alert')).toContainText('proxy in front of the console')
+  await expect(page.getByRole('alert')).not.toContainText('token was not accepted')
 })
 
 test('a remembered token that stopped working sends the session back to the gate', async ({ page }) => {

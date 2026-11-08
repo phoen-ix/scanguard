@@ -1,4 +1,4 @@
-import { expect, probe, test, uniqueIp, unlock } from './helpers'
+import { CONSOLE, expect, probe, test, uniqueIp, unlock } from './helpers'
 
 /* The read-out panels: rankings, detectors, configuration, compiled ruleset,
  * header and footer. Against the harness configuration (examples/dynamic/scanguard.yml). */
@@ -24,8 +24,12 @@ test('detectors show which are on and how often each fired', async ({ page, requ
   expect(await probe(request, uniqueIp(), '/admin.php')).toBe(403)
   await unlock(page)
   const chips = page.locator('#detectors .dchip')
-  await expect(chips).toHaveCount(9)
+  await expect(chips).toHaveCount(11)
   await expect(chips.filter({ hasText: /^rate-abuse$/ })).toHaveAttribute('title', 'disabled')
+  // The two the panel used to leave out: the crawler policy (ignore in the
+  // harness) and the AbuseIPDB reputation check (off).
+  await expect(chips.filter({ hasText: /^crawler( · \d+)?$/ })).toHaveAttribute('title', 'disabled')
+  await expect(chips.filter({ hasText: /^reputation$/ })).toHaveAttribute('title', 'disabled')
   // Opt-in, and off in the harness. A count is possible: the rule-editor test turns subnet on for a while.
   await expect(chips.filter({ hasText: /^ua-rotation( · \d+)?$/ })).toHaveAttribute('title', 'disabled')
   await expect(chips.filter({ hasText: /^subnet( · \d+)?$/ })).toHaveAttribute('title', 'disabled')
@@ -45,12 +49,25 @@ test('configuration and compiled ruleset show what is in force', async ({ page }
   await expect(kv('crawler policy')).toHaveText('ignore')
   await expect(kv('console on detection routes')).toHaveText('no — this router only')
   await expect(kv('notifications')).toHaveText('chat, webhooks')
+  await expect(kv('country lookup')).toHaveText('off')
 
   const group = (name: string) => page.locator('#rules > div').filter({ has: page.getByRole('heading', { name: new RegExp(`^${name} \\(\\d+\\)$`) }) })
   await expect(group('Honeypots').locator('li')).toHaveText(['/.env.backup', '/admin.php', '/wp-content/uploads/shell.php'])
   await expect(group('Trusted proxies').locator('li')).toHaveText(['127.0.0.1/32', '172.16.0.0/12'])
   await expect(group('Allowlisted CIDRs').locator('li')).toHaveText(['127.0.0.1/32'])
   await expect(group('Signatures').locator('li').first()).toBeVisible()
+})
+
+test('health shows the counters that used to be sent and never shown', async ({ page, request }) => {
+  // One failed login, so the row has something to show.
+  await request.get(CONSOLE + '/api/health', { headers: { 'X-Scanguard-Token': 'not-the-token-0123456789' } })
+  await unlock(page)
+  const kv = (term: string) => page.locator('#health dt').filter({ hasText: new RegExp(`^${term}$`) }).locator('xpath=following-sibling::dd[1]')
+  await expect(kv('failed logins')).toHaveText(/^[1-9]\d*$/)
+  await expect(kv('failed logins')).toHaveClass(/alert/)
+  await expect(kv('evicted sources')).toHaveText('0')
+  await expect(kv('dropped notifications')).toHaveText('0')
+  await expect(kv('expired bans')).toHaveText(/^\d+$/)
 })
 
 test('header and footer name the instance and its state backend', async ({ page }) => {

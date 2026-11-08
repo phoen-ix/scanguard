@@ -50,21 +50,51 @@ test('each list says what it holds', async ({ page, request }) => {
   await tile(page, 'requests seen').click()
   await expect(detail(page).locator('tbody tr').filter({ hasText: new URL(process.env.E2E_SITE_URL ?? 'http://localhost:8800').host })).toHaveCount(1)
 
-  // Event-backed lists are a recent window of an all-time counter, and say which.
-  const window = /^(All \d+ so far\.|The \d+ most recent of \d+\. Older entries have left the event log\.)$/
+  // Event-backed lists are a recent window of an all-time counter, and say
+  // which — and which window: Blocked is drawn from the state payload's hundred
+  // events, Detections from the ban ring.
   await tile(page, 'blocked').click()
-  await expect(page.locator('#tile-detail-note')).toHaveText(window)
+  await expect(page.locator('#tile-detail-note')).toHaveText(/^(All \d+ so far\.|The \d+ most recent of \d+\. Older entries are not in this view\.)$/)
   await expect(tile(page, 'blocked')).toHaveClass(/alert/)
   await tile(page, 'detections').click()
-  await expect(page.locator('#tile-detail-note')).toHaveText(window)
+  await expect(page.locator('#tile-detail-note')).toHaveText(/^(All \d+ so far\.|The \d+ most recent of \d+\. Older entries have left the event log\.)$/)
 
   await tile(page, 'active bans').click()
-  const { bansTotal } = await api(request, '/api/state')
-  await expect(detail(page).locator('tbody tr')).toHaveCount(bansTotal)
+  const { bans, bansTotal } = await api(request, '/api/state')
+  await expect(detail(page).locator('tbody tr')).toHaveCount(bans.length)
+  await expect(page.locator('#tile-detail-note')).toHaveText(
+    bansTotal > bans.length ? `The newest ${bans.length} of ${bansTotal} active bans — the same rows as the Active bans panel below.`
+      : 'The complete ban list — the same rows as the Active bans panel below.')
 
   // The host's own requests reach scanguard from the Docker bridge, a trusted proxy.
   await tile(page, 'exempt').click()
   await expect(detail(page).locator('tbody tr').filter({ hasText: 'trusted-proxy' })).toHaveCount(1)
+})
+
+test('the blocked list is newest first, like the feed', async ({ page, request }) => {
+  const ip = uniqueIp()
+  expect(await probe(request, ip, '/wp-login.php')).toBe(403)
+  expect(await probe(request, ip, '/first-reject')).toBe(403)
+  expect(await probe(request, ip, '/second-reject')).toBe(403)
+  await unlock(page)
+  await tile(page, 'blocked').click()
+  const mine = detail(page).locator('tbody tr').filter({ hasText: ip })
+  await expect(mine).toHaveCount(2)
+  await expect(mine.first().locator('td').nth(2)).toHaveText('/second-reject')
+  await expect(mine.last().locator('td').nth(2)).toHaveText('/first-reject')
+})
+
+test('an open tile and its list survive the poll without losing focus', async ({ page }) => {
+  await unlock(page)
+  const button = tile(page, 'exempt')
+  await button.focus()
+  await button.press('Enter')
+  await expect(detail(page)).toBeVisible()
+  // Two polls later the same element is still the focused, expanded tile.
+  await page.waitForResponse((r) => r.url().endsWith('/api/state'))
+  await page.waitForResponse((r) => r.url().endsWith('/api/state'))
+  await expect(button).toBeFocused()
+  await expect(button).toHaveAttribute('aria-expanded', 'true')
 })
 
 test('tracked sources are fetched while the list is open, newest first', async ({ page, request }) => {

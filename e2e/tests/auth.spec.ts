@@ -1,0 +1,44 @@
+import { CONSOLE, TOKEN, banRow, expect, probe, test, uniqueIp } from './helpers'
+
+/* The console behind the basicAuth the README tells operators to chain in
+ * front of it (fixtures/consoles.yml: /auth/, dev / dev). The page loads with
+ * the browser's credentials; every API call must carry them too. The script
+ * used to send credentials: "omit", so the first api/health reached basicAuth
+ * without an Authorization header, got 401, and the gate said the right token
+ * was not accepted. */
+
+const AUTH = { username: 'dev', password: 'dev' }
+test.use({ httpCredentials: AUTH })
+
+test.beforeAll(async () => {
+  // Not one of the consoles global-setup waits for.
+  const deadline = Date.now() + 30_000
+  const basic = 'Basic ' + Buffer.from('dev:dev').toString('base64')
+  for (;;) {
+    const res = await fetch(`${CONSOLE}/auth/api/health`, { headers: { Authorization: basic, 'X-Scanguard-Token': TOKEN } }).catch(() => null)
+    if (res?.status === 200) break
+    if (Date.now() > deadline) throw new Error('[e2e] the basicAuth console at /auth/ did not come up')
+    await new Promise((r) => setTimeout(r, 500))
+  }
+})
+
+test('the console works behind basicAuth: the token unlocks and the data loads', async ({ page, request }) => {
+  const ip = uniqueIp()
+  expect(await probe(request, ip, '/wp-login.php')).toBe(403)
+  await page.goto('/auth/')
+  await page.getByLabel('Access token').fill(TOKEN)
+  await page.getByRole('button', { name: 'Unlock' }).click()
+  await expect(page.locator('#app')).toBeVisible()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(page.locator('#subtitle')).toContainText('default · up ')
+  await expect(banRow(page, `${ip}/32`)).toHaveCount(1)
+})
+
+test('without the proxy credentials the gate blames the proxy, not the token', async ({ browser }) => {
+  // A context with no HTTP credentials: the page itself is a 401 from basicAuth.
+  const context = await browser.newContext({ httpCredentials: undefined })
+  const page = await context.newPage()
+  const res = await page.goto('/auth/')
+  expect(res?.status()).toBe(401)
+  await context.close()
+})

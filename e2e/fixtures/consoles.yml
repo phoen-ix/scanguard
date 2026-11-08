@@ -9,11 +9,14 @@
 #   /sso-anon/ the same console with no identity header: a real guest
 #   /orphan/  console whose instanceName no detector shares (e2e-orphan): every
 #             list stays empty and the rule editor has nothing to edit
+#   /auth/    the harness's own console (instance default) behind the basicAuth
+#             middleware scanguard.yml defines and the README recommends
+#             (dev / dev): the browser's credentials must reach every API call
 http:
   middlewares:
     e2e-strip:
       stripPrefix:
-        prefixes: [/ro, /sso, /orphan]
+        prefixes: [/ro, /sso, /orphan, /auth]
     # Its own, so /sso does not strip /sso-anon/ to /-anon/.
     e2e-strip-anon:
       stripPrefix:
@@ -97,3 +100,9 @@ http:
       service: noop
       priority: 200
       middlewares: [e2e-strip, e2e-orphan-ui]
+    e2e-auth-console:
+      rule: PathPrefix(`/auth/`)
+      entryPoints: [admin]
+      service: noop
+      priority: 200
+      middlewares: [e2e-strip, scanguard-ui-auth, scanguard-ui]

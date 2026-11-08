@@ -2182,3 +2182,24 @@ func TestCrawlerPolicyWorksWithTheUserAgentDetectorOff(t *testing.T) {
 		t.Errorf("the user-agent detector still fired while disabled, got %d", got)
 	}
 }
+
+// The console is a raw string constant interpreted by whatever browser opens
+// it, with no build step to catch a slip: the CSP forbids inline script, text
+// goes through textContent only, and the JS stays ES5 so the constant stays a
+// raw string (a template literal's backtick would end it). None of that is
+// checked anywhere else.
+func TestConsoleScriptKeepsItsInvariants(t *testing.T) {
+	for _, bad := range []string{"innerHTML", "=>", "\nconst ", "\nlet ", "document.write", "eval("} {
+		if strings.Contains(appJS, bad) {
+			t.Errorf("app.js contains %q", bad)
+		}
+	}
+	if strings.Contains(indexHTML, "<script>") || strings.Contains(indexHTML, "onclick=") {
+		t.Error("index.html carries inline script, which the CSP forbids")
+	}
+	for _, want := range []string{`credentials: "omit"`} {
+		if strings.Contains(appJS, want) {
+			t.Errorf("app.js still sends %s, which strips the browser's HTTP-auth entry behind a chained basicAuth", want)
+		}
+	}
+}

@@ -90,6 +90,22 @@ test('a detector ban appears while the page is open; its hits count up', async (
   await expect(cells(row).nth(5)).toHaveText('3')
 })
 
+test('focus on an unblock button survives the poll', async ({ page, request }) => {
+  const ip = uniqueIp()
+  await api(request, '/api/bans', { method: 'POST', data: { key: ip, duration: '1h', reason: 'e2e focus' } })
+  await unlock(page)
+  const button = banRow(page, `${ip}/32`).getByRole('button', { name: 'unblock' })
+  await button.focus()
+  await expect(button).toBeFocused()
+  // Another ban arriving above the row and two polls must not rebuild it.
+  await api(request, '/api/bans', { method: 'POST', data: { key: uniqueIp(), duration: '1h', reason: 'e2e newer' } })
+  await page.waitForResponse((r) => r.url().endsWith('/api/state'))
+  await page.waitForResponse((r) => r.url().endsWith('/api/state'))
+  await expect(button).toBeFocused()
+  await button.press('Enter')
+  await expect(toast(page)).toHaveText(`Unblocked ${ip}/32`)
+})
+
 test('unblocking a ban that is already gone says so', async ({ page, request }) => {
   const ip = uniqueIp()
   await api(request, '/api/bans', { method: 'POST', data: { key: ip, duration: '1h', reason: 'e2e stale' } })

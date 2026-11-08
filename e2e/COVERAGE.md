@@ -28,7 +28,7 @@ or `Authorization: Bearer`), **read-only operator** (`admin.readOnly`), **SSO us
 `e2e/fixtures/consoles.yml`, added to the running harness for the length of the run;
 two Traefik replicas sharing a Redis come from the overlay `examples/docker-compose.e2e.yml`.
 
-**Totals: 162 items — ✅ 141, ❌ 21** ((a) 2, (c) 19).
+**Totals: 170 items — ✅ 149, ❌ 21** ((a) 2, (c) 19).
 
 Test names are `file › [describe ›] title`.
 
@@ -68,7 +68,7 @@ Test names are `file › [describe ›] title`.
 | `/sso/` (SSO user) | ✅ `sweep.spec.ts › SSO console without an identity (/sso-anon/) › as a guest: the API refuses with 401 and Unlock keeps the gate up` (no `X-Forwarded-User`; `sweep.spec.ts › SSO console (/sso/) › as a guest: …` is a signed-in user's first visit, before Unlock) | ✅ `sweep.spec.ts › SSO console (/sso/) › as its operator: every panel` |
 | `/orphan/` (operator, no detector) | ✅ `sweep.spec.ts › orphan console (/orphan/) › as a guest: …` | ✅ `… › as its operator: every panel` |
 
-## Console features (44, from the extraction command)
+## Console features (45, from the extraction command)
 
 | # | Item | Test |
 |---|---|---|
@@ -113,14 +113,22 @@ Test names are `file › [describe ›] title`.
 | 42 | toast "Rules applied" | ✅ `rules.spec.ts › saving applies on the next request, is marked, and survives a reload` |
 | 43 | toast "Reverted to the file configuration" | ✅ `rules.spec.ts › Revert asks first, then hands control back to the file` |
 | 44 | toast "Banned …" (and "Unblocked …", "No ban found for …") | ✅ `bans.spec.ts › a manual ban from the form is listed, enforced, and lifted by unblock`, `› unblocking a ban that is already gone says so` |
+| 45 | Health (failed logins, evicted sources, dropped notifications, expired bans) | ✅ `panels.spec.ts › health shows the counters that used to be sent and never shown` |
 
-## Cross-cutting flows and states (24)
+## Cross-cutting flows and states (31)
 
 | Item | Test |
 |---|---|
 | login: right token unlocks | ✅ `gate.spec.ts › the right token unlocks, a reload keeps the session, Lock forgets it` |
 | session survives a reload | ✅ same |
 | logout (Lock), and a reload after it | ✅ same |
+| Lock empties the token field and resets the activity filter | ✅ `gate.spec.ts › the right token unlocks, a reload keeps the session, Lock forgets it`; `activity.spec.ts › Lock resets the kind filter, so the next session starts on "all"` |
+| console behind chained basicAuth (the browser's credentials reach every API call) | ✅ `auth.spec.ts › the console works behind basicAuth: the token unlocks and the data loads`, `› without the proxy credentials the gate blames the proxy, not the token` |
+| a proxy's 401 is told apart from the plugin's | ✅ `gate.spec.ts › a 401 from a proxy in front of the console is not blamed on the token` |
+| a filter click racing the poll adds no duplicate rows | ✅ `activity.spec.ts › a filter click racing the poll does not duplicate rows` |
+| the Blocked list is newest first | ✅ `tiles.spec.ts › the blocked list is newest first, like the feed` |
+| keyboard focus survives the three-second poll (tiles, unblock) | ✅ `tiles.spec.ts › an open tile and its list survive the poll without losing focus`, `bans.spec.ts › focus on an unblock button survives the poll` |
+| the ban-list tile note says whether the list is complete | ✅ `tiles.spec.ts › each list says what it holds` |
 | stale remembered token → gate with the reason | ✅ `gate.spec.ts › a remembered token that stopped working sends the session back to the gate` |
 | gate error other than 401 (misrouted prefix) | ✅ `gate.spec.ts › a gate failure other than a refused token is shown, not a blank page` |
 | SSO: unlock without a token, stay unlocked across a reload, Lock | ✅ `sso.spec.ts › the signed-in user unlocks without a token and stays unlocked across a reload` |

@@ -6,7 +6,7 @@ export * from './consoles'
 
 export const PANELS = [
   'Active bans', 'Most probed paths', 'Top sources', 'Rules that fired', 'Live activity',
-  'Detectors', 'Configuration', 'Compiled ruleset', 'Rule editor',
+  'Detectors', 'Configuration', 'Health', 'Compiled ruleset', 'Rule editor',
 ]
 
 export const TILES = [

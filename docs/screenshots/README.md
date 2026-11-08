@@ -57,7 +57,8 @@ place. Each list scrolls inside its panel.
 
 ## Detectors and compiled ruleset
 
-Which detectors are on (with their hit counts), the running configuration, and
+Which detectors are on (with their hit counts), the running configuration, the
+health counters (failed logins, evicted sources, dropped notifications) and
 every pattern currently compiled in (a scrolling list).
 
 <img src="console-ruleset.png" alt="Detector chips, the configuration summary and the compiled ruleset" width="800">

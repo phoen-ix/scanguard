@@ -295,6 +295,13 @@ type StateResponse struct {
 	TopHosts   []TopEntry             `json:"topHosts"`
 	TopExempt  []TopEntry             `json:"topExempt"`
 	Config     map[string]interface{} `json:"config"`
+	// RulesStamp changes whenever the rule set the editor shows would change:
+	// a save (on this replica or another), a reload of the file configuration,
+	// the saved edits going stale. The console reloads the editor when it
+	// moves and the editor is clean, and warns when it is not, so two tabs or
+	// two operators no longer overwrite each other with "Rules applied" as the
+	// only feedback.
+	RulesStamp string `json:"rulesStamp"`
 }
 
 // maxStateBans caps the ban list carried by /api/state. The console polls that
@@ -347,7 +354,23 @@ func (rt *runtime) apiState(s *settings, rw http.ResponseWriter, req *http.Reque
 		TopHosts:   rt.topHosts.top(10),
 		TopExempt:  rt.topExempt.top(10),
 		Config:     configSummary(s),
+		RulesStamp: rt.rulesStamp(),
 	})
+}
+
+// rulesStamp fingerprints what the rule editor would show; see
+// StateResponse.RulesStamp.
+func (rt *runtime) rulesStamp() string {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	parts := rt.overridesStale + "|" + rt.overridesUnsaved + "|"
+	if rt.overrides != nil {
+		parts += rt.overrides.Updated.UTC().Format(time.RFC3339Nano)
+	}
+	if rt.baseConfig != nil {
+		parts += "|" + configFingerprint(rt.baseConfig)
+	}
+	return hashOf([]byte(parts))
 }
 
 // listBans is the ban list as the API shows it: newest first, countries filled
@@ -832,6 +855,11 @@ func configSummary(s *settings) map[string]interface{} {
 			detectorPayload:    s.payload.Enabled,
 			detectorUARotation: s.uaRot.Enabled,
 			detectorSubnet:     s.subnet.Enabled,
+			// The two the panel never showed: their hits in topDetectors had no
+			// chip to land on. The instance-wide crawler policy counts as "on"
+			// when it is anything but ignore; a router's own policy may differ.
+			detectorCrawler:    s.uaCrawlers != crawlersIgnore,
+			detectorReputation: s.notify.AbuseIPDB.Enabled && s.notify.AbuseIPDB.Check,
 		},
 		"crawlers": s.uaCrawlers,
 		"notify": map[string]bool{
