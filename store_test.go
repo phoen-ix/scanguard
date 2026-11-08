@@ -220,7 +220,10 @@ func TestFileStoreWritesAtomically(t *testing.T) {
 		c.Store.Backend = "file"
 		c.Store.Path = path
 	})
-	store, _ := newFileStore(s)
+	store, err := newFileStore(s)
+	if err != nil || !store.writable {
+		t.Fatalf("newFileStore: %v (writable %v)", err, store != nil && store.writable)
+	}
 	_ = store.put(ban("203.0.113.13/32", time.Now().Add(time.Hour)))
 	if err := store.flush(); err != nil {
 		t.Fatalf("flush: %v", err)
@@ -232,14 +235,18 @@ func TestFileStoreWritesAtomically(t *testing.T) {
 		t.Error("the temporary file was left behind after a successful write")
 	}
 
-	// A second flush with nothing changed must not rewrite the file.
-	before, _ := os.Stat(path)
-	time.Sleep(10 * time.Millisecond)
+	// A second flush with nothing changed must not rewrite the file. The mtime
+	// is moved into the past first, so a rewrite shows whatever the
+	// filesystem's timestamp resolution.
+	past := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(path, past, past); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.flush(); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := os.Stat(path)
-	if !before.ModTime().Equal(after.ModTime()) {
+	if !after.ModTime().Equal(past) {
 		t.Error("an unchanged store was rewritten; under a flood this burns IOPS for nothing")
 	}
 }

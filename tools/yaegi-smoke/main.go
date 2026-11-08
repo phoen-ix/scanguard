@@ -32,6 +32,7 @@ import (
 	"github.com/mitchellh/mapstructure"
 	"github.com/traefik/yaegi/interp"
 	"github.com/traefik/yaegi/stdlib"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -681,6 +682,8 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 
 	subnetChecks(build, token)
 	roundTwoChecks(build, token)
+	manifestChecks(build)
+	settingChecks(build, token, stateDir)
 
 	// A read-only console serves everything and refuses every mutation.
 	ro, err := build(map[string]interface{}{
@@ -1109,6 +1112,67 @@ func roundTwoChecks(build func(map[string]interface{}) (http.Handler, error), to
 		banned && strings.Contains(rec.Body.String(), `"detector":"reputation"`), "banned=%v body %s", banned, truncate(rec.Body.String(), 300))
 
 	janitorChecks(build, token, sink.URL, received)
+}
+
+// manifestChecks builds the plugin from .traefik.yml's testData exactly as the
+// plugin catalog does when it validates a submission: decoded from YAML, under
+// the interpreter. TestManifestTestDataShape in the plugin's own tests is a
+// hand-copied subset and could drift from the file.
+func manifestChecks(build func(map[string]interface{}) (http.Handler, error)) {
+	path := os.Getenv("SMOKE_MANIFEST")
+	if path == "" {
+		path = "../../.traefik.yml"
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		check("the plugin manifest is readable", false, "%v", err)
+		return
+	}
+	var manifest struct {
+		TestData map[string]interface{} `yaml:"testData"`
+	}
+	if err := yaml.Unmarshal(raw, &manifest); err != nil || len(manifest.TestData) == 0 {
+		check("the plugin manifest carries testData", false, "%v (%d keys)", err, len(manifest.TestData))
+		return
+	}
+	h, err := build(manifest.TestData)
+	check("the manifest's testData is a configuration New accepts", err == nil, "%v", err)
+	if err == nil {
+		rec := do(h, "GET", "/", "203.0.113.250:5000", nil)
+		check("the testData instance serves a clean request", rec.Code == 200, "got status %d", rec.Code)
+	}
+}
+
+// settingChecks covers the settings that used to be hardcoded: extra crawler
+// patterns, the reject content type, and the debounced snapshot write.
+func settingChecks(build func(map[string]interface{}) (http.Handler, error), token, stateDir string) {
+	path := stateDir + "/settings.json"
+	h, err := build(map[string]interface{}{
+		"instanceName": "smoke-settings",
+		"store":        map[string]interface{}{"backend": "file", "path": path, "flushDebounce": "300ms"},
+		"detectors": map[string]interface{}{
+			"userAgent": map[string]interface{}{
+				"enabled": true, "useDefaults": true, "crawlers": "block", "crawlerPatterns": []string{"\\bgptbot\\b"},
+			},
+		},
+		"enforcement": map[string]interface{}{"rejectBody": "<p>no</p>", "rejectContentType": "text/html; charset=utf-8"},
+		"admin":       map[string]interface{}{"enabled": true, "pathPrefix": "/__scanguard", "token": token},
+	})
+	if err != nil {
+		fatal("New rejected the settings configuration: %v", err)
+	}
+	rec := do(h, "GET", "/", "203.0.113.251:5000", map[string]string{"User-Agent": "Mozilla/5.0 (compatible; GPTBot/1.2)"})
+	check("a crawler from crawlerPatterns is blocked", rec.Code == 403, "got status %d", rec.Code)
+	check("the rejection carries the configured content type",
+		rec.Header().Get("Content-Type") == "text/html; charset=utf-8", "got %q", rec.Header().Get("Content-Type"))
+	do(h, "GET", "/wp-login.php", "203.0.113.252:5000", nil)
+	written := false
+	waitFor(3*time.Second, func() bool {
+		b, rerr := os.ReadFile(path)
+		written = rerr == nil && bytes.Contains(b, []byte("203.0.113.252/32"))
+		return written
+	})
+	check("a debounced ban reaches the snapshot", written, "no snapshot holding the ban within 3s")
 }
 
 // janitorChecks waits out one janitor tick, so the sweep, the expiry claim and

@@ -32,6 +32,8 @@ func resetRuntime(name string) {
 
 func consoleHandler(t *testing.T, mutate func(*Config)) (http.Handler, *runtime) {
 	t.Helper()
+	resetRuntime(t.Name())
+	t.Cleanup(func() { resetRuntime(t.Name()) })
 	cfg := CreateConfig()
 	cfg.InstanceName = t.Name()
 	cfg.Admin.Enabled = true

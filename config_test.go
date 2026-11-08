@@ -211,6 +211,39 @@ func TestInvalidValuesAreRejected(t *testing.T) {
 		"eventLogSize above the ceiling": func(c *Config) {
 			c.Admin.EventLogSize = maxEventLogSize + 1
 		},
+		"rate abuse enabled with rps 0": func(c *Config) {
+			c.Detectors.RateAbuse = RateAbuseConfig{Enabled: true}
+		},
+		"signatures enabled with no patterns": func(c *Config) {
+			c.Detectors.Signatures = SignatureConfig{Enabled: true}
+		},
+		"payload enabled with no patterns": func(c *Config) {
+			c.Detectors.Payload = PayloadConfig{Enabled: true}
+		},
+		"admin token shorter than 16": func(c *Config) {
+			c.Admin = AdminConfig{Enabled: true, Token: "short"}
+		},
+		"admin pathPrefix without a slash": func(c *Config) {
+			c.Admin.PathPrefix = "console"
+		},
+		"badPaths leak 0": func(c *Config) {
+			c.Detectors.BadPaths.Leak = "0"
+		},
+		"bruteForce window 0": func(c *Config) {
+			c.Detectors.BruteForce.Window = "0"
+		},
+		"unsupported geo provider": func(c *Config) {
+			c.Geo = GeoConfig{Enabled: true, Provider: "maxmind"}
+		},
+		"chat kind without a url": func(c *Config) {
+			c.Notify.Chat = ChatConfig{Kind: "slack"}
+		},
+		"ipv6Prefix out of range": func(c *Config) {
+			c.ClientIP.IPv6Prefix = 8
+		},
+		"retireAfter not a duration": func(c *Config) {
+			c.RetireAfter = "later"
+		},
 		"geo endpoint that is not a URL": func(c *Config) {
 			c.Geo.Endpoint = "ip-api.com"
 		},

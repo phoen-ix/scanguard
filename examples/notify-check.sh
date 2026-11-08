@@ -161,7 +161,10 @@ http:
           notify:
             timeout: 1s
             webhooks:
-              - url: http://127.0.0.1:1/nowhere
+              # TEST-NET-1: packets go nowhere and nothing answers, so the
+              # delivery runs into notify.timeout. 127.0.0.1:1 was refused at
+              # once and the timeout path never ran.
+              - url: http://192.0.2.1:9/nowhere
 EOF
 cp /tmp/scanguard-deadhook.yml dynamic/zz-deadhook.yml
 # Wait for the router instead of sleeping: until it loads, the probe reaches

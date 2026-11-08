@@ -183,3 +183,99 @@ func TestReadOnlySnapshotIsStillRestored(t *testing.T) {
 		t.Error("the snapshot on a read-only volume was not restored")
 	}
 }
+
+// At tarpit capacity a rejection is answered at once rather than queued: every
+// held request pins a goroutine and a socket.
+func TestTarpitAtCapacityRejectsAtOnce(t *testing.T) {
+	h := build(t, func(c *Config) {
+		c.Enforcement.Tarpit = TarpitConfig{Enabled: true, Delay: "2s", MaxConcurrent: 1}
+	})
+	rt := registry[t.Name()]
+	sendCancelled(h, "/wp-login.php", "203.0.113.129:1")
+	sem, _ := rt.tarpitSem.Load().(chan struct{})
+	sem <- struct{}{} // the one slot is taken
+	defer func() { <-sem }()
+	start := time.Now()
+	if got := send(h, "GET", "/", "203.0.113.129:1", nil).Code; got != 403 {
+		t.Fatalf("got %d, want 403", got)
+	}
+	if took := time.Since(start); took > 500*time.Millisecond {
+		t.Errorf("a rejection at tarpit capacity waited %v", took)
+	}
+}
+
+// An upgrade request reaches the backend holding the ORIGINAL writer, so the
+// backend can hijack it.
+func TestUpgradeReachesTheBackendUnwrapped(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.InstanceName = t.Name()
+	resetRuntime(t.Name())
+	defer resetRuntime(t.Name())
+	var got http.ResponseWriter
+	h, err := New(context.Background(), http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) { got = rw }), cfg, "scanguard@test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := &fullWriter{ResponseRecorder: httptest.NewRecorder()}
+	req := httptest.NewRequest("GET", "/ws", nil)
+	req.RemoteAddr = "203.0.113.160:1"
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	h.ServeHTTP(orig, req)
+	if got != http.ResponseWriter(orig) {
+		t.Errorf("the backend got %T, want the original writer", got)
+	}
+	req = httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "203.0.113.161:1"
+	h.ServeHTTP(orig, req)
+	if _, wrapped := got.(*responseObserver); !wrapped {
+		t.Errorf("an ordinary request was not observed: %T", got)
+	}
+}
+
+// A writer without Flusher or Hijacker degrades loudly, once; Push forwards
+// where the writer can push and says it cannot where it cannot.
+func TestObserverDegradesLoudlyAndForwardsPush(t *testing.T) {
+	plain := httptest.NewRecorder() // a Flusher, so wrap it in something that is not
+	bare := struct{ http.ResponseWriter }{plain}
+	instance := t.Name()
+	resetRuntime(instance)
+	lines := captureLog(t, func() {
+		obs := newResponseObserver(bare, instance)
+		obs.Flush()
+		obs.Flush()
+		if _, _, err := obs.Hijack(); err == nil {
+			t.Error("Hijack on a writer that cannot hijack returned no error")
+		}
+		if err := obs.Push("/x", nil); err != http.ErrNotSupported {
+			t.Errorf("Push on a writer that cannot push returned %v", err)
+		}
+	})
+	flusher, hijacker := 0, 0
+	for _, l := range lines {
+		if strings.Contains(l.Msg, "does not implement http.Flusher") {
+			flusher++
+		}
+		if strings.Contains(l.Msg, "does not implement http.Hijacker") {
+			hijacker++
+		}
+	}
+	if flusher != 1 || hijacker != 1 {
+		t.Errorf("degradation warnings: flusher %d, hijacker %d, want one each", flusher, hijacker)
+	}
+
+	p := &pushWriter{ResponseRecorder: httptest.NewRecorder()}
+	if err := newResponseObserver(p, instance).Push("/app.css", nil); err != nil || p.pushed != "/app.css" {
+		t.Errorf("Push was not forwarded: %v %q", err, p.pushed)
+	}
+}
+
+type pushWriter struct {
+	*httptest.ResponseRecorder
+	pushed string
+}
+
+func (p *pushWriter) Push(target string, _ *http.PushOptions) error {
+	p.pushed = target
+	return nil
+}

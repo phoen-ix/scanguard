@@ -8,4 +8,5 @@ go 1.22
 require (
 	github.com/mitchellh/mapstructure v1.5.1-0.20231216201459-8508981c8b6c // what Traefik v3.7.17 pins (archived repo, no tag)
 	github.com/traefik/yaegi v0.16.1
+	gopkg.in/yaml.v3 v3.0.1 // reads .traefik.yml's testData, as the plugin catalog does
 )

@@ -207,9 +207,14 @@ func TestChatPayloadsPerProvider(t *testing.T) {
 			}
 		},
 		"gotify": func(t *testing.T, body string, _ http.Header) {
-			var m map[string]interface{}
-			if err := json.Unmarshal([]byte(body), &m); err != nil || m["message"] == "" || m["title"] == "" {
-				t.Errorf("gotify payload = %s", body)
+			var m struct {
+				Title    *string `json:"title"`
+				Message  *string `json:"message"`
+				Priority *int    `json:"priority"`
+			}
+			if err := json.Unmarshal([]byte(body), &m); err != nil || m.Title == nil || *m.Title == "" ||
+				m.Message == nil || *m.Message == "" || m.Priority == nil {
+				t.Errorf("gotify payload is missing a field: %s", body)
 			}
 		},
 		"ntfy": func(t *testing.T, body string, hdr http.Header) {

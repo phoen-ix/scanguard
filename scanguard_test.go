@@ -36,6 +36,10 @@ func okBackend() http.Handler {
 
 func build(t *testing.T, mutate func(*Config)) http.Handler {
 	t.Helper()
+	// A clean instance every time, so the suite survives -count=2: runtime
+	// state is a process-global registry keyed by the name.
+	resetRuntime(t.Name())
+	t.Cleanup(func() { resetRuntime(t.Name()) })
 	cfg := CreateConfig()
 	// Every test gets its own instance name, because runtime state is a
 	// process-global registry keyed by exactly that.
@@ -445,6 +449,8 @@ func TestAllowlistedUserAgentBypassesABanOnAnAllowlistedPath(t *testing.T) {
 // bruteForce.paths was matched against the stripped path and never fired, and
 // the ban named a path the client never sent.
 func TestResponseDetectorsSeeThePathTheClientSent(t *testing.T) {
+	resetRuntime(t.Name())
+	defer resetRuntime(t.Name())
 	cfg := CreateConfig()
 	cfg.InstanceName = t.Name()
 	cfg.Detectors.Signatures.Enabled = false
@@ -1048,6 +1054,10 @@ func TestCrawlerPolicyRejectsAnUnknownValue(t *testing.T) {
 // per-router crawler policy exists for, and the one build() cannot express.
 func buildOn(t *testing.T, instance, router string, mutate func(*Config)) http.Handler {
 	t.Helper()
+	// Not reset here: several routers share one instance on purpose. The
+	// first build of a test resets it and cleanup
+	// drops it.
+	t.Cleanup(func() { resetRuntime(instance) })
 	cfg := CreateConfig()
 	cfg.InstanceName = instance
 	cfg.Detectors.UserAgent.Enabled = true
@@ -2136,6 +2146,8 @@ func TestSwitchingOffDryRunEnforcesOnTheNextDetection(t *testing.T) {
 // so with the detector first the setting silently did nothing.
 func TestEventLogSizeFollowsTheConsoleWhenBuiltSecond(t *testing.T) {
 	name := t.Name()
+	resetRuntime(name)
+	defer resetRuntime(name)
 	detector := CreateConfig()
 	detector.InstanceName = name
 	if _, err := New(context.Background(), okBackend(), detector, "detector@test"); err != nil {

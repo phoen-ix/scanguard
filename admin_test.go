@@ -94,7 +94,9 @@ func TestNarrowStaleBansCanBeDeleted(t *testing.T) {
 // or appends it, so the proxy's value is the last one, and the first was the
 // one a client could write. Values in the shapes proxies write are accepted.
 func TestConfiguredHeaderIsReadFromTheProxyEnd(t *testing.T) {
+	resetRuntime(t.Name()) // forgets the once-only warning asserted below
 	s := mustSettings(t, func(c *Config) {
+		c.InstanceName = t.Name()
 		c.ClientIP.TrustedProxies = []string{"10.0.0.0/8"}
 		c.ClientIP.Header = "X-Client-Ip"
 	})
