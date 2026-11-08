@@ -501,6 +501,13 @@ func (c *respClient) closeLocked() {
 	}
 }
 
+// close drops the connection; the next do() dials again.
+func (c *respClient) close() {
+	c.mu.Lock()
+	c.closeLocked()
+	c.mu.Unlock()
+}
+
 // connect makes sure there is a connection, dialing if needed.
 func (c *respClient) connect() error {
 	c.mu.Lock()

@@ -26,6 +26,13 @@ type Config struct {
 	// InstanceName keys the process-global state. Two middleware definitions sharing
 	// an InstanceName share counters and bans; different names are fully isolated.
 	InstanceName string `json:"instanceName,omitempty"`
+	// RetireAfter retires an instance that Traefik's configuration no longer
+	// contains. Traefik has no hook for "this middleware was removed": a reload
+	// simply stops calling New for it, and its runtime used to live on — janitor,
+	// snapshot writes and all — for the life of the process. An instance is
+	// retired when the latest reload did not rebuild it AND it has served no
+	// request for this long. "0" never retires.
+	RetireAfter string `json:"retireAfter,omitempty"`
 	// DryRun detects and logs but never blocks. Start here when rolling out.
 	DryRun bool `json:"dryRun,omitempty"`
 	// ObserveResponse wraps the ResponseWriter so response-status detectors
@@ -446,6 +453,7 @@ func CreateConfig() *Config {
 	return &Config{
 		Enabled:         true,
 		InstanceName:    "default",
+		RetireAfter:     "10m",
 		DryRun:          false,
 		ObserveResponse: true,
 		Store: StoreConfig{
@@ -658,6 +666,7 @@ func (s statusSet) has(code int) bool {
 type settings struct {
 	enabled         bool
 	instanceName    string
+	retireAfter     time.Duration
 	dryRun          bool
 	observeResponse bool
 	uiMode          bool
@@ -774,6 +783,10 @@ func (c *Config) parse() (*settings, error) {
 	}
 	if s.instanceName == "" {
 		s.instanceName = "default"
+	}
+	var rerr error
+	if s.retireAfter, rerr = parseDuration("retireAfter", c.RetireAfter, 10*time.Minute); rerr != nil {
+		return nil, rerr
 	}
 
 	if err := c.parseStore(s); err != nil {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -38,6 +39,10 @@ type fileStore struct {
 	// Traefik deployment may run with a read-only root filesystem and no volume;
 	// that must degrade to in-memory operation, not take the whole config down.
 	writable bool
+	// detached is set when another instance took over this snapshot path
+	// (claimStateFileLocked); the store keeps working in memory and stops
+	// writing.
+	detached atomic.Bool
 	writeMu  sync.Mutex
 
 	// pendingMu guards pending, the one deferred flush scheduleFlush may have
@@ -179,7 +184,7 @@ func (f *fileStore) load() (int, error) {
 // re-dirties the table and the next flush carries it. A failed write puts the
 // flag back so nothing is lost on the error path either.
 func (f *fileStore) flush() error {
-	if !f.writable || !f.clearDirtyIfSet() {
+	if !f.writable || f.detached.Load() || !f.clearDirtyIfSet() {
 		return nil
 	}
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/netip"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -142,6 +143,16 @@ type runtime struct {
 	overridesLoaded bool
 
 	janitorOnce sync.Once
+	// lastAcquired is when acquireRuntime last returned this runtime (unix
+	// nanoseconds): every reload rebuilds every router, so a runtime the latest
+	// reload did not touch is no longer in Traefik's configuration.
+	lastAcquired atomic.Int64
+	// retired is set when the janitor retired this runtime; its loop then ends.
+	retired atomic.Bool
+	// quietSince and lastRequests are the janitor's record of when the request
+	// counter last moved. Only the janitor touches them.
+	quietSince   time.Time
+	lastRequests int64
 	// tarpitSem caps concurrent tarpitted requests. Without it a scanner holding a
 	// thousand connections turns the tarpit into a self-inflicted denial of service,
 	// because every delayed request pins a Traefik goroutine and a socket.
@@ -184,7 +195,26 @@ type stats struct {
 
 // acquireRuntime returns the shared runtime for this instance name, creating it
 // on first use and updating its configuration on subsequent calls.
+// lastAcquireAny is when acquireRuntime last returned ANY runtime (unix
+// nanoseconds): the time of the latest reload, as far as this plugin can see.
+var lastAcquireAny atomic.Int64
+
+// reloadBurst is how far apart two acquisitions can be and still belong to one
+// reload. Traefik builds every middleware of a reload in one pass, milliseconds
+// apart; a minute is generous.
+const reloadBurst = time.Minute
+
 func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
+	rt, err := acquireRuntimeLocked(s, cfg, fp)
+	if err == nil {
+		now := time.Now().UnixNano()
+		rt.lastAcquired.Store(now)
+		lastAcquireAny.Store(now)
+	}
+	return rt, err
+}
+
+func acquireRuntimeLocked(s *settings, cfg *Config, fp string) (*runtime, error) {
 	registryMu.Lock()
 	defer registryMu.Unlock()
 
@@ -210,6 +240,7 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 			topExempt:         newTally(16),
 		}
 		rt.setDeps(store, rt.newNotifier(s), newGeoCache(s))
+		claimStateFileLocked(s.instanceName, store)
 		rt.stats.StartedAt = time.Now().UTC()
 		if s.uiMode {
 			rt.uiFP = fp
@@ -311,6 +342,7 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 		rt.carryOverridesLocked(store)
 		rt.mu.Unlock()
 		rt.setDeps(store, rt.notifier(), rt.geo())
+		claimStateFileLocked(s.instanceName, store)
 		rt.storeFingerprint = newFP
 		// The new backend may have brought persisted bans with it — this is the
 		// ordinary startup path whenever Traefik builds the console (memory store,
@@ -695,6 +727,9 @@ func (rt *runtime) startJanitor() {
 
 			for range ticker.C {
 				rt.tick()
+				if rt.retired.Load() {
+					return
+				}
 				if next := rt.janitorInterval(); next != interval {
 					interval = next
 					ticker.Reset(interval)
@@ -778,6 +813,80 @@ func (rt *runtime) tick() {
 		rt.syncOverrides()
 	}
 	rt.geo().sweep(now)
+	rt.maybeRetire(s, now)
+}
+
+// maybeRetire retires this runtime when Traefik's configuration no longer
+// contains it: the latest reload rebuilt other instances but not this one, and
+// it has served nothing for retireAfter. It leaves the registry, writes its
+// state once more and its janitor stops. A later New with the same name builds
+// a fresh runtime from the persisted state, exactly as at startup.
+//
+// Both conditions, not either. Not rebuilt alone could be a reload this plugin
+// misread; quiet alone is an instance on a router nobody visits. A runtime that
+// is wrongly retired loses only process-local state (counters, the event ring),
+// and only after a reload that did not rebuild it and ten quiet minutes.
+func (rt *runtime) maybeRetire(s *settings, now time.Time) {
+	if reqs := rt.stats.Requests.Load(); reqs != rt.lastRequests || rt.quietSince.IsZero() {
+		rt.lastRequests = reqs
+		rt.quietSince = now
+	}
+	if s.retireAfter <= 0 {
+		return
+	}
+	mine := rt.lastAcquired.Load()
+	if lastAcquireAny.Load()-mine < int64(reloadBurst) {
+		return
+	}
+	if now.Sub(rt.quietSince) < s.retireAfter {
+		return
+	}
+
+	registryMu.Lock()
+	if registry[rt.name] != rt || rt.lastAcquired.Load() != mine {
+		registryMu.Unlock()
+		return
+	}
+	delete(registry, rt.name)
+	registryMu.Unlock()
+
+	rt.retired.Store(true)
+	if err := rt.store().flush(); err != nil {
+		logWarn(rt.name, "could not persist state", map[string]interface{}{"error": err.Error()})
+	}
+	if rs, ok := rt.store().(*redisStore); ok {
+		rs.client.close()
+	}
+	logInfo(rt.name, "instance retired: the configuration no longer contains it", map[string]interface{}{
+		"lastBuilt": time.Unix(0, mine).UTC(),
+		"quietFor":  now.Sub(rt.quietSince).Truncate(time.Second).String(),
+	})
+}
+
+// claimStateFileLocked gives a file-backed store sole use of its snapshot. Two
+// registered instances writing one path overwrote each other's snapshot on
+// every flush, each losing the other's bans on the next restart. The newcomer
+// wins — after a rename the old instance is the stale one — and the other stops
+// writing, said once. Not a startup error: a New that fails takes the routes
+// using it down, and a rename is an ordinary edit. The caller holds registryMu.
+func claimStateFileLocked(name string, store banStore) {
+	mine, ok := store.(*fileStore)
+	if !ok || !mine.writable {
+		return
+	}
+	for other, rt := range registry {
+		if other == name {
+			continue
+		}
+		theirs, ok := rt.store().(*fileStore)
+		if !ok || theirs.detached.Load() || filepath.Clean(theirs.path) != filepath.Clean(mine.path) {
+			continue
+		}
+		theirs.detached.Store(true)
+		warnOnce(name, "shared-state:"+other, "two instances use the same store.path; this one now writes it and "+
+			"the other has stopped: give each instanceName its own state file",
+			map[string]interface{}{"path": mine.path, "other": other})
+	}
 }
 
 // record adds an event to the ring buffer and forwards it to notifiers.
