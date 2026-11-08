@@ -130,6 +130,12 @@ type runtime struct {
 	// show what the operator saved, but the file configuration is what runs;
 	// the rule editor says so instead of listing them as in force.
 	overridesStale string
+	// overridesUnsaved is set when the last rule save applied here but could
+	// not be persisted or published (a Redis outage, an unwritable snapshot),
+	// so the console can say so instead of "Rules applied". A shared backend
+	// publishes the set on its next refresh and syncOverrides clears this when
+	// it sees the stamps agree.
+	overridesUnsaved string
 	// overridesLoaded records that persisted rule edits have been read from the
 	// store. It is separate from `overrides` being non-nil, because "there were
 	// none saved" and "we have not looked yet" must not be confused.
@@ -702,15 +708,24 @@ func (rt *runtime) tick() {
 	// webhook consumer that adds a firewall rule on "ban" needs the matching
 	// "unban" to take it out again. Recorded straight into the ring, these never
 	// reached a notifier, so only manual unbans were ever delivered.
+	//
+	// With a shared store every replica sweeps the same lapsed entry, so the
+	// event is recorded in every console but notifiers hear it from the one
+	// replica whose claim succeeded.
 	for _, b := range rt.store().sweep(now) {
 		rt.stats.Expired.Add(1)
-		rt.record(Event{
+		e := Event{
 			Kind:     eventUnban,
 			Key:      b.Key,
 			Detector: b.Detector,
 			Actor:    "expiry",
 			Time:     now.UTC(),
-		})
+		}
+		if rt.store().claimExpiry(b.Key) {
+			rt.record(e)
+		} else {
+			rt.events.add(e)
+		}
 	}
 
 	// The shadow list expires on the same schedule as the real one, so a dry run
@@ -814,16 +829,19 @@ func (rt *runtime) setOverrides(ov *Overrides, actor string) error {
 
 	rt.overrides = ov
 	rt.overridesStale = ""
+	rt.overridesUnsaved = ""
 	rt.applySettings(s)
 
 	if err := rt.store().saveOverrides(ov); err != nil {
-		logWarn(rt.name, "rule changes are live but could not be saved; they will be lost on restart",
+		rt.overridesUnsaved = err.Error()
+		logWarn(rt.name, "rule changes are live but could not be saved",
 			map[string]interface{}{"error": err.Error()})
 	}
 	// Persist immediately rather than waiting for the janitor: an operator who
 	// edits a rule and restarts Traefik a second later should not lose the edit.
 	if fs, ok := rt.store().(*fileStore); ok {
 		if err := fs.flush(); err != nil {
+			rt.overridesUnsaved = err.Error()
 			logWarn(rt.name, "could not persist rule changes", map[string]interface{}{"error": err.Error()})
 		}
 	}
@@ -842,25 +860,37 @@ func (rt *runtime) setOverrides(ov *Overrides, actor string) error {
 // rulesView returns what the console needs to render the editor: the effective
 // configuration, what the file says, which sections the console has taken over,
 // and — when a reload invalidated them — why those sections are NOT in force.
-func (rt *runtime) rulesView() (effective, fromFile editableConfig, ov *Overrides, stale string, err error) {
+func (rt *runtime) rulesView() (v rulesViewData, err error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
 	if rt.baseConfig == nil {
-		return effective, fromFile, nil, "", errors.New("no detection middleware has been configured for this instance yet")
+		return v, errors.New("no detection middleware has been configured for this instance yet")
 	}
-	fromFile = editableFrom(rt.baseConfig)
+	v.fromFile = editableFrom(rt.baseConfig)
+	v.overrides = rt.overrides.clone()
+	v.stale = rt.overridesStale
+	v.unsaved = rt.overridesUnsaved
 	if rt.overridesStale != "" {
 		// The saved edits do not apply to the current file configuration, so the
 		// file configuration is what runs. Reporting the layered set as effective
 		// told the operator rules were in force that were not.
-		return fromFile, fromFile, rt.overrides.clone(), rt.overridesStale, nil
+		v.effective = v.fromFile
+		return v, nil
 	}
 	merged, err := applyOverrides(rt.baseConfig, rt.overrides)
 	if err != nil {
-		return effective, fromFile, nil, "", err
+		return v, err
 	}
-	return editableFrom(merged), fromFile, rt.overrides.clone(), "", nil
+	v.effective = editableFrom(merged)
+	return v, nil
+}
+
+// rulesViewData is what rulesView hands the API.
+type rulesViewData struct {
+	effective, fromFile editableConfig
+	overrides           *Overrides
+	stale, unsaved      string
 }
 
 // syncOverrides adopts a rule set changed by another replica.
@@ -875,6 +905,9 @@ func (rt *runtime) syncOverrides() {
 	defer rt.mu.Unlock()
 
 	if sameOverrideStamp(rt.overrides, stored) {
+		// The shared store holds what this replica runs, so a save that could
+		// not be published at the time has been published since.
+		rt.overridesUnsaved = ""
 		return
 	}
 	if err := stored.compatible(); err != nil {
@@ -895,6 +928,7 @@ func (rt *runtime) syncOverrides() {
 	}
 	rt.overrides = stored
 	rt.overridesStale = ""
+	rt.overridesUnsaved = ""
 	rt.applySettings(s)
 	if stored == nil {
 		logInfo(rt.name, "console rule changes were reverted on another replica; the file configuration is back in force", nil)

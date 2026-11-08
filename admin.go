@@ -541,6 +541,9 @@ type RulesResponse struct {
 	// reload brought a file configuration they no longer apply to. Effective
 	// then equals FromFile, and saving again from the console replaces them.
 	Stale string `json:"stale,omitempty"`
+	// Unsaved explains why the edits in force here could not be persisted or
+	// published: they apply on this replica, for this process, until they can.
+	Unsaved string `json:"unsaved,omitempty"`
 }
 
 type builtInCounts struct {
@@ -550,27 +553,28 @@ type builtInCounts struct {
 }
 
 func (rt *runtime) writeRules(rw http.ResponseWriter, status int) {
-	effective, fromFile, ov, stale, err := rt.rulesView()
+	v, err := rt.rulesView()
 	if err != nil {
 		writeJSON(rw, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 		return
 	}
 
 	payload := RulesResponse{
-		Effective:  effective,
-		FromFile:   fromFile,
-		Overridden: ov.sections(),
-		Stale:      stale,
+		Effective:  v.effective,
+		FromFile:   v.fromFile,
+		Overridden: v.overrides.sections(),
+		Stale:      v.stale,
+		Unsaved:    v.unsaved,
 		BuiltIn: builtInCounts{
 			Signatures: len(defaultSignatures),
 			UserAgents: len(defaultUserAgents),
 			Payload:    len(defaultPayloadPatterns),
 		},
 	}
-	if ov != nil {
-		updated := ov.Updated
+	if v.overrides != nil {
+		updated := v.overrides.Updated
 		payload.Updated = &updated
-		payload.Actor = ov.Actor
+		payload.Actor = v.overrides.Actor
 	}
 	writeJSON(rw, status, payload)
 }

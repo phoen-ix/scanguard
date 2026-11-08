@@ -85,6 +85,11 @@ type banStore interface {
 	// setMax applies store.maxEntries in place. A change to the cap used to
 	// rebuild the whole backend and re-put every ban into the new one.
 	setMax(max int)
+	// claimExpiry reports whether THIS process should announce that the ban
+	// for key has expired. A local backend always says yes; a shared one lets
+	// one replica through, so an expiry is one notification rather than one
+	// per replica.
+	claimExpiry(key string) bool
 }
 
 // newBanStore builds the configured backend.
@@ -153,6 +158,9 @@ func (m *memStore) backend() string { return "memory" }
 
 // refresh is a no-op: local state has nothing to re-read.
 func (m *memStore) refresh() error { return nil }
+
+// claimExpiry: nobody else can announce a local store's expiries.
+func (m *memStore) claimExpiry(string) bool { return true }
 
 // setKeyWidths tells the store how wide the detector's own ban keys are, so it
 // can tell an operator's range ban apart from an ordinary one. Called on every
@@ -454,6 +462,13 @@ func (m *memStore) restore(bans []Ban, now time.Time) int {
 // whole. Hit counters survive the swap for bans that persist across it, because
 // hits are per-replica and never published to the shared store.
 func (m *memStore) replaceAll(bans []Ban, now time.Time) int {
+	return m.replaceAllKeeping(bans, now, nil)
+}
+
+// replaceAllKeeping is replaceAll plus a rule for local entries the new list
+// does not contain: those for which keep says true stay (a shared store has not
+// seen them yet, see redisStore.refresh), the rest go.
+func (m *memStore) replaceAllKeeping(bans []Ban, now time.Time, keep func(*Ban) bool) int {
 	fresh := make(map[netip.Prefix]*Ban, len(bans))
 	for i := range bans {
 		b := bans[i]
@@ -473,6 +488,16 @@ func (m *memStore) replaceAll(bans []Ban, now time.Time) int {
 	for key, nb := range fresh {
 		if old, ok := m.bans[key]; ok && old.Hits > nb.Hits {
 			nb.Hits = old.Hits
+		}
+	}
+	if keep != nil {
+		for key, old := range m.bans {
+			if _, replaced := fresh[key]; replaced || !old.active(now) {
+				continue
+			}
+			if keep(old) {
+				fresh[key] = old
+			}
 		}
 	}
 	m.bans = fresh
