@@ -1010,6 +1010,7 @@ func geoFingerprint(s *settings) string {
 		"enabled":  strconv.FormatBool(s.geoEnabled),
 		"provider": s.geoProvider,
 		"ttl":      s.geoCacheTTL.String(),
+		"timeout":  s.geoTimeout.String(),
 		"endpoint": s.geoEndpoint,
 	})
 }

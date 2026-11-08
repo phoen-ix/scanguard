@@ -45,7 +45,16 @@ type Overrides struct {
 // file configuration runs; see runtime.loadStoredOverridesLocked.
 //
 // 2: detectors.uaRotation and enforcement.subnet.
-const overridesVersion = 2
+// 3: detectors.userAgent.crawlerPatterns and enforcement.rejectContentType.
+//
+// A set one version behind is MIGRATED rather than refused when the fields
+// added since can be taken from the file configuration, which is exactly what
+// the older build ran with: see applyOverrides. Anything older is refused.
+const overridesVersion = 3
+
+// oldestMigratableVersion is the oldest saved schema applyOverrides can bring
+// forward.
+const oldestMigratableVersion = 2
 
 // compatible reports whether this override set was written against the editable
 // schema this build understands.
@@ -53,8 +62,9 @@ func (o *Overrides) compatible() error {
 	if o == nil {
 		return nil
 	}
-	if o.Version != overridesVersion {
-		return fmt.Errorf("rule overrides carry schema version %d; this build writes version %d", o.Version, overridesVersion)
+	if o.Version < oldestMigratableVersion || o.Version > overridesVersion {
+		return fmt.Errorf("rule overrides carry schema version %d; this build writes version %d and reads back to %d",
+			o.Version, overridesVersion, oldestMigratableVersion)
 	}
 	return nil
 }
@@ -198,12 +208,20 @@ func applyOverrides(base *Config, ov *Overrides) (*Config, error) {
 	}
 	if ov.Detectors != nil {
 		out.Detectors = *ov.Detectors
+		if ov.Version < 3 {
+			// Saved before the field existed: keep what the file says, which is
+			// what the build that saved this set was running.
+			out.Detectors.UserAgent.CrawlerPatterns = base.Detectors.UserAgent.CrawlerPatterns
+		}
 	}
 	if ov.Allowlist != nil {
 		out.Allowlist = *ov.Allowlist
 	}
 	if ov.Enforcement != nil {
 		out.Enforcement = *ov.Enforcement
+		if ov.Version < 3 {
+			out.Enforcement.RejectContentType = base.Enforcement.RejectContentType
+		}
 	}
 	return out, nil
 }

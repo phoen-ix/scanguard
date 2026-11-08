@@ -1098,7 +1098,9 @@ var RULE_SCHEMA = [
     { p: "detectors.userAgent.patterns", t: "lines", l: "Extra patterns" },
     { p: "detectors.userAgent.crawlers", t: "select", l: "SEO crawlers",
       opts: ["ignore", "ban", "block", "exempt"],
-      h: "MJ12bot, AhrefsBot, SemrushBot and friends — crawlers, not scanners. ignore: no opinion. ban: refuse them AND write a ban, which applies on every router this instance protects. block: refuse them on the router they hit, writing nothing shared — prefer this when the instance also protects a site you want crawled. exempt: never ban them by any detector, and forgive an existing ban — convenient for a content site, but a User-Agent is trivially forged, so it is a free pass past everything. Search engines are never in this list. NOTE: a router may override this in its own middleware definition; this value is the fallback for those that do not." }
+      h: "MJ12bot, AhrefsBot, SemrushBot and friends — crawlers, not scanners. ignore: no opinion. ban: refuse them AND write a ban, which applies on every router this instance protects. block: refuse them on the router they hit, writing nothing shared — prefer this when the instance also protects a site you want crawled. exempt: never ban them by any detector, and forgive an existing ban — convenient for a content site, but a User-Agent is trivially forged, so it is a free pass past everything. Search engines are never in this list. NOTE: a router may override this in its own middleware definition; this value is the fallback for those that do not." },
+    { p: "detectors.userAgent.crawlerPatterns", t: "lines", l: "Extra crawlers",
+      h: "Regular expressions added to the built-in crawler list, e.g. gptbot or claudebot. The SEO crawlers policy above applies to them exactly as to the built-ins." }
   ]},
   { title: "Distinct failing paths", fields: [
     { p: "detectors.badPaths.enabled", t: "bool", l: "Enabled" },
@@ -1146,6 +1148,8 @@ var RULE_SCHEMA = [
     { p: "enforcement.rejectStatus", t: "int", l: "Reject status",
       h: "200-599. 403 is honest; 404 hides that the middleware exists." },
     { p: "enforcement.rejectBody", t: "text", l: "Reject body" },
+    { p: "enforcement.rejectContentType", t: "text", l: "Reject content type",
+      h: "Content-Type of the rejection, e.g. text/html; charset=utf-8 for an HTML reject body." },
     { p: "enforcement.escalation", t: "strs", l: "Ban ladder",
       h: "Comma separated durations, one rung per repeat offence. 0 means permanent." },
     { p: "enforcement.decay", t: "text", l: "Offence decay",

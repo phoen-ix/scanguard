@@ -39,6 +39,39 @@ type fileStore struct {
 	// that must degrade to in-memory operation, not take the whole config down.
 	writable bool
 	writeMu  sync.Mutex
+
+	// pendingMu guards pending, the one deferred flush scheduleFlush may have
+	// outstanding at a time.
+	pendingMu sync.Mutex
+	pending   bool
+}
+
+// scheduleFlush writes the snapshot within delay, folding every change made in
+// the meantime into one write; delay 0 writes now. The deferred write runs on a
+// timer goroutine, so it carries its own recover.
+func (f *fileStore) scheduleFlush(delay time.Duration) {
+	if delay <= 0 {
+		if err := f.flush(); err != nil {
+			logWarn(f.instance, "could not persist state", map[string]interface{}{"error": err.Error()})
+		}
+		return
+	}
+	f.pendingMu.Lock()
+	if f.pending {
+		f.pendingMu.Unlock()
+		return
+	}
+	f.pending = true
+	f.pendingMu.Unlock()
+	time.AfterFunc(delay, func() {
+		defer recoverPanic(f.instance, "snapshot flush")
+		f.pendingMu.Lock()
+		f.pending = false
+		f.pendingMu.Unlock()
+		if err := f.flush(); err != nil {
+			logWarn(f.instance, "could not persist state", map[string]interface{}{"error": err.Error()})
+		}
+	})
 }
 
 func newFileStore(s *settings) (*fileStore, error) {

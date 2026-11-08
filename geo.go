@@ -35,7 +35,15 @@ const ipAPIBase = "http://ip-api.com"
 type geoEntry struct {
 	country string
 	fetched time.Time
+	// failed marks a negative-cache entry: the lookup did not produce a
+	// country, and the address is not asked about again for geoFailureTTL.
+	// Without it every listing of the ban table re-queued the same failing
+	// lookups against a 45-a-minute limit.
+	failed bool
 }
+
+// geoFailureTTL is how long a failed lookup is remembered.
+const geoFailureTTL = time.Hour
 
 // geoInflightMax bounds concurrent lookups. The free ip-api endpoint rate-limits
 // at 45 requests a minute, and hammering it past that gets the whole host banned
@@ -47,7 +55,7 @@ func newGeoCache(s *settings) *geoCache {
 		enabled:  s.geoEnabled,
 		ttl:      s.geoCacheTTL,
 		instance: s.instanceName,
-		client:   &http.Client{Timeout: 3 * time.Second},
+		client:   &http.Client{Timeout: s.geoTimeout},
 		entries:  make(map[string]geoEntry),
 		inflight: make(map[string]struct{}),
 		base:     s.geoEndpoint,
@@ -64,8 +72,14 @@ func (g *geoCache) lookup(ip string) string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	if entry, ok := g.entries[ip]; ok && time.Since(entry.fetched) < g.ttl {
-		return entry.country
+	if entry, ok := g.entries[ip]; ok {
+		ttl := g.ttl
+		if entry.failed {
+			ttl = geoFailureTTL
+		}
+		if time.Since(entry.fetched) < ttl {
+			return entry.country
+		}
 	}
 	if _, busy := g.inflight[ip]; busy || len(g.inflight) >= geoInflightMax {
 		return ""
@@ -89,10 +103,12 @@ func (g *geoCache) fetch(ip string) {
 	endpoint := g.base + "/json/" + url.PathEscape(ip) + "?fields=status,countryCode"
 	resp, err := g.client.Get(endpoint)
 	if err != nil {
+		g.rememberFailure(ip)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
+		g.rememberFailure(ip)
 		return
 	}
 
@@ -100,15 +116,21 @@ func (g *geoCache) fetch(ip string) {
 		Status      string `json:"status"`
 		CountryCode string `json:"countryCode"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return
-	}
-	if payload.Status != "success" {
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil || payload.Status != "success" {
+		// "fail" is ip-api's answer for private and reserved addresses: it
+		// will not change, so asking again every poll is pure waste.
+		g.rememberFailure(ip)
 		return
 	}
 
 	g.mu.Lock()
 	g.entries[ip] = geoEntry{country: payload.CountryCode, fetched: time.Now()}
+	g.mu.Unlock()
+}
+
+func (g *geoCache) rememberFailure(ip string) {
+	g.mu.Lock()
+	g.entries[ip] = geoEntry{fetched: time.Now(), failed: true}
 	g.mu.Unlock()
 }
 
@@ -122,7 +144,11 @@ func (g *geoCache) sweep(now time.Time) {
 	defer g.mu.Unlock()
 
 	for ip, entry := range g.entries {
-		if now.Sub(entry.fetched) > g.ttl {
+		ttl := g.ttl
+		if entry.failed {
+			ttl = geoFailureTTL
+		}
+		if now.Sub(entry.fetched) > ttl {
 			delete(g.entries, ip)
 		}
 	}

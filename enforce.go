@@ -216,13 +216,12 @@ func (rt *runtime) putBan(s *settings, ban Ban) bool {
 		return false
 	}
 	rt.stats.BansIssued.Add(1)
-	// Persist immediately on a ban-list change. Counter updates deliberately do
-	// not trigger a write — rewriting the snapshot on every counter bump under a
-	// 404 flood would burn through IOPS or an SD card.
+	// Persist on a ban-list change, batched by store.flushDebounce: every write
+	// marshals the whole table, and a scan bans one source after another.
+	// Counter updates never trigger a write — rewriting the snapshot on every
+	// counter bump under a 404 flood would burn through IOPS or an SD card.
 	if fs, ok := rt.store().(*fileStore); ok {
-		if err := fs.flush(); err != nil {
-			logWarn(rt.name, "could not persist state", map[string]interface{}{"error": err.Error()})
-		}
+		fs.scheduleFlush(s.flushDebounce)
 	}
 	return true
 }
@@ -320,7 +319,7 @@ func (rt *runtime) reject(s *settings, rw http.ResponseWriter, req *http.Request
 		rt.tarpit(s, req)
 	}
 
-	rw.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	rw.Header().Set("Content-Type", s.rejectType)
 	// Rejections are not something a cache should ever remember on the client's behalf.
 	rw.Header().Set("Cache-Control", "no-store")
 	rw.WriteHeader(s.rejectStatus)

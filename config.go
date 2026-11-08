@@ -54,6 +54,13 @@ type StoreConfig struct {
 	// never trigger a write, or a 404 flood would rewrite the file thousands of
 	// times a second.
 	SnapshotInterval string `json:"snapshotInterval,omitempty"`
+	// FlushDebounce batches the file backend's change-triggered snapshot
+	// writes: bans within this long of each other share one write. Each write
+	// marshals the whole ban table (127 ms at 50,000 bans), and a scan issues a
+	// ban per source. "0" writes on every ban. A crash inside the window loses
+	// those bans; each costs one re-detection. Manual bans, unbans and rule
+	// edits are still written at once.
+	FlushDebounce string `json:"flushDebounce,omitempty"`
 	// FailOpen decides what happens when the backend is unusable — Redis
 	// unreachable, or the file backend's directory unwritable and its snapshot
 	// unreadable. True carries on without persistence and logs a warning; false
@@ -135,6 +142,11 @@ type UserAgentConfig struct {
 	UseDefaults bool     `json:"useDefaults,omitempty"`
 	Patterns    []string `json:"patterns,omitempty"`
 	BanEmptyUA  bool     `json:"banEmptyUA,omitempty"`
+	// CrawlerPatterns extends defaultCrawlers with your own (regular
+	// expressions, case-insensitive) — GPTBot, ClaudeBot, whatever you want the
+	// crawler policy below to cover. They behave exactly like the built-ins under
+	// every policy.
+	CrawlerPatterns []string `json:"crawlerPatterns,omitempty"`
 	// Crawlers decides what happens to the commercial SEO and backlink crawlers in
 	// defaultCrawlers — MJ12bot, AhrefsBot, SemrushBot and friends. They are not
 	// scanners, so the default is to have no opinion about them at all.
@@ -271,6 +283,9 @@ type EnforcementConfig struct {
 	// existence from the scanner; 403 is honest.
 	RejectStatus int    `json:"rejectStatus,omitempty"`
 	RejectBody   string `json:"rejectBody,omitempty"`
+	// RejectContentType is the Content-Type of the rejection, for a rejectBody
+	// that is HTML or JSON rather than text.
+	RejectContentType string `json:"rejectContentType,omitempty"`
 	// Escalation is the ban-duration ladder, applied by offence count.
 	// A "0" entry means permanent.
 	Escalation []string `json:"escalation,omitempty"`
@@ -362,6 +377,8 @@ type GeoConfig struct {
 	Enabled  bool   `json:"enabled,omitempty"`
 	Provider string `json:"provider,omitempty"`
 	CacheTTL string `json:"cacheTTL,omitempty"`
+	// Timeout bounds one lookup.
+	Timeout string `json:"timeout,omitempty"`
 	// Endpoint is the lookup root: http://ip-api.com by default, the pro
 	// endpoint or a self-hosted compatible service if you have one.
 	Endpoint string `json:"endpoint,omitempty"`
@@ -421,6 +438,7 @@ func CreateConfig() *Config {
 			Backend:          "memory",
 			Path:             "/var/lib/scanguard/state.json",
 			SnapshotInterval: "30s",
+			FlushDebounce:    "1s",
 			FailOpen:         true,
 			MaxEntries:       50000,
 			Redis: RedisConfig{
@@ -469,8 +487,9 @@ func CreateConfig() *Config {
 			UARotation: UARotationConfig{Enabled: false, Capacity: 8, Leak: "60s"},
 		},
 		Enforcement: EnforcementConfig{
-			RejectStatus: 403,
-			Decay:        "24h",
+			RejectStatus:      403,
+			RejectContentType: defaultRejectContentType,
+			Decay:             "24h",
 			Tarpit: TarpitConfig{
 				Enabled:       false,
 				Delay:         "3s",
@@ -491,6 +510,7 @@ func CreateConfig() *Config {
 		Geo: GeoConfig{
 			Enabled:  false,
 			Provider: "ip-api",
+			Timeout:  "3s",
 			CacheTTL: "168h",
 			Endpoint: ipAPIBase,
 		},
@@ -539,6 +559,10 @@ const permanent time.Duration = 0
 // held open for the whole delay; tens of thousands of them is the self-inflicted
 // denial of service the cap exists to prevent, not a setting anyone needs.
 const maxTarpitConcurrent = 10000
+
+// defaultRejectContentType is what a rejection is served as unless
+// enforcement.rejectContentType says otherwise.
+const defaultRejectContentType = "text/plain; charset=utf-8"
 
 // maxPayloadBodyBytes caps detectors.payload.maxBodyBytes. peekBody buffers up
 // to this much of every request body with a declared length inside the proxy,
@@ -627,6 +651,7 @@ type settings struct {
 	storeBackend     string
 	storePath        string
 	snapshotInterval time.Duration
+	flushDebounce    time.Duration
 	failOpen         bool
 	maxEntries       int
 	redis            RedisConfig
@@ -664,6 +689,7 @@ type settings struct {
 
 	rejectStatus  int
 	rejectBody    string
+	rejectType    string
 	escalation    []time.Duration
 	decay         time.Duration
 	tarpitEnabled bool
@@ -681,6 +707,7 @@ type settings struct {
 	geoProvider string
 	geoCacheTTL time.Duration
 	geoEndpoint string
+	geoTimeout  time.Duration
 
 	// uaCrawlers is the instance-wide detectors.userAgent.crawlers policy: the
 	// fallback for a middleware definition that does not state one of its own.
@@ -780,6 +807,14 @@ func (c *Config) parseStore(s *settings) error {
 	var err error
 	if s.snapshotInterval, err = parseDuration("store.snapshotInterval", c.Store.SnapshotInterval, 30*time.Second); err != nil {
 		return err
+	}
+	if s.flushDebounce, err = parseDuration("store.flushDebounce", c.Store.FlushDebounce, time.Second); err != nil {
+		return err
+	}
+	if s.flushDebounce > time.Minute {
+		// The janitor writes at least every snapshotInterval anyway; a longer
+		// window is a larger loss on a crash for nothing.
+		return fmt.Errorf("store.flushDebounce: %s is above the ceiling of 1m", c.Store.FlushDebounce)
 	}
 	if s.snapshotInterval == permanent {
 		s.snapshotInterval = 30 * time.Second
@@ -921,7 +956,8 @@ func (c *Config) parseDetectors(s *settings) error {
 	// reports detector "crawler" rather than "user-agent", and so the scanner
 	// patterns are still tested first — defaultUserAgents has \bsemrushbot-ba\b,
 	// which must keep reporting as a scanner and not as the crawler \bsemrushbot\b.
-	if s.crawlerMatcher, err = newMatcher("detectors.userAgent.crawlers", defaultCrawlers); err != nil {
+	crawlerPatterns := append(append([]string{}, defaultCrawlers...), d.UserAgent.CrawlerPatterns...)
+	if s.crawlerMatcher, err = newMatcher("detectors.userAgent.crawlerPatterns", crawlerPatterns); err != nil {
 		return err
 	}
 	s.uaBanEmpty = d.UserAgent.BanEmptyUA
@@ -1025,6 +1061,13 @@ func (c *Config) parseEnforcement(s *settings) error {
 		return fmt.Errorf("enforcement.rejectStatus: %d is not a final HTTP status code (200-599)", s.rejectStatus)
 	}
 	s.rejectBody = c.Enforcement.RejectBody
+	s.rejectType = strings.TrimSpace(c.Enforcement.RejectContentType)
+	if s.rejectType == "" {
+		s.rejectType = defaultRejectContentType
+	}
+	if strings.ContainsAny(s.rejectType, "\r\n") {
+		return errors.New("enforcement.rejectContentType must be a single header value")
+	}
 
 	raw := c.Enforcement.Escalation
 	if len(raw) == 0 {
@@ -1181,6 +1224,12 @@ func (c *Config) parseNotify(s *settings) error {
 	if s.geoCacheTTL == permanent {
 		// Same failure as above, against ip-api's 45 lookups a minute.
 		return errors.New("geo.cacheTTL must be a positive duration")
+	}
+	if s.geoTimeout, err = parseDuration("geo.timeout", c.Geo.Timeout, 3*time.Second); err != nil {
+		return err
+	}
+	if s.geoTimeout == permanent {
+		return errors.New("geo.timeout must be a positive duration")
 	}
 	s.geoEndpoint = strings.TrimRight(strings.TrimSpace(c.Geo.Endpoint), "/")
 	if s.geoEndpoint == "" {
