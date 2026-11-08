@@ -219,6 +219,55 @@ func TestResponseObserverCapturesStatus(t *testing.T) {
 	if obs.status != 200 {
 		t.Errorf("an implicit write must record 200, got %d", obs.status)
 	}
+
+	// A 1xx is interim: Go's server forwards it and still takes the final status,
+	// and httputil.ReverseProxy relays every 1xx a backend sends. Latching it
+	// made a backend that sends "103 Early Hints" invisible to badPaths and
+	// bruteForce on that route. 101 is final and is recorded.
+	rec = httptest.NewRecorder()
+	obs = newResponseObserver(rec, "test")
+	obs.WriteHeader(http.StatusEarlyHints)
+	obs.WriteHeader(404)
+	if obs.status != 404 {
+		t.Errorf("after 103 then 404 the observer holds %d, want 404", obs.status)
+	}
+	rec = httptest.NewRecorder()
+	obs = newResponseObserver(rec, "test")
+	obs.WriteHeader(http.StatusSwitchingProtocols)
+	if obs.status != 101 {
+		t.Errorf("101 is final but was not recorded: %d", obs.status)
+	}
+}
+
+// The handler-level consequence of the 1xx latch: a route whose backend sends
+// Early Hints before every answer used to be a route the response detectors
+// could not see.
+func TestEarlyHintsDoNotBlindTheResponseDetectors(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.InstanceName = t.Name()
+	cfg.Detectors.Signatures.Enabled = false
+	cfg.Detectors.BadPaths.Capacity = 3
+	cfg.Detectors.BadPaths.Leak = "60s"
+	cfg.Detectors.BadPaths.Statuses = []int{404}
+	hinting := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		rw.Header().Add("Link", "</app.css>; rel=preload; as=style")
+		rw.WriteHeader(http.StatusEarlyHints)
+		if strings.HasPrefix(req.URL.Path, "/missing/") {
+			rw.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = rw.Write([]byte("ok"))
+	})
+	h, err := New(context.Background(), hinting, cfg, "scanguard@test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		send(h, "GET", fmt.Sprintf("/missing/%d", i), "203.0.113.180:1", nil)
+	}
+	if got := send(h, "GET", "/", "203.0.113.180:1", nil).Code; got != 403 {
+		t.Fatalf("got %d after three 404s behind a 103, want 403", got)
+	}
 }
 
 func TestAllowlistedSourceSurvivesAnObviousProbe(t *testing.T) {
@@ -349,6 +398,14 @@ func TestExemptReportsWhichRuleMatched(t *testing.T) {
 		{name: "allowlisted path", remote: "203.0.113.5:1", path: "/health", want: exemptPath},
 		{name: "allowlisted ua", remote: "203.0.113.5:1", path: "/", ua: "uptime-robot/1.0",
 			want: exemptUserAgent},
+		// Both rules match: the SOURCE rule wins. ServeHTTP treats only the path
+		// rule as "still subject to the ban list", so reporting the path here
+		// refused a banned-but-allowlisted monitor on exactly the paths it
+		// monitors.
+		{name: "allowlisted ua on an allowlisted path", remote: "203.0.113.5:1", path: "/health",
+			ua: "uptime-robot/1.0", want: exemptUserAgent},
+		{name: "allowlisted cidr on an allowlisted path", remote: "10.1.0.5:1", path: "/health",
+			want: exemptCIDR},
 	} {
 		req, res := mk(tc.remote, tc.path, tc.ua, tc.hdr)
 		got, ok := s.exempt(req, res)
@@ -364,6 +421,83 @@ func TestExemptReportsWhichRuleMatched(t *testing.T) {
 	req, res := mk("203.0.113.9:1", "/", "curl/8", nil)
 	if reason, ok := s.exempt(req, res); ok {
 		t.Errorf("an ordinary request was exempt with reason %q", reason)
+	}
+
+	// The crawler policy is a source rule too, so it beats the path rule in the
+	// per-router check and forgives a ban on an allowlisted path like anywhere else.
+	req, res = mk("203.0.113.9:1", "/health", crawlerUA()["User-Agent"], nil)
+	if reason, _ := s.exemptFor(req, res, crawlersExempt); reason != exemptCrawler {
+		t.Errorf("an exempt crawler on an allowlisted path was reported as %q, want %q", reason, exemptCrawler)
+	}
+}
+
+// What the ordering above means for a request: a banned source whose user-agent
+// is allowlisted is served on an allowlisted path as well, not refused there.
+func TestAllowlistedUserAgentBypassesABanOnAnAllowlistedPath(t *testing.T) {
+	h := build(t, func(c *Config) {
+		c.Allowlist.UserAgents = []string{"uptime-robot"}
+		c.Allowlist.Paths = []string{"^/health$"}
+	})
+	if got := send(h, "GET", "/wp-login.php", "203.0.113.181:1", nil).Code; got != 403 {
+		t.Fatalf("probe returned %d, want 403", got)
+	}
+	monitor := map[string]string{"User-Agent": "uptime-robot/2.0"}
+	if got := send(h, "GET", "/", "203.0.113.181:1", monitor).Code; got != 200 {
+		t.Fatalf("the allowlisted user-agent was refused on /, got %d", got)
+	}
+	if got := send(h, "GET", "/health", "203.0.113.181:1", monitor).Code; got != 200 {
+		t.Errorf("the allowlisted user-agent was refused on the allowlisted path, got %d", got)
+	}
+	// Without the user-agent the ban still holds there: the path rule is not a
+	// way around a ban (TestAllowlistedPathIsNotAWayAroundABan).
+	if got := send(h, "GET", "/health", "203.0.113.181:1", nil).Code; got != 403 {
+		t.Errorf("a banned source without the allowlisted user-agent got %d on the allowlisted path, want 403", got)
+	}
+}
+
+// Traefik's StripPrefix and ReplacePath rewrite the same *http.Request in place,
+// and [scanguard, strip-prefix] is an ordinary chain. The response detectors and
+// the ban record used to read req.URL.Path after the backend had answered, so
+// bruteForce.paths was matched against the stripped path and never fired, and
+// the ban named a path the client never sent.
+func TestResponseDetectorsSeeThePathTheClientSent(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.InstanceName = t.Name()
+	cfg.Detectors.Signatures.Enabled = false
+	cfg.Detectors.BadPaths.Enabled = false
+	cfg.Detectors.BruteForce = BruteForceConfig{Enabled: true, Capacity: 2, Window: "60s", Paths: []string{"^/app/login$"}}
+	strip := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		// What Traefik's StripPrefix does: no request copy.
+		req.URL.Path = strings.TrimPrefix(req.URL.Path, "/app")
+		req.Host = "backend.internal"
+		okBackend().ServeHTTP(rw, req)
+	})
+	h, err := New(context.Background(), strip, cfg, "scanguard@test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rt := registry[t.Name()]
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest("POST", "http://shop.example.com/app/login", nil)
+		req.RemoteAddr = "203.0.113.182:1"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != 401 {
+			t.Fatalf("login attempt %d returned %d, want the backend's 401", i+1, rec.Code)
+		}
+	}
+	if got := send(h, "GET", "/app/", "203.0.113.182:1", nil).Code; got != 403 {
+		t.Fatalf("got %d after two failed logins on a stripped route, want 403", got)
+	}
+	b, ok := rt.store().get(key("203.0.113.182/32"), time.Now())
+	if !ok || b.LastPath != "/app/login" {
+		t.Errorf("ban = %+v (found %v), want lastPath /app/login as the client sent it", b, ok)
+	}
+	for _, e := range rt.events.recent(0) {
+		if e.Kind == eventBan && (e.Path != "/app/login" || e.Host != "shop.example.com") {
+			t.Errorf("ban event names %s on %s, want /app/login on shop.example.com", e.Path, e.Host)
+		}
 	}
 }
 
@@ -1910,13 +2044,23 @@ func TestABanMissingFromTheListIsReissued(t *testing.T) {
 	}
 }
 
-// The burst guard must survive the re-issue: sixteen concurrent probes from one
-// fresh source are still one ban and one event. The re-issue path consults
-// banRecorded before the list, and that flag is set only after the put, so a
-// sibling request in the burst sees "not recorded yet" and stands down.
+// The burst guard must survive the re-issue. A source whose ban has gone from
+// the list comes back with sixteen concurrent probes: every one of them finds
+// the ladder saying "banned", banRecorded saying "written", and the list saying
+// "nothing here", so without a claim each wrote its own copy of the ban and the
+// re-issue was sixteen events. The first to claim re-issues; the rest stand
+// down exactly as a first-time burst does.
 func TestReissueDoesNotReopenTheBurstRace(t *testing.T) {
 	h := build(t, nil)
 	rt := registry[t.Name()]
+	key := netip.MustParsePrefix("203.0.113.171/32")
+
+	if got := send(h, "GET", "/wp-login.php", "203.0.113.171:1", nil).Code; got != 403 {
+		t.Fatalf("probe returned %d, want 403", got)
+	}
+	if existed, _ := rt.store().delete(key); !existed {
+		t.Fatal("the probe did not write a ban")
+	}
 
 	const conns = 16
 	var wg sync.WaitGroup
@@ -1932,14 +2076,17 @@ func TestReissueDoesNotReopenTheBurstRace(t *testing.T) {
 	close(start)
 	wg.Wait()
 
+	if n := len(rt.store().list(time.Now())); n != 1 {
+		t.Errorf("the re-issue left %d ban records, want 1", n)
+	}
 	var banEvents int
 	for _, e := range rt.events.recent(0) {
 		if e.Kind == eventBan {
 			banEvents++
 		}
 	}
-	if banEvents != 1 {
-		t.Errorf("a %d-connection burst emitted %d ban events, want 1", conns, banEvents)
+	if banEvents != 2 {
+		t.Errorf("%d ban events after the original and a %d-connection re-issue burst, want 2", banEvents, conns)
 	}
 }
 

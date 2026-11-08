@@ -42,6 +42,17 @@ func newResponseObserver(rw http.ResponseWriter, instance string) *responseObser
 }
 
 func (o *responseObserver) WriteHeader(code int) {
+	// A 1xx is an interim response, not the answer. Go's server forwards it and
+	// still accepts the final status afterwards, and httputil.ReverseProxy relays
+	// every 1xx a backend sends through WriteHeader, so a backend emitting
+	// "103 Early Hints" used to freeze this observer at 103: every 404 and 401 on
+	// that route was invisible to badPaths and bruteForce. 101 is final — the
+	// connection changes protocol — and upgrade requests bypass the wrapper
+	// anyway, so it is recorded like any other status.
+	if code >= 100 && code <= 199 && code != http.StatusSwitchingProtocols {
+		o.ResponseWriter.WriteHeader(code)
+		return
+	}
 	if !o.written {
 		o.status = code
 		o.written = true

@@ -109,11 +109,15 @@ func (l *eventLog) add(e Event) Event {
 		e.Time = time.Now().UTC()
 	}
 	// Attacker-controlled strings are truncated here rather than at render time, so
-	// a multi-megabyte URI cannot bloat the ring buffer.
+	// a multi-megabyte URI cannot bloat the ring buffer. The method too: Go's
+	// server checks it for token characters, not length, and bounds the request
+	// line only by MaxHeaderBytes, so a banned source could put a megabyte per
+	// reject event into a ring that exists to bound memory.
 	e.Path = truncate(e.Path, 512)
 	e.UA = truncate(e.UA, 256)
 	e.Host = truncate(e.Host, 253)
 	e.Rule = truncate(e.Rule, 256)
+	e.Method = truncate(e.Method, maxMethodLen)
 
 	l.all.add(e)
 	if e.Kind != eventReject {
@@ -211,6 +215,11 @@ func (r *eventRing) resized(size int) eventRing {
 	}
 	return out
 }
+
+// maxMethodLen bounds a recorded request method. The longest registered
+// methods (BASELINE-CONTROL, VERSION-CONTROL) are 16 characters; anything
+// longer is a scanner being creative.
+const maxMethodLen = 20
 
 func truncate(s string, max int) string {
 	if len(s) <= max {

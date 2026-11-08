@@ -39,8 +39,61 @@ func (rt *runtime) activeBan(s *settings, key netip.Prefix, now time.Time) (Ban,
 // UI shows it, notifications fire with DryRun set. That is what makes dry-run
 // useful for tuning rules on live traffic — you see exactly what would have been
 // banned without banning anybody.
-func (rt *runtime) applyBan(s *settings, res resolution, det *detection, req *http.Request, now time.Time) Ban {
-	offence, fresh := rt.counters.recordOffence(res.key, now, s.decay, s.banDuration)
+func (rt *runtime) applyBan(s *settings, res resolution, det *detection, f requestFacts, now time.Time) Ban {
+	ban, issued := rt.issueBan(s, res.key, res.client.String(), det, f, now)
+	if !issued {
+		return ban
+	}
+
+	// host, method and ua because the access log may have no Host column: without
+	// them a ban on a multi-site Traefik could not be traced to the site it hit.
+	logWarn(rt.name, "banned source", map[string]interface{}{
+		"key":      ban.Key,
+		"client":   res.client.String(),
+		"detector": det.detector,
+		"rule":     det.rule,
+		"host":     truncate(f.host, 253),
+		"method":   truncate(f.method, maxMethodLen),
+		"path":     truncate(f.path, 512),
+		"ua":       ban.LastUA,
+		"offence":  ban.Offences,
+		"duration": ban.durationLabel(),
+		"dryRun":   s.dryRun,
+		"ipSource": res.source,
+	})
+
+	if s.subnet.Enabled {
+		rangeKey := banKey(res.client, s.subnet.IPv4Prefix, s.subnet.IPv6Prefix)
+		if n, trip := rt.counters.noteSubnetBan(rangeKey, res.key, now, s.subnet.Threshold, s.subnetWindow, s.dryRun); trip {
+			rt.applySubnetBan(s, rangeKey, n, res, f, now)
+		}
+	}
+	return ban
+}
+
+// durationLabel renders the length of the ban as the event log and the log
+// line show it.
+func (b Ban) durationLabel() string {
+	if b.Permanent() {
+		return formatDuration(permanent)
+	}
+	return formatDuration(b.Expires.Sub(b.Created))
+}
+
+// issueBan is the one place a detection becomes a ban: it advances the ladder,
+// writes the ban at the rung reached, counts it and records the event. applyBan
+// (a source) and applySubnetBan (a range) both go through it; they used to carry
+// two copies of this sequence, and the copies had drifted apart.
+//
+// client is the address the ban is for, or "" for a range: a range has no single
+// client, so its event carries none and reportAbuse skips it — the member whose
+// ban tripped the range has already been reported on its own.
+//
+// issued is false when nothing was written: the ladder says the source is still
+// inside its last ban and either a sibling request is writing that ban right
+// now, or it is in the list already (returned as ban).
+func (rt *runtime) issueBan(s *settings, key netip.Prefix, client string, det *detection, f requestFacts, now time.Time) (ban Ban, issued bool) {
+	offence, fresh := rt.counters.recordOffence(key, now, s.decay, s.banDuration)
 	if !fresh {
 		// The ladder says this source is still inside its last ban. Two cases.
 		//
@@ -50,11 +103,11 @@ func (rt *runtime) applyBan(s *settings, res resolution, det *detection, req *ht
 		// "banned source" lines and sixteen console entries for what is one ban.
 		// banRecorded is checked FIRST, because it is set only after the put, so
 		// a true here means the list was written and can be consulted.
-		if !rt.counters.banRecorded(res.key) {
-			return Ban{}
+		if !rt.counters.banRecorded(key) {
+			return Ban{}, false
 		}
-		if existing, ok := rt.activeBan(s, res.key, now); ok {
-			return existing
+		if existing, ok := rt.activeBan(s, key, now); ok {
+			return existing, false
 		}
 		// Recorded, and gone: the list evicted it at store.maxEntries, a dry run
 		// was switched off after the shadow list took it, or another replica
@@ -62,19 +115,31 @@ func (rt *runtime) applyBan(s *settings, res resolution, det *detection, req *ht
 		// stands — but nothing was written, logged or shown, and the source was
 		// re-detected on every request for the rest of its rung, invisibly.
 		// Re-issue the ban at the current rung; the ladder does not move.
+		//
+		// One request does the re-issuing. The claim flips banRecorded off under
+		// the counters' lock, so a sibling that noticed the gap at the same
+		// moment takes the "not recorded yet" branch above and stands down, the
+		// same way a burst does. Without the claim, two requests could both pass
+		// the lookup above before either had put, and the re-issue was two bans
+		// and two events.
+		if !rt.counters.claimReissue(key) {
+			return Ban{}, false
+		}
 	}
 	duration := s.banDuration(offence)
 
-	ban := Ban{
-		Key:      res.key.String(),
+	ban = Ban{
+		Key:      key.String(),
 		Detector: det.detector,
 		Rule:     det.rule,
 		Reason:   det.detector + ": " + det.rule,
 		Created:  now.UTC(),
 		Offences: offence,
-		LastPath: truncate(req.URL.Path, 512),
-		LastUA:   truncate(req.UserAgent(), 256),
-		Country:  rt.geo().lookup(res.client.String()),
+		LastPath: truncate(f.path, 512),
+		LastUA:   truncate(f.ua, 256),
+	}
+	if client != "" {
+		ban.Country = rt.geo().lookup(client)
 	}
 	if duration != permanent {
 		ban.Expires = now.Add(duration).UTC()
@@ -93,48 +158,24 @@ func (rt *runtime) applyBan(s *settings, res resolution, det *detection, req *ht
 	rt.topRules.add(det.detector + ": " + det.rule)
 
 	if rt.putBan(s, ban) {
-		rt.counters.markBanRecorded(res.key)
+		rt.counters.markBanRecorded(key)
 	}
 
 	rt.record(Event{
 		Kind:     eventBan,
 		Key:      ban.Key,
-		Client:   res.client.String(),
+		Client:   client,
 		Detector: det.detector,
 		Rule:     det.rule,
-		Method:   req.Method,
-		Host:     req.Host,
-		Path:     req.URL.Path,
-		UA:       req.UserAgent(),
+		Method:   f.method,
+		Host:     f.host,
+		Path:     f.path,
+		UA:       f.ua,
 		BanFor:   formatDuration(duration),
 		DryRun:   s.dryRun,
 		Country:  ban.Country,
 	})
-
-	// host, method and ua because the access log may have no Host column: without
-	// them a ban on a multi-site Traefik could not be traced to the site it hit.
-	logWarn(rt.name, "banned source", map[string]interface{}{
-		"key":      ban.Key,
-		"client":   res.client.String(),
-		"detector": det.detector,
-		"rule":     det.rule,
-		"host":     truncate(req.Host, 253),
-		"method":   req.Method,
-		"path":     req.URL.Path,
-		"ua":       ban.LastUA,
-		"offence":  offence,
-		"duration": formatDuration(duration),
-		"dryRun":   s.dryRun,
-		"ipSource": res.source,
-	})
-
-	if s.subnet.Enabled {
-		rangeKey := banKey(res.client, s.subnet.IPv4Prefix, s.subnet.IPv6Prefix)
-		if n, trip := rt.counters.noteSubnetBan(rangeKey, res.key, now, s.subnet.Threshold, s.subnetWindow, s.dryRun); trip {
-			rt.applySubnetBan(s, rangeKey, n, res, req, now)
-		}
-	}
-	return ban
+	return ban, true
 }
 
 // putBan writes a ban to the list this instance enforces from, and reports
@@ -183,7 +224,7 @@ func (rt *runtime) putBan(s *settings, ban Ban) bool {
 // The range climbs its own escalation ladder, keyed by the range. The event has
 // no Client, so reportAbuse skips it: a range is never reported to AbuseIPDB, and
 // the member whose ban tripped it has already been reported on its own.
-func (rt *runtime) applySubnetBan(s *settings, rangeKey netip.Prefix, members int, res resolution, req *http.Request, now time.Time) {
+func (rt *runtime) applySubnetBan(s *settings, rangeKey netip.Prefix, members int, res resolution, f requestFacts, now time.Time) {
 	// The same refusal an operator's range ban gets: never over the allowlist or
 	// a trusted proxy. Said once per range, because the range keeps tripping.
 	if status, msg := refuseDangerousBan(s, rangeKey); status != 0 {
@@ -191,66 +232,27 @@ func (rt *runtime) applySubnetBan(s *settings, rangeKey netip.Prefix, members in
 			map[string]interface{}{"key": rangeKey.String(), "reason": msg})
 		return
 	}
-	offence, fresh := rt.counters.recordOffence(rangeKey, now, s.decay, s.banDuration)
-	if !fresh {
-		// Same two cases as applyBan: a range ban still being written by a
-		// sibling request, or one that was written and has gone from the list.
-		if !rt.counters.banRecorded(rangeKey) {
-			return
-		}
-		if _, ok := rt.activeBan(s, rangeKey, now); ok {
-			return
-		}
+	det := &detection{
+		detector: detectorSubnet,
+		rule:     fmt.Sprintf("%d sources in %s within %s", s.subnet.Threshold, rangeKey, formatDuration(s.subnetWindow)),
 	}
-	duration := s.banDuration(offence)
-	rule := fmt.Sprintf("%d sources in %s within %s", s.subnet.Threshold, rangeKey, formatDuration(s.subnetWindow))
-
-	ban := Ban{
-		Key:      rangeKey.String(),
-		Detector: detectorSubnet,
-		Rule:     rule,
-		Reason:   detectorSubnet + ": " + rule,
-		Created:  now.UTC(),
-		Offences: offence,
-		LastPath: truncate(req.URL.Path, 512),
-		LastUA:   truncate(req.UserAgent(), 256),
+	ban, issued := rt.issueBan(s, rangeKey, "", det, f, now)
+	if !issued {
+		return
 	}
-	if duration != permanent {
-		ban.Expires = now.Add(duration).UTC()
-	}
-	if rt.putBan(s, ban) {
-		rt.counters.markBanRecorded(rangeKey)
-	}
-
-	rt.stats.Detections.Add(1)
-	rt.topDetectors.add(detectorSubnet)
-	rt.topRules.add(detectorSubnet + ": " + rule)
-
-	rt.record(Event{
-		Kind:     eventBan,
-		Key:      ban.Key,
-		Detector: detectorSubnet,
-		Rule:     rule,
-		Method:   req.Method,
-		Host:     req.Host,
-		Path:     req.URL.Path,
-		UA:       req.UserAgent(),
-		BanFor:   formatDuration(duration),
-		DryRun:   s.dryRun,
-	})
 
 	logWarn(rt.name, "banned range", map[string]interface{}{
 		"key":      ban.Key,
 		"members":  members,
 		"detector": detectorSubnet,
-		"rule":     rule,
-		"offence":  offence,
-		"duration": formatDuration(duration),
+		"rule":     det.rule,
+		"offence":  ban.Offences,
+		"duration": ban.durationLabel(),
 		"dryRun":   s.dryRun,
 		"client":   res.client.String(),
-		"host":     truncate(req.Host, 253),
-		"method":   req.Method,
-		"path":     req.URL.Path,
+		"host":     truncate(f.host, 253),
+		"method":   truncate(f.method, maxMethodLen),
+		"path":     truncate(f.path, 512),
 		"ua":       ban.LastUA,
 	})
 }
@@ -275,6 +277,10 @@ func (rt *runtime) banManual(s *settings, key netip.Prefix, duration time.Durati
 		logWarn(rt.name, "could not record manual ban", map[string]interface{}{"key": ban.Key, "error": err.Error()})
 		return ban
 	}
+	// Tell the ladder, the way seed() does when this same ban is replayed after
+	// a restart. Left out, the source came back at one rung in-process and at
+	// another after a restart during the ban.
+	rt.counters.noteManualBan(key, ban.Expires, now)
 	rt.stats.BansManual.Add(1)
 	if fs, ok := rt.store().(*fileStore); ok {
 		_ = fs.flush()

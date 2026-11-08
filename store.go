@@ -185,10 +185,17 @@ func (m *memStore) isWideLocked(p netip.Prefix) bool {
 	return p.Bits() < key && (sub == 0 || p.Bits() != sub)
 }
 
-// lookupLocked finds the ban covering key: the exact key, then the range ban at
-// the range-escalation width, then an operator-entered range. The caller holds mu.
-func (m *memStore) lookupLocked(key netip.Prefix) (*Ban, bool) {
-	if b, ok := m.bans[key]; ok {
+// lookupLocked finds the ban in force at now that covers key: the exact key,
+// then the range ban at the range-escalation width, then an operator-entered
+// range. The caller holds mu.
+//
+// Every tier skips entries that have lapsed. Expiry is lazy — the janitor sweeps
+// an expired ban up to one interval after it ends — and returning the first tier
+// that merely HAD an entry let a lapsed /32 hide an active /24 covering the same
+// address until the sweep, which is exactly the window a scanner walking a range
+// comes back in.
+func (m *memStore) lookupLocked(key netip.Prefix, now time.Time) (*Ban, bool) {
+	if b, ok := m.bans[key]; ok && b.active(now) {
 		return b, true
 	}
 	sub := m.subV6
@@ -197,7 +204,7 @@ func (m *memStore) lookupLocked(key netip.Prefix) (*Ban, bool) {
 	}
 	if sub > 0 {
 		if p, err := key.Addr().Prefix(sub); err == nil {
-			if b, ok := m.bans[p]; ok {
+			if b, ok := m.bans[p]; ok && b.active(now) {
 				return b, true
 			}
 		}
@@ -206,7 +213,7 @@ func (m *memStore) lookupLocked(key netip.Prefix) (*Ban, bool) {
 		// Only an operator's range ban is left to find, and only when one exists
 		// at all — so the scan is skipped entirely on the ordinary path, and walks
 		// a hand-typed list when it is not.
-		return m.matchWideLocked(key)
+		return m.matchWideLocked(key, now)
 	}
 	return nil, false
 }
@@ -232,12 +239,12 @@ func (m *memStore) dropWideLocked(p netip.Prefix) {
 // matchWideLocked finds an operator-entered range ban covering key. Ties are
 // broken towards the most specific prefix, so a /24 ban and a /16 ban over the
 // same address report the one the operator would expect to see named.
-func (m *memStore) matchWideLocked(key netip.Prefix) (*Ban, bool) {
+func (m *memStore) matchWideLocked(key netip.Prefix, now time.Time) (*Ban, bool) {
 	var best *Ban
 	bestBits := -1
 	for _, w := range m.wide {
 		if w.Bits() > bestBits && w.Contains(key.Addr()) {
-			if b, ok := m.bans[w]; ok {
+			if b, ok := m.bans[w]; ok && b.active(now) {
 				// Two statements, not "best, bestBits = b, w.Bits()": Yaegi
 				// v0.16.1 runs that parallel assignment without setting best, so
 				// under Traefik a range ban matched nothing. yaegi-smoke checks it.
@@ -251,18 +258,13 @@ func (m *memStore) matchWideLocked(key netip.Prefix) (*Ban, bool) {
 
 func (m *memStore) get(key netip.Prefix, now time.Time) (Ban, bool) {
 	m.mu.RLock()
-	b, ok := m.lookupLocked(key)
-	if !ok {
-		m.mu.RUnlock()
-		return Ban{}, false
-	}
-	out := *b
-	m.mu.RUnlock()
+	defer m.mu.RUnlock()
 
-	if !out.active(now) {
+	b, ok := m.lookupLocked(key, now)
+	if !ok {
 		return Ban{}, false
 	}
-	return out, true
+	return *b, true
 }
 
 func (m *memStore) put(b Ban) error {
@@ -314,7 +316,7 @@ func (m *memStore) list(now time.Time) []Ban {
 
 func (m *memStore) countHit(key netip.Prefix) {
 	m.mu.Lock()
-	if b, ok := m.lookupLocked(key); ok {
+	if b, ok := m.lookupLocked(key, time.Now()); ok {
 		b.Hits++
 	}
 	m.mu.Unlock()

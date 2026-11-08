@@ -51,6 +51,21 @@ const (
 )
 
 func (s *settings) exempt(req *http.Request, res resolution) (string, bool) {
+	if reason, ok := s.exemptSource(req, res); ok {
+		return reason, true
+	}
+	return s.exemptPathOnly(req)
+}
+
+// exemptSource holds the SOURCE-level rules: statements about who the client
+// is, which ServeHTTP treats as bypassing the ban list too. The path allowlist is
+// deliberately not among them, and it is tested last of all (see exempt and
+// exemptFor): exemption returns the first rule that matches, and ServeHTTP
+// still consults the ban list when that rule is "allowlist-path". With the path
+// tested before the user-agent, a banned source whose user-agent was allowlisted
+// — an uptime monitor — was served everywhere except on the allowlisted paths,
+// where the ban refused it; the crawler "exempt" policy was skipped the same way.
+func (s *settings) exemptSource(req *http.Request, res resolution) (string, bool) {
 	if !res.bannable {
 		return exemptUnattributable, true
 	}
@@ -60,11 +75,15 @@ func (s *settings) exempt(req *http.Request, res resolution) (string, bool) {
 	if containsAddr(s.allowCIDRs, res.client) {
 		return exemptCIDR, true
 	}
-	if s.allowPaths != nil && s.allowPaths.match(req.URL.Path) {
-		return exemptPath, true
-	}
 	if s.allowUA != nil && s.allowUA.match(req.UserAgent()) {
 		return exemptUserAgent, true
+	}
+	return "", false
+}
+
+func (s *settings) exemptPathOnly(req *http.Request) (string, bool) {
+	if s.allowPaths != nil && s.allowPaths.match(req.URL.Path) {
+		return exemptPath, true
 	}
 	return "", false
 }
@@ -73,9 +92,11 @@ func (s *settings) exempt(req *http.Request, res resolution) (string, bool) {
 // want this one; exempt itself stays as the policy-free check so its existing
 // callers and tests are unaffected.
 //
-// The crawler test comes last so the reason string still names the more specific
-// rule when both apply — a crawler arriving from a trusted proxy reports
-// "trusted-proxy", as it did before this was per-router.
+// The crawler test comes after the source rules so the reason string still
+// names the more specific rule when both apply — a crawler arriving from a
+// trusted proxy reports "trusted-proxy", as it did before this was per-router —
+// and before the path rule, because the crawler policy is about the source and
+// forgives a ban, while the path rule does not (see exemptSource).
 //
 // Being here rather than in detectRequest is deliberate and load-bearing: exempt
 // is consulted BEFORE the ban lookup, so "exempt" forgives a crawler that some
@@ -83,7 +104,7 @@ func (s *settings) exempt(req *http.Request, res resolution) (string, bool) {
 // "detected nothing, but still refused", which is the whole failure this policy
 // exists to avoid.
 func (s *settings) exemptFor(req *http.Request, res resolution, crawlers string) (string, bool) {
-	if reason, ok := s.exempt(req, res); ok {
+	if reason, ok := s.exemptSource(req, res); ok {
 		return reason, true
 	}
 	if crawlers == crawlersExempt && s.crawlerMatcher != nil {
@@ -91,7 +112,7 @@ func (s *settings) exemptFor(req *http.Request, res resolution, crawlers string)
 			return exemptCrawler, true
 		}
 	}
-	return "", false
+	return s.exemptPathOnly(req)
 }
 
 // detectRequest runs the detectors that can decide before the backend is touched.
@@ -200,15 +221,17 @@ func (rt *runtime) detectRequest(s *settings, crawlers string, req *http.Request
 // detectResponse runs the detectors that need to know what the backend answered.
 // These necessarily act one request late: the decision for request N can only be
 // enforced from request N+1 onwards.
-func (rt *runtime) detectResponse(s *settings, req *http.Request, res resolution, status int, now time.Time) *detection {
-	path := req.URL.Path
-
+//
+// path is the path the CLIENT sent, captured before the backend ran (see
+// requestFacts): read from req.URL after next returned it would be whatever
+// a StripPrefix or ReplacePath further down the chain left there.
+func (rt *runtime) detectResponse(s *settings, path string, res resolution, status int, now time.Time) *detection {
 	if s.brute.Enabled && s.bruteCodes.has(status) {
 		if s.brutePaths == nil || s.brutePaths.match(path) {
 			if rt.counters.noteAuthFailure(res.key, now, s.brute.Capacity, s.bruteWindow) {
 				return &detection{
 					detector: detectorBruteForce,
-					rule:     fmt.Sprintf("%d authentication failures within %s", s.brute.Capacity, s.bruteWindow),
+					rule:     fmt.Sprintf("%d authentication failures within %s", s.brute.Capacity, formatDuration(s.bruteWindow)),
 				}
 			}
 		}
@@ -218,7 +241,7 @@ func (rt *runtime) detectResponse(s *settings, req *http.Request, res resolution
 		if rt.counters.noteBadPath(res.key, path, now, s.badPaths.Capacity, s.badPathsLeak) {
 			return &detection{
 				detector: detectorBadPaths,
-				rule:     fmt.Sprintf("%d distinct failing paths (leak %s)", s.badPaths.Capacity, s.badPathsLeak),
+				rule:     fmt.Sprintf("%d distinct failing paths (leak %s)", s.badPaths.Capacity, formatDuration(s.badPathsLeak)),
 			}
 		}
 	}

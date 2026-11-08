@@ -334,3 +334,101 @@ func TestCounterCapFollowsSetMax(t *testing.T) {
 		t.Error("the eviction counter did not record the shrink")
 	}
 }
+
+// At the cap, the record created for a new source must survive the eviction its
+// own arrival triggers. Inserted with a zero lastSeen it sorted as the oldest
+// entry in the table and was evicted at once, so the observation went to an
+// orphan and the source's first offence, bucket entry and banRecorded flag were
+// all lost.
+func TestCounterCapKeepsTheRecordJustCreated(t *testing.T) {
+	c := newCounters(10)
+	now := time.Now()
+	for i := 0; i <= 10; i++ {
+		k := netip.MustParsePrefix(fmt.Sprintf("10.3.0.%d/32", i))
+		c.noteBadPath(k, "/x", now.Add(time.Duration(i)*time.Second), 20, time.Minute)
+	}
+	newest := netip.MustParsePrefix("10.3.0.10/32")
+	c.mu.Lock()
+	st, ok := c.tbl[newest]
+	c.mu.Unlock()
+	if !ok {
+		t.Fatal("the source whose arrival filled the table was evicted instead of the oldest")
+	}
+	if st.lastSeen.IsZero() || len(st.bad.seen) != 1 {
+		t.Errorf("the surviving record is empty: lastSeen=%v badPaths=%d", st.lastSeen, len(st.bad.seen))
+	}
+	if c.evicted() == 0 {
+		t.Error("nothing was evicted at the cap")
+	}
+}
+
+// A manual ban reaches the ladder two ways: in-process through noteManualBan,
+// and after a restart through seed() replaying the persisted ban. The source
+// must come back at the same rung either way; it used to climb after a restart
+// and decay without one, because only seed moved the ban window.
+func TestManualBanMovesTheLadderWindowLikeSeedDoes(t *testing.T) {
+	k := key("203.0.113.30/32")
+	const decay = 24 * time.Hour
+	ladder := func(offence int) time.Duration {
+		switch offence {
+		case 1:
+			return time.Hour
+		case 2:
+			return 24 * time.Hour
+		}
+		return 168 * time.Hour
+	}
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	live := newCounters(100)
+	if got, _ := live.recordOffence(k, t0, decay, ladder); got != 1 {
+		t.Fatalf("first offence = %d", got)
+	}
+	if got, _ := live.recordOffence(k, t0.Add(2*time.Hour), decay, ladder); got != 2 {
+		t.Fatalf("second offence = %d", got)
+	}
+	// An hour after the 24h ban ran out, the operator bans the source for 48h.
+	banned, expires := t0.Add(27*time.Hour), t0.Add(75*time.Hour)
+	live.noteManualBan(k, expires, banned)
+
+	// The same ban as a restarted process sees it: replayed from the store.
+	restarted := newCounters(100)
+	restarted.seed(k, 2, banned, expires, banned)
+
+	after := expires.Add(time.Hour)
+	gotLive, _ := live.recordOffence(k, after, decay, ladder)
+	gotRestarted, _ := restarted.recordOffence(k, after, decay, ladder)
+	if gotLive != 3 || gotRestarted != 3 {
+		t.Errorf("an hour after the manual ban the source is at rung %d live and %d after a restart, want 3 and 3",
+			gotLive, gotRestarted)
+	}
+
+	// Like seed, a manual ban on a source with no ladder position records nothing.
+	live.noteManualBan(key("203.0.113.31/32"), expires, banned)
+	if live.offences(key("203.0.113.31/32")) != 0 || live.banRecorded(key("203.0.113.31/32")) {
+		t.Error("a manual ban on a clean source created a ladder record")
+	}
+}
+
+// Exactly one caller wins the re-issue ticket; the flag is off until the put
+// marks it again.
+func TestClaimReissueIsOneShot(t *testing.T) {
+	c := newCounters(100)
+	k := key("203.0.113.32/32")
+	hour := func(int) time.Duration { return time.Hour }
+	_, _ = c.recordOffence(k, time.Now(), 0, hour)
+	if c.claimReissue(k) {
+		t.Fatal("claimed before the ban was ever recorded")
+	}
+	c.markBanRecorded(k)
+	if !c.claimReissue(k) {
+		t.Fatal("the first claim after a recorded ban was refused")
+	}
+	if c.claimReissue(k) || c.banRecorded(k) {
+		t.Error("a second claim succeeded, or the flag stayed on")
+	}
+	c.markBanRecorded(k)
+	if !c.banRecorded(k) {
+		t.Error("the put did not close the window again")
+	}
+}

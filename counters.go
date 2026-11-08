@@ -83,11 +83,17 @@ func newCounters(max int) *counters {
 func (c *counters) getLocked(key netip.Prefix, now time.Time) *sourceState {
 	st, ok := c.tbl[key]
 	if !ok {
-		st = &sourceState{}
+		// lastSeen is set BEFORE the record joins the table. evictLocked sorts
+		// by it, oldest first, and a record inserted with the zero time was the
+		// oldest thing in the table: at the cap, every new source's first
+		// observation evicted the record that had just been created for it and
+		// was then written to an orphan nothing could find again.
+		st = &sourceState{lastSeen: now}
 		c.tbl[key] = st
 		if len(c.tbl) > c.max {
 			c.evictLocked()
 		}
+		return st
 	}
 	st.lastSeen = now
 	return st
@@ -218,13 +224,11 @@ func (c *counters) noteAuthFailure(key netip.Prefix, now time.Time, capacity int
 	}
 	st.bruteHits = append(kept, now)
 
+	// The slice is bounded by this trip: it never holds more than capacity
+	// entries, because reaching capacity empties it.
 	if len(st.bruteHits) >= capacity {
 		st.bruteHits = nil
 		return true
-	}
-	// Bound the slice even when the window is long and the capacity is high.
-	if len(st.bruteHits) > capacity*4 {
-		st.bruteHits = st.bruteHits[len(st.bruteHits)-capacity:]
 	}
 	return false
 }
@@ -382,6 +386,45 @@ func (c *counters) banRecorded(key netip.Prefix) bool {
 		return st.banRecorded
 	}
 	return false
+}
+
+// claimReissue is the re-issue path's one-shot ticket. When a source's rung is
+// still running but its ban has gone from the list, exactly one of the requests
+// that notice may write it again: the first caller flips banRecorded off and
+// gets true; its siblings then read "not recorded yet", the signal that makes a
+// burst stand down, until markBanRecorded closes the window after the put.
+func (c *counters) claimReissue(key netip.Prefix) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st, ok := c.tbl[key]
+	if !ok || !st.banRecorded {
+		return false
+	}
+	st.banRecorded = false
+	return true
+}
+
+// noteManualBan tells the ladder about an operator's ban without advancing it,
+// exactly as seed() does when the same ban is replayed after a restart: the ban
+// window moves to the manual ban's end, so the time served under it does not
+// count as good behaviour, and the ban is in the list by definition. Like seed,
+// it touches only a source that holds a ladder position; a manual ban on a
+// source with no offences is not an offence either.
+func (c *counters) noteManualBan(key netip.Prefix, expires, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	st, ok := c.tbl[key]
+	if !ok || st.offences == 0 {
+		return
+	}
+	if expires.IsZero() {
+		expires = now.Add(permanentBanHorizon)
+	}
+	if expires.After(st.banUntil) {
+		st.banUntil = expires
+	}
+	st.banRecorded = true
 }
 
 // quietSince reports the instant from which this source has had the opportunity

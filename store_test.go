@@ -269,9 +269,14 @@ func TestEventLogTruncatesAttackerText(t *testing.T) {
 		huge[i] = 'A'
 	}
 
-	e := l.add(Event{Kind: eventBan, Path: string(huge), UA: string(huge)})
-	if len(e.Path) > 600 || len(e.UA) > 300 {
-		t.Fatalf("attacker-controlled text was not truncated: path=%d ua=%d", len(e.Path), len(e.UA))
+	e := l.add(Event{Kind: eventBan, Path: string(huge), UA: string(huge), Method: string(huge), Host: string(huge)})
+	if len(e.Path) > 600 || len(e.UA) > 300 || len(e.Host) > 300 {
+		t.Fatalf("attacker-controlled text was not truncated: path=%d ua=%d host=%d", len(e.Path), len(e.UA), len(e.Host))
+	}
+	// The method as well: Go bounds the request line by MaxHeaderBytes, not the
+	// method by anything, so a scanner can send a megabyte of it per request.
+	if len(e.Method) > maxMethodLen+3 {
+		t.Fatalf("the method was not truncated: %d bytes", len(e.Method))
 	}
 }
 
@@ -357,5 +362,40 @@ func TestSubnetWidthBansUseTheMaskedLookup(t *testing.T) {
 		if b, ok := m.get(key(tc.manualIn), now); !ok || b.Key != tc.manual {
 			t.Errorf("manual range %s not found for %s (%+v)", tc.manual, tc.manualIn, b)
 		}
+	}
+}
+
+// Expiry is lazy, so a lapsed entry sits in the table until the janitor sweeps
+// it. Returning the first tier that HAD an entry let a lapsed /32 hide an active
+// range ban covering the same address for a whole janitor interval.
+func TestLookupSkipsLapsedEntriesInFrontOfAnActiveRange(t *testing.T) {
+	now := time.Now()
+	lapsed := now.Add(-time.Minute)
+	active := now.Add(time.Hour)
+
+	// The range-escalation tier.
+	m := newMemStore(100)
+	m.setKeyWidths(32, 64, 24, 48)
+	_ = m.put(ban("192.0.2.7/32", lapsed))
+	_ = m.put(ban("192.0.2.0/24", active))
+	if b, ok := m.get(key("192.0.2.7/32"), now); !ok || b.Key != "192.0.2.0/24" {
+		t.Errorf("exact lapsed, range active: got %+v (found %v), want the /24", b, ok)
+	}
+	m.countHit(key("192.0.2.7/32"))
+	if b, _ := m.get(key("192.0.2.7/32"), now); b.Hits != 1 {
+		t.Errorf("countHit went to the lapsed entry, range hits=%d", b.Hits)
+	}
+
+	// The containment tier, and a lapsed range in front of an active wider one.
+	w := newMemStore(100)
+	w.setKeyWidths(32, 64, 0, 0)
+	_ = w.put(ban("192.0.2.7/32", lapsed))
+	_ = w.put(ban("192.0.2.0/24", lapsed))
+	_ = w.put(ban("192.0.0.0/16", active))
+	if b, ok := w.get(key("192.0.2.7/32"), now); !ok || b.Key != "192.0.0.0/16" {
+		t.Errorf("exact and /24 lapsed, /16 active: got %+v (found %v), want the /16", b, ok)
+	}
+	if _, ok := w.get(key("192.0.2.7/32"), now.Add(2*time.Hour)); ok {
+		t.Error("everything lapsed, yet a ban was found")
 	}
 }

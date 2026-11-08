@@ -106,6 +106,33 @@ type handler struct {
 	crawlers    string
 }
 
+// requestFacts is what the detectors, the ban record, the event log and the log
+// line need to know about a request, captured once before anything further down
+// the chain runs.
+//
+// Captured rather than read from *http.Request when needed, because Traefik's
+// StripPrefix and ReplacePath middlewares rewrite the same request in place and
+// the chain `[scanguard, strip-prefix]` is an ordinary one. Read after next had
+// returned, req.URL.Path was the stripped path: the brute-force `paths` regex
+// never matched the login path the client actually sent, the badPaths bucket
+// keyed on paths the client never requested, and LastPath in the ban record
+// named one of them.
+type requestFacts struct {
+	method string
+	host   string
+	path   string
+	ua     string
+}
+
+func factsOf(req *http.Request) requestFacts {
+	return requestFacts{
+		method: req.Method,
+		host:   req.Host,
+		path:   req.URL.Path,
+		ua:     req.UserAgent(),
+	}
+}
+
 // effectiveCrawlers resolves the crawler policy for this router: its own declared
 // value, else the instance-wide one. Resolved per request rather than at New() so
 // a console edit of the instance value reaches routers that stated no policy
@@ -138,7 +165,8 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	now := time.Now()
 	h.rt.stats.Requests.Add(1)
-	h.rt.topHosts.add(req.Host)
+	facts := factsOf(req)
+	h.rt.topHosts.add(facts.host)
 
 	res := s.resolve(req)
 
@@ -168,7 +196,7 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	// volume rather than probing. Both tallies are capped and pruned, so the
 	// attacker-controlled key space stays bounded (see tally).
 	if !exempted {
-		h.rt.topPaths.add(req.URL.Path)
+		h.rt.topPaths.add(facts.path)
 		h.rt.topSources.add(res.key.String())
 	}
 
@@ -201,10 +229,10 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			Client:   res.client.String(),
 			Detector: ban.Detector,
 			Rule:     ban.Rule,
-			Method:   req.Method,
-			Host:     req.Host,
-			Path:     req.URL.Path,
-			UA:       req.UserAgent(),
+			Method:   facts.method,
+			Host:     facts.host,
+			Path:     facts.path,
+			UA:       facts.ua,
 			Status:   s.rejectStatus,
 			DryRun:   s.dryRun,
 		})
@@ -251,10 +279,10 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 				Client:   res.client.String(),
 				Detector: det.detector,
 				Rule:     det.rule,
-				Method:   req.Method,
-				Host:     req.Host,
-				Path:     req.URL.Path,
-				UA:       req.UserAgent(),
+				Method:   facts.method,
+				Host:     facts.host,
+				Path:     facts.path,
+				UA:       facts.ua,
 				Status:   s.rejectStatus,
 				DryRun:   s.dryRun,
 			})
@@ -265,7 +293,7 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			h.next.ServeHTTP(rw, req)
 			return
 		}
-		h.rt.applyBan(s, res, det, req, now)
+		h.rt.applyBan(s, res, det, facts, now)
 		if !s.dryRun {
 			h.rt.stats.Rejected.Add(1)
 			h.rt.reject(s, rw, req)
@@ -280,11 +308,12 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		obs := newResponseObserver(rw, s.instanceName)
 		h.next.ServeHTTP(obs, req)
 
-		if det := h.rt.detectResponse(s, req, res, obs.status, time.Now()); det != nil {
+		// facts, not req: the chain below may have rewritten the request by now.
+		if det := h.rt.detectResponse(s, facts.path, res, obs.status, time.Now()); det != nil {
 			// The response is already on its way to the client, so this ban takes
 			// effect from the source's next request. That is inherent to any
 			// status-based detector, not something to work around.
-			h.rt.applyBan(s, res, det, req, time.Now())
+			h.rt.applyBan(s, res, det, facts, time.Now())
 		}
 		return
 	}
