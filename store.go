@@ -82,6 +82,9 @@ type banStore interface {
 	// reach it through an assertion to an anonymous interface type, the construct
 	// documented just above as segfaulting the plugin under Yaegi.
 	refresh() error
+	// setMax applies store.maxEntries in place. A change to the cap used to
+	// rebuild the whole backend and re-put every ban into the new one.
+	setMax(max int)
 }
 
 // newBanStore builds the configured backend.

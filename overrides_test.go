@@ -19,6 +19,15 @@ func resetRuntime(name string) {
 	registryMu.Lock()
 	delete(registry, name)
 	registryMu.Unlock()
+	// And the instance's once-only warnings, so a test that asserts one of them
+	// sees it again on a rerun (-count=2) or after a simulated restart.
+	warnedMu.Lock()
+	for k := range warned {
+		if strings.HasPrefix(k, name+"\x00") {
+			delete(warned, k)
+		}
+	}
+	warnedMu.Unlock()
 }
 
 func consoleHandler(t *testing.T, mutate func(*Config)) (http.Handler, *runtime) {

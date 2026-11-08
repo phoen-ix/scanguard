@@ -32,6 +32,9 @@ type runtime struct {
 
 	// cfg holds the current *settings. It is an atomic.Value rather than a mutex
 	// because it is read on every request and written only on a config reload.
+	// Every WRITE happens under mu (see applySettings): the reload path and the
+	// console's rule edits used to publish under different locks, and a token
+	// rotation arriving while a rule was being saved lost one of the two.
 	cfg atomic.Value
 
 	// Two middleware definitions routinely share one instance name: the detector
@@ -43,6 +46,12 @@ type runtime struct {
 	detectFP         string
 	uiFP             string
 	storeFingerprint string
+	// notifyFingerprint and geoFingerprint decide whether a reload rebuilds the
+	// notifier and the geo cache. Both carry state worth keeping across a reload
+	// — the AbuseIPDB report dedupe and score cache, a week of country lookups —
+	// and a reload that changed a honeypot path used to throw it away.
+	notifyFingerprint string
+	geoFingerprint    string
 
 	// depsV holds the three things a configuration reload replaces: the ban store,
 	// the notifier and the geo cache. They are swapped while requests are reading
@@ -107,8 +116,8 @@ type runtime struct {
 	authLogMu sync.Mutex
 	authLogAt time.Time
 
-	// mu guards baseConfig and overrides. It is never taken on the request path:
-	// readers there go through cfg, which is atomic.
+	// mu guards baseConfig, overrides and every publication of cfg. It is never
+	// taken on the request path: readers there go through cfg, which is atomic.
 	mu sync.Mutex
 	// baseConfig is the detector instance's configuration exactly as Traefik
 	// decoded it. Keeping it lets the console's rule edits be re-layered and
@@ -116,6 +125,11 @@ type runtime struct {
 	// settings in place.
 	baseConfig *Config
 	overrides  *Overrides
+	// overridesStale is set when the saved console edits no longer apply to the
+	// file configuration a reload brought in. They are kept, so the console can
+	// show what the operator saved, but the file configuration is what runs;
+	// the rule editor says so instead of listing them as in force.
+	overridesStale string
 	// overridesLoaded records that persisted rule edits have been read from the
 	// store. It is separate from `overrides` being non-nil, because "there were
 	// none saved" and "we have not looked yet" must not be confused.
@@ -172,17 +186,19 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 			return nil, err
 		}
 		rt = &runtime{
-			name:             s.instanceName,
-			storeFingerprint: storeFingerprint(s),
-			counters:         newCounters(s.maxEntries),
-			shadow:           newMemStore(s.maxEntries),
-			events:           newEventLog(s.eventLogSize),
-			topPaths:         newTally(1000),
-			topSources:       newTally(1000),
-			topDetectors:     newTally(64),
-			topRules:         newTally(512),
-			topHosts:         newTally(1000),
-			topExempt:        newTally(16),
+			name:              s.instanceName,
+			storeFingerprint:  storeFingerprint(s),
+			notifyFingerprint: notifyFingerprint(s),
+			geoFingerprint:    geoFingerprint(s),
+			counters:          newCounters(s.maxEntries),
+			shadow:            newMemStore(s.maxEntries),
+			events:            newEventLog(s.eventLogSize),
+			topPaths:          newTally(1000),
+			topSources:        newTally(1000),
+			topDetectors:      newTally(64),
+			topRules:          newTally(512),
+			topHosts:          newTally(1000),
+			topExempt:         newTally(16),
 		}
 		rt.setDeps(store, newNotifier(s), newGeoCache(s))
 		rt.stats.StartedAt = time.Now().UTC()
@@ -195,7 +211,9 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 				rt.baseConfig = base
 			}
 		}
+		rt.mu.Lock()
 		rt.applySettings(s)
+		rt.mu.Unlock()
 		rt.seedLadder(store, time.Now())
 		registry[s.instanceName] = rt
 
@@ -223,6 +241,9 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 		if rt.uiFP == fp {
 			return rt, nil
 		}
+		// Read, merge and publish under mu, so a rule save on the other path
+		// cannot interleave and lose either the token or the rule.
+		rt.mu.Lock()
 		merged := *rt.settings()
 		merged.adminEnabled = s.adminEnabled
 		merged.adminPrefix = s.adminPrefix
@@ -236,6 +257,7 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 		merged.adminServeShared = s.adminServeShared
 		rt.uiFP = fp
 		rt.applySettings(&merged)
+		rt.mu.Unlock()
 		logInfo(s.instanceName, "admin console configuration applied", nil)
 		return rt, nil
 	}
@@ -254,20 +276,33 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Carry the live ban list across a backend change rather than dropping it.
-		for _, b := range rt.store().list(time.Now()) {
+		// Carry the live ban list across a backend change rather than dropping
+		// it. Only the bans the new backend does not already hold: a file or
+		// Redis store arrives with its own, and re-putting those cost one write
+		// (one Redis round trip) per ban for nothing.
+		now := time.Now()
+		for _, b := range rt.store().list(now) {
+			if k, perr := netip.ParsePrefix(b.Key); perr == nil {
+				if _, held := store.get(k, now); held {
+					continue
+				}
+			}
 			_ = store.put(b)
 		}
 		logInfo(s.instanceName, "state backend reconfigured", map[string]interface{}{
 			"from": rt.store().backend(),
 			"to":   store.backend(),
 		})
+		// The console's saved rules travel with the bans. They used to stay
+		// behind: the new store held none, loadStoredOverridesLocked had already
+		// run, so a file backend's next snapshot wrote `overrides: null` and the
+		// edits were gone on restart, while a Redis backend's next tick adopted
+		// the empty shared set and reverted them with a misleading log line.
+		rt.mu.Lock()
+		rt.carryOverridesLocked(store)
+		rt.mu.Unlock()
 		rt.setDeps(store, rt.notifier(), rt.geo())
 		rt.storeFingerprint = newFP
-		// The counter table and the dry-run shadow list are sized from the same
-		// setting; they used to keep the cap they were created with.
-		rt.counters.setMax(s.maxEntries)
-		rt.shadow.setMax(s.maxEntries)
 		// The new backend may have brought persisted bans with it — this is the
 		// ordinary startup path whenever Traefik builds the console (memory store,
 		// no store block of its own) before the detector (file or Redis). The
@@ -276,39 +311,81 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 		rt.seedLadder(store, time.Now())
 	}
 
+	// The notifier and the geo cache are rebuilt only when their own settings
+	// changed; see the fingerprint fields.
+	n := rt.notifier()
+	if newFP := notifyFingerprint(&merged); newFP != rt.notifyFingerprint {
+		n = newNotifier(&merged)
+		rt.notifyFingerprint = newFP
+	}
+	g := rt.geo()
+	if newFP := geoFingerprint(&merged); newFP != rt.geoFingerprint {
+		g = newGeoCache(&merged)
+		rt.geoFingerprint = newFP
+	}
 	rt.detectFP = fp
-	rt.setDeps(rt.store(), newNotifier(&merged), newGeoCache(&merged))
-	rt.applySettings(&merged)
+	rt.setDeps(rt.store(), n, g)
 
 	// The file configuration changed underneath the console's edits. Re-layer them
 	// on the new base so a Traefik reload does not silently discard rules somebody
 	// set from the browser.
+	//
+	// Everything is worked out first and published ONCE. The plain file
+	// configuration used to be published here and the re-layered one a few
+	// statements later; requests in between ran without the console's rules,
+	// including a console-set dryRun, so real bans were written in what the
+	// console showed as a dry run.
 	rt.mu.Lock()
 	if base, cerr := cloneConfig(cfg); cerr == nil {
 		base.normalizeDefaults()
 		rt.baseConfig = base
 	}
+	effective := &merged
 	// baseConfig may have only just become available — if Traefik built the console
 	// instance before this one, the startup restore could not run yet.
-	rt.loadStoredOverridesLocked()
-
-	ov := rt.overrides
-	if !ov.empty() {
-		if relayered, rerr := rt.rebuildLocked(ov); rerr == nil {
-			rt.applySettings(relayered)
+	if restored := rt.loadStoredOverridesLocked(); restored != nil {
+		effective = restored
+	} else if !rt.overrides.empty() {
+		if relayered, rerr := rt.rebuildLocked(rt.overrides); rerr == nil {
+			effective = relayered
+			rt.overridesStale = ""
 		} else {
+			rt.overridesStale = rerr.Error()
 			logWarn(s.instanceName, "console rule overrides no longer apply to the reloaded configuration; "+
 				"running the file configuration instead",
 				map[string]interface{}{"error": rerr.Error()})
 		}
 	}
+	rt.applySettings(effective)
+	ov := rt.overrides
 	rt.mu.Unlock()
 
 	logInfo(s.instanceName, "configuration reloaded", map[string]interface{}{
-		"dryRun":        merged.dryRun,
+		"dryRun":        effective.dryRun,
 		"ruleOverrides": ov.sections(),
 	})
 	return rt, nil
+}
+
+// carryOverridesLocked saves the console's rule edits into a store that is
+// about to replace the current one. The caller holds mu.
+//
+// A local backend (memory, file) takes the live set unconditionally: what the
+// console shows as in force is the truth for this process. A shared backend
+// takes it only when it holds none, because another replica's set is that
+// replica's to own; syncOverrides adopts it on the next janitor tick and says so.
+func (rt *runtime) carryOverridesLocked(store banStore) {
+	if rt.overrides.empty() {
+		return
+	}
+	if store.backend() == "redis" && !store.loadOverrides().empty() {
+		logInfo(rt.name, "the new state backend already holds a rule set; it will be adopted on the next refresh", nil)
+		return
+	}
+	if err := store.saveOverrides(rt.overrides); err != nil {
+		logWarn(rt.name, "console rule changes could not be carried to the new state backend",
+			map[string]interface{}{"error": err.Error()})
+	}
 }
 
 // inheritAdmin copies the admin surface from src to dst when dst has none. The
@@ -339,7 +416,7 @@ func inheritAdmin(dst, src *settings) {
 }
 
 // applySettings publishes new effective settings to the request path and resizes
-// anything sized from them.
+// anything sized from them. The caller holds mu.
 func (rt *runtime) applySettings(s *settings) {
 	rt.cfg.Store(s)
 
@@ -351,6 +428,20 @@ func (rt *runtime) applySettings(s *settings) {
 	// Traefik happened to build first. admin.eventLogSize lives on the console's
 	// block, so when the detector came first the setting silently did nothing.
 	rt.events.resize(s.eventLogSize)
+
+	// store.maxEntries sizes three tables. A change used to rebuild the whole
+	// store (it was part of the store fingerprint) and re-put every ban into the
+	// new one, one Redis round trip each, under registryMu; the cap is applied
+	// in place instead, and these are no-ops when it is unchanged.
+	if st := rt.store(); st != nil {
+		st.setMax(s.maxEntries)
+	}
+	if rt.counters != nil {
+		rt.counters.setMax(s.maxEntries)
+	}
+	if rt.shadow != nil {
+		rt.shadow.setMax(s.maxEntries)
+	}
 
 	// The store has to know how wide the detector's own keys are, so it can tell
 	// an operator's range ban from an ordinary one. Both widths are editable, so
@@ -398,14 +489,15 @@ func (rt *runtime) restoreOverrides(fallback *settings) *settings {
 	defer rt.mu.Unlock()
 
 	if s := rt.loadStoredOverridesLocked(); s != nil {
+		rt.applySettings(s)
 		return s
 	}
 	return fallback
 }
 
-// loadStoredOverridesLocked applies persisted rule edits, once, as soon as it is
-// possible to do so. It returns the new settings, or nil if nothing was applied.
-// The caller holds rt.mu.
+// loadStoredOverridesLocked reads persisted rule edits, once, as soon as it is
+// possible to do so, and returns the settings they produce for the caller to
+// publish — or nil if nothing applied. The caller holds rt.mu.
 //
 // The "as soon as possible" part is the whole point, and it is subtle. Restoring
 // an override means re-validating it against the file configuration, which only
@@ -454,7 +546,7 @@ func (rt *runtime) loadStoredOverridesLocked() *settings {
 		return nil
 	}
 	rt.overrides = stored
-	rt.applySettings(s)
+	rt.overridesStale = ""
 	logInfo(rt.name, "restored rule changes made from the console", map[string]interface{}{
 		"sections": stored.sections(),
 		"savedAt":  stored.Updated,
@@ -509,8 +601,7 @@ func (rt *runtime) geo() *geoCache {
 }
 
 // seedLadder replays the persisted ban list into the escalation counters, so a
-// restart does not reset every repeat offender to the first rung. Returns how
-// many ladder positions were restored.
+// restart does not reset every repeat offender to the first rung.
 //
 // KNOWN GAP: it restores only sources whose ban is still LIVE. store.list
 // excludes expired bans and restore() drops them on load, so a source whose ban
@@ -524,7 +615,7 @@ func (rt *runtime) geo() *geoCache {
 // position can be replayed, which changes what list/sweep/restore mean and how
 // maxEntries eviction counts. That is the most delicate part of this codebase
 // and deserves its own change rather than a corner of one.
-func (rt *runtime) seedLadder(store banStore, now time.Time) int {
+func (rt *runtime) seedLadder(store banStore, now time.Time) {
 	seeded := 0
 	for _, b := range store.list(now) {
 		key, err := netip.ParsePrefix(b.Key)
@@ -540,7 +631,32 @@ func (rt *runtime) seedLadder(store banStore, now time.Time) int {
 		logInfo(rt.name, "restored escalation ladder from persisted bans",
 			map[string]interface{}{"sources": seeded})
 	}
-	return seeded
+}
+
+// janitorFloor is the shortest janitor period. Ban expiry is already handled
+// lazily on the request path by Ban.active, so the loop exists only to reclaim
+// memory and persist state — and high-frequency tickers in interpreted plugins
+// have a history of leaking into Traefik out-of-memory kills.
+const janitorFloor = 30 * time.Second
+
+// janitorInterval derives the period from the CURRENT settings, so a reload
+// that changes store.snapshotInterval takes effect, and so the value is the
+// detector's whichever middleware Traefik happened to build first. It used to
+// be read once, when the goroutine started: with the console built first the
+// detector's value was ignored for the life of the process, and values under
+// the floor were raised to it without a word.
+func (rt *runtime) janitorInterval() time.Duration {
+	s := rt.settings()
+	if s == nil {
+		return janitorFloor
+	}
+	if s.snapshotInterval < janitorFloor {
+		warnOnce(rt.name, "snapshot-interval-floored",
+			"store.snapshotInterval is below the 30s minimum; the janitor runs every 30s",
+			map[string]interface{}{"configured": s.snapshotInterval.String()})
+		return janitorFloor
+	}
+	return s.snapshotInterval
 }
 
 // startJanitor launches the single background goroutine for this instance.
@@ -551,25 +667,21 @@ func (rt *runtime) seedLadder(store banStore, now time.Time) int {
 // would prevent it from ever coming back. One goroutine per instance name for the
 // life of the process is the correct lifetime, and there is no Close hook to
 // respect anyway.
-//
-// The interval is deliberately coarse. Ban expiry is already handled lazily on
-// the request path by Ban.active, so this loop exists only to reclaim memory and
-// persist state — and high-frequency tickers in interpreted plugins have a
-// history of leaking into Traefik out-of-memory kills.
 func (rt *runtime) startJanitor() {
 	rt.janitorOnce.Do(func() {
 		go func() {
 			defer recoverPanic(rt.name, "janitor")
 
-			interval := 30 * time.Second
-			if s := rt.settings(); s != nil && s.snapshotInterval > interval {
-				interval = s.snapshotInterval
-			}
+			interval := rt.janitorInterval()
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
 
 			for range ticker.C {
 				rt.tick()
+				if next := rt.janitorInterval(); next != interval {
+					interval = next
+					ticker.Reset(interval)
+				}
 			}
 		}()
 	})
@@ -701,6 +813,7 @@ func (rt *runtime) setOverrides(ov *Overrides, actor string) error {
 	}
 
 	rt.overrides = ov
+	rt.overridesStale = ""
 	rt.applySettings(s)
 
 	if err := rt.store().saveOverrides(ov); err != nil {
@@ -727,19 +840,27 @@ func (rt *runtime) setOverrides(ov *Overrides, actor string) error {
 }
 
 // rulesView returns what the console needs to render the editor: the effective
-// configuration, what the file says, and which sections the console has taken over.
-func (rt *runtime) rulesView() (effective, fromFile editableConfig, ov *Overrides, err error) {
+// configuration, what the file says, which sections the console has taken over,
+// and — when a reload invalidated them — why those sections are NOT in force.
+func (rt *runtime) rulesView() (effective, fromFile editableConfig, ov *Overrides, stale string, err error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
 	if rt.baseConfig == nil {
-		return effective, fromFile, nil, errors.New("no detection middleware has been configured for this instance yet")
+		return effective, fromFile, nil, "", errors.New("no detection middleware has been configured for this instance yet")
+	}
+	fromFile = editableFrom(rt.baseConfig)
+	if rt.overridesStale != "" {
+		// The saved edits do not apply to the current file configuration, so the
+		// file configuration is what runs. Reporting the layered set as effective
+		// told the operator rules were in force that were not.
+		return fromFile, fromFile, rt.overrides.clone(), rt.overridesStale, nil
 	}
 	merged, err := applyOverrides(rt.baseConfig, rt.overrides)
 	if err != nil {
-		return effective, fromFile, nil, err
+		return effective, fromFile, nil, "", err
 	}
-	return editableFrom(merged), editableFrom(rt.baseConfig), rt.overrides.clone(), nil
+	return editableFrom(merged), fromFile, rt.overrides.clone(), "", nil
 }
 
 // syncOverrides adopts a rule set changed by another replica.
@@ -773,6 +894,7 @@ func (rt *runtime) syncOverrides() {
 		return
 	}
 	rt.overrides = stored
+	rt.overridesStale = ""
 	rt.applySettings(s)
 	if stored == nil {
 		logInfo(rt.name, "console rule changes were reverted on another replica; the file configuration is back in force", nil)
@@ -795,22 +917,51 @@ func sameOverrideStamp(a, b *Overrides) bool {
 	return a.Updated.Equal(b.Updated)
 }
 
-// storeFingerprint captures the fields that require rebuilding the state backend.
+// storeFingerprint captures the fields that require rebuilding the state
+// backend: the backend itself and the connection details the ACTIVE backend
+// reads. A file path means nothing to a Redis store and a Redis address nothing
+// to a file store, and store.maxEntries is applied in place by applySettings.
 //
 // A map rather than a struct, and hashed through mapFingerprint's concrete
 // parameter type — see configFingerprint for why the distinction matters.
 func storeFingerprint(s *settings) string {
-	return mapFingerprint(map[string]string{
-		"backend":   s.storeBackend,
-		"path":      s.storePath,
-		"redisAddr": s.redis.Address,
-		"redisDB":   strconv.Itoa(s.redis.DB),
-		"redisKey":  s.redis.KeyPrefix,
+	m := map[string]string{"backend": s.storeBackend}
+	switch s.storeBackend {
+	case "file":
+		m["path"] = s.storePath
+	case "redis":
+		m["redisAddr"] = s.redis.Address
+		m["redisDB"] = strconv.Itoa(s.redis.DB)
+		m["redisKey"] = s.redis.KeyPrefix
 		// The credential and the deadline are connection state the client is
 		// built with; left out, a rotated Redis password needed a Traefik restart.
-		"redisPassword": s.redis.Password,
-		"redisTimeout":  s.redisTimeout.String(),
-		"max":           strconv.Itoa(s.maxEntries),
+		m["redisPassword"] = s.redis.Password
+		m["redisTimeout"] = s.redisTimeout.String()
+	}
+	return mapFingerprint(m)
+}
+
+// notifyFingerprint captures what a notifier is built from.
+func notifyFingerprint(s *settings) string {
+	cfg, err := json.Marshal(&s.notify)
+	if err != nil {
+		return ""
+	}
+	return mapFingerprint(map[string]string{
+		"instance": s.instanceName,
+		"notify":   string(cfg),
+		"timeout":  s.notifyTimeout.String(),
+		"cacheTTL": s.abuseCacheTTL.String(),
+	})
+}
+
+// geoFingerprint captures what a geo cache is built from.
+func geoFingerprint(s *settings) string {
+	return mapFingerprint(map[string]string{
+		"instance": s.instanceName,
+		"enabled":  strconv.FormatBool(s.geoEnabled),
+		"provider": s.geoProvider,
+		"ttl":      s.geoCacheTTL.String(),
 	})
 }
 

@@ -537,6 +537,10 @@ type RulesResponse struct {
 	BuiltIn    builtInCounts  `json:"builtIn"`
 	Updated    *time.Time     `json:"updated,omitempty"`
 	Actor      string         `json:"actor,omitempty"`
+	// Stale explains why the saved console edits are NOT in force: a Traefik
+	// reload brought a file configuration they no longer apply to. Effective
+	// then equals FromFile, and saving again from the console replaces them.
+	Stale string `json:"stale,omitempty"`
 }
 
 type builtInCounts struct {
@@ -546,7 +550,7 @@ type builtInCounts struct {
 }
 
 func (rt *runtime) writeRules(rw http.ResponseWriter, status int) {
-	effective, fromFile, ov, err := rt.rulesView()
+	effective, fromFile, ov, stale, err := rt.rulesView()
 	if err != nil {
 		writeJSON(rw, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 		return
@@ -556,6 +560,7 @@ func (rt *runtime) writeRules(rw http.ResponseWriter, status int) {
 		Effective:  effective,
 		FromFile:   fromFile,
 		Overridden: ov.sections(),
+		Stale:      stale,
 		BuiltIn: builtInCounts{
 			Signatures: len(defaultSignatures),
 			UserAgents: len(defaultUserAgents),
