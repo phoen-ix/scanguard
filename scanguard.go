@@ -65,7 +65,6 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	return &handler{
 		next:        next,
 		rt:          rt,
-		name:        name,
 		uiMode:      s.uiMode,
 		servePrefix: s.adminServeHere,
 		crawlers:    s.uaCrawlersDeclared,
@@ -100,7 +99,6 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 type handler struct {
 	next        http.Handler
 	rt          *runtime
-	name        string
 	uiMode      bool
 	servePrefix bool
 	crawlers    string

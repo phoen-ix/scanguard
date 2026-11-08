@@ -1434,6 +1434,9 @@ function refresh() {
 }
 
 function tick() {
+  // A background tab polls nothing: three requests every three seconds from a
+  // console nobody is looking at, all day, buys no one anything.
+  if (document.hidden) { return; }
   api("api/state").then(function (s) {
     renderState(s);
     fetchDetail();

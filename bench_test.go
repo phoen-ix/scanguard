@@ -14,7 +14,7 @@ import (
 
 // nopWriter is a ResponseWriter that costs nothing, so the benchmarks measure the
 // middleware rather than httptest.ResponseRecorder's allocations. It implements
-// Flusher and Hijacker too, so the wrapper takes its normal delegating path.
+// Flusher, which the benchmarks never call; there is no Hijacker.
 type nopWriter struct{ h http.Header }
 
 func newNopWriter() *nopWriter                   { return &nopWriter{h: make(http.Header)} }

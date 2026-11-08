@@ -507,7 +507,7 @@ func (c *counters) forget(key netip.Prefix) {
 	c.mu.Unlock()
 }
 
-// sweep drops records the detectors no longer need, and returns how many went.
+// sweep drops records the detectors no longer need.
 //
 // A record with no ladder position is pure bucket state and goes once it has been
 // idle for longer than idle. A record that HOLDS a ladder position is different:
@@ -527,7 +527,7 @@ func (c *counters) forget(key netip.Prefix) {
 // emptied the ladder anyway, and the record goes on the ordinary idle rule. With
 // decay disabled the position is meant to be kept, and it is; the table cap still
 // bounds memory.
-func (c *counters) sweep(now time.Time, idle, decay time.Duration) int {
+func (c *counters) sweep(now time.Time, idle, decay time.Duration) {
 	if idle <= 0 {
 		idle = time.Hour
 	}
@@ -536,7 +536,6 @@ func (c *counters) sweep(now time.Time, idle, decay time.Duration) int {
 	defer c.mu.Unlock()
 
 	cutoff := now.Add(-idle)
-	removed := 0
 	for k, st := range c.tbl {
 		if st.offences > 0 {
 			if st.banUntil.After(now) || decay <= 0 {
@@ -548,13 +547,10 @@ func (c *counters) sweep(now time.Time, idle, decay time.Duration) int {
 		}
 		if st.lastSeen.Before(cutoff) {
 			delete(c.tbl, k)
-			removed++
 		}
 	}
-	return removed
 }
 
-// size reports how many sources are being tracked.
 // SourceEntry is one row of the tracked-source table, safe to hand to the admin
 // API. A NAMED struct, and it carries copies of the scalars rather than the
 // internal *sourceState: the caller must never hold a pointer into the table it
@@ -604,6 +600,7 @@ func (c *counters) recent(n int) ([]SourceEntry, int) {
 	return out, total
 }
 
+// size reports how many sources are being tracked.
 func (c *counters) size() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()

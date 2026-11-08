@@ -17,7 +17,6 @@ import (
 // decision; the worst case is a blank column in the UI.
 type geoCache struct {
 	enabled  bool
-	provider string
 	ttl      time.Duration
 	instance string
 	client   *http.Client
@@ -46,7 +45,6 @@ const geoInflightMax = 4
 func newGeoCache(s *settings) *geoCache {
 	return &geoCache{
 		enabled:  s.geoEnabled,
-		provider: s.geoProvider,
 		ttl:      s.geoCacheTTL,
 		instance: s.instanceName,
 		client:   &http.Client{Timeout: 3 * time.Second},

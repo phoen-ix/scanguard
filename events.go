@@ -148,8 +148,9 @@ func (l *eventLog) recent(n int) []Event {
 
 // sinceKind returns events newer than seq, oldest first, for incremental polling
 // by the admin UI; kind restricts it to one event kind, or every kind when empty.
-// Events already overwritten in the ring are simply gone; the UI notices because
-// the oldest returned sequence jumps.
+// Events already overwritten in the ring are simply gone; nothing reports the
+// gap. lastSeq is read under the same lock, so a client polling with
+// since=lastSeq can never skip an event added between the two reads.
 //
 // Bans and unbans are read from their own ring, which is what makes the filter
 // useful: on a busy instance the shared ring is overwhelmingly rejects — 92% when
@@ -157,7 +158,7 @@ func (l *eventLog) recent(n int) []Event {
 // returned whichever bans happened to fall inside the last few seconds. The limit
 // is applied AFTER the kind filter for the same reason: filtering a limited page
 // would return a page of rejects with the handful of bans in it dropped.
-func (l *eventLog) sinceKind(seq uint64, limit int, kind string) []Event {
+func (l *eventLog) sinceKind(seq uint64, limit int, kind string) ([]Event, uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -179,7 +180,7 @@ func (l *eventLog) sinceKind(seq uint64, limit int, kind string) []Event {
 	if len(out) > limit {
 		out = out[len(out)-limit:]
 	}
-	return out
+	return out, l.seq
 }
 
 // lastSeq reports the newest sequence number issued.

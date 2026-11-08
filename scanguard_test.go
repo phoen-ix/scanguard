@@ -335,22 +335,6 @@ func TestAdminSurface(t *testing.T) {
 	}
 }
 
-// The console ships its own login gate — an "Access token" field that stores what
-// you type in sessionStorage and validates it against /api/health. That gate can
-// only do its job if the browser can fetch the page holding it, so the three
-// static assets must be served WITHOUT a token while every data endpoint keeps
-// demanding one. Authenticating the assets too made the console unreachable from
-// a browser entirely: you got the 401 JSON body and no way to enter a token.
-// Editor-plugin FTP/SFTP credential files are swept as a set. Observed in the
-// wild against a parked host: one source requested /.vscode/sftp.json and
-// /sftp-config.json in the same second, and only the first was a signature, so
-// the sweep went unflagged. Each path here is checked individually because
-// covering half the family is the failure this guards against.
-// The console hides regions with el.hidden, which depends on the user-agent rule
-// [hidden] { display: none }. Any author rule setting display on the same element
-// silently defeats it — .gate sets display: grid, which left the login card on
-// screen after unlock with the app rendered beneath it. The stylesheet must carry
-// its own reset.
 // Every exemption branch must name itself. "1 exempt" with no way to ask which
 // rule produced it is indistinguishable from an allowlist entry quietly exempting
 // far more than intended.
@@ -565,6 +549,11 @@ func TestSourcesEndpointRequiresAuth(t *testing.T) {
 	}
 }
 
+// The console hides regions with el.hidden, which depends on the user-agent rule
+// [hidden] { display: none }. Any author rule setting display on the same element
+// silently defeats it — .gate sets display: grid, which left the login card on
+// screen after unlock with the app rendered beneath it. The stylesheet must carry
+// its own reset.
 func TestStylesheetResetsHiddenElements(t *testing.T) {
 	if !strings.Contains(appCSS, "[hidden]") {
 		t.Fatal("appCSS has no [hidden] rule; el.hidden is defeated by any author display rule")
@@ -579,6 +568,11 @@ func TestStylesheetResetsHiddenElements(t *testing.T) {
 	}
 }
 
+// Editor-plugin FTP/SFTP credential files are swept as a set. Observed in the
+// wild against a parked host: one source requested /.vscode/sftp.json and
+// /sftp-config.json in the same second, and only the first was a signature, so
+// the sweep went unflagged. Each path here is checked individually because
+// covering half the family is the failure this guards against.
 func TestSFTPCredentialSignaturesAreCovered(t *testing.T) {
 	m, err := newMatcher(t.Name(), defaultSignatures)
 	if err != nil {
@@ -679,6 +673,12 @@ func TestWordPressBatchEndpointIsCoveredWithoutTheRESTFallback(t *testing.T) {
 	}
 }
 
+// The console ships its own login gate — an "Access token" field that stores what
+// you type in sessionStorage and validates it against /api/health. That gate can
+// only do its job if the browser can fetch the page holding it, so the three
+// static assets must be served WITHOUT a token while every data endpoint keeps
+// demanding one. Authenticating the assets too made the console unreachable from
+// a browser entirely: you got the 401 JSON body and no way to enter a token.
 func TestConsoleAssetsLoadWithoutTokenButDataDoesNot(t *testing.T) {
 	const token = "test-token-0123456789"
 	h := build(t, func(c *Config) {

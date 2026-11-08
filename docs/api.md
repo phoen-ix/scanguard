@@ -17,9 +17,13 @@ Authorization: Bearer <admin.token>
 With `admin.trustForwardedUser: true` an `X-Forwarded-User` header from the auth
 proxy in front of the console is accepted instead, and becomes the `actor` on
 what it changes. A wrong or missing credential is a 401 with a JSON `error`;
-failures are counted (`stats.authFailures`) and logged, throttled to one line a
-minute. The three static assets (`/`, `/app.css`, `/app.js`) need no token; they
-contain nothing but the page.
+failures are counted (`stats.authFailures`) and logged with the resolved client,
+throttled to one line a minute. The plugin's own 401 carries
+`WWW-Authenticate: Bearer realm="scanguard"`; the `Bearer` scheme is matched
+case-insensitively. The static assets (`/`, `/index.html`, `/app.css`,
+`/app.js`) need no token; they contain nothing but the page. `/favicon.ico` is a
+plain 404, never a failed login. In prefix mode the bare prefix
+(`/__scanguard`) is a 308 to `/__scanguard/`.
 
 **Mutations** (POST, PUT, DELETE) additionally need
 
@@ -37,14 +41,14 @@ Without it a mutation is a 403. With `admin.readOnly: true` every mutation is a
 | | |
 | --- | --- |
 | `GET /api/health` | `{ok, instance, backend}`. The console's login gate uses it to validate a token |
-| `GET /api/state` | the dashboard payload: `instance`, `backend`, `dryRun`, `readOnly`, `uptime`, `stats` (requests, rejected, detections, bansIssued, bansManual, unbans, expired, exempt, authFailures), `trackedSources`, `evictedSources`, `bans` (newest 500) and `bansTotal`, `events` (newest 100 of every kind), `lastSeq`, the tallies `topPaths`, `topSources`, `topDetectors`, `topRules`, `topHosts`, `topExempt`, and `config` (a redacted summary; no secrets) |
-| `GET /api/events?since=N&limit=M&kind=K` | events with `seq > N`, oldest first, at most `M` (default 200, max 1000). `kind` is `ban`, `unban` or `reject`; bans and unbans come from their own ring, so they survive any volume of rejects. Returns `{events, lastSeq}` |
+| `GET /api/state` | the dashboard payload: `instance`, `backend`, `dryRun`, `readOnly`, `uptime`, `stats` (requests, rejected, detections, bansIssued, bansManual, unbans, expired, exempt, authFailures, notifyDropped), `trackedSources`, `evictedSources`, `bans` (newest 500; in a dry run the would-bans too, with `dryRun: true`) and `bansTotal`, `events` (newest 100 of every kind), `lastSeq`, the tallies `topPaths`, `topSources`, `topDetectors`, `topRules`, `topHosts`, `topExempt`, `config` (a redacted summary; no secrets), and `rulesStamp`, which changes whenever the rule editor's content would |
+| `GET /api/events?since=N&limit=M&kind=K` | events with `seq > N`, oldest first, at most `M` (default 200, max 1000). `kind` is `ban`, `unban` or `reject`; bans and unbans come from their own ring, so they survive any volume of rejects. Returns `{events, lastSeq}`, read under one lock. A `lastSeq` below the one you hold means the instance restarted: start again from `since=0`. Ban events carry `expires` (absent when permanent) |
 | `GET /api/sources?limit=N` | the tracked-source table, most recently seen first, at most `N` (default 50, max 500): `{sources: [{key, lastSeen, offences, badPaths}], total, truncated}`. Fetched on demand because it walks the whole table under the request path's lock |
-| `GET /api/bans` | every active ban: `{bans: [...]}` with `key`, `reason`, `detector`, `rule`, `created`, `expires` (zero time when permanent), `offences`, `manual`, `actor`, `lastPath`, `lastUA`, `country`, `hits` |
+| `GET /api/bans` | every active ban: `{bans: [...]}` with `key`, `reason`, `detector`, `rule`, `created`, `expires` (zero time when permanent), `offences`, `manual`, `actor`, `lastPath`, `lastUA`, `country` (filled from the geo cache when the list is read), `hits`; in a dry run the would-bans as well, with `dryRun: true` |
 | `POST /api/bans` | body `{"key": "203.0.113.5" or "198.51.100.0/24", "duration": "1h" (default; "0" means permanent), "reason": "..."}`. Refused with 400 when the key is narrower than the configured ban-key width or wider than /8 (IPv4) or /16 (IPv6), and with 409 when it overlaps the allowlist or a trusted proxy. Returns `{ban}` |
-| `DELETE /api/bans?key=...` | lifts a ban and clears the source's escalation ladder. Returns `{unbanned: bool, key}` |
-| `GET /api/rules` | the rule editor's payload: `effective` and `fromFile` (the editable sections `dryRun`, `detectors`, `allowlist`, `enforcement`), `overridden` (the sections the console owns), `builtIn` counts, `updated`, `actor` |
-| `PUT /api/rules` | the same editable shape back. Validated by the same parser as the file; a bad regex or duration is a 422 with the reason and nothing changes. Sections identical to the file are not taken over. Unknown fields (anything outside the four editable sections) are a 400 |
+| `DELETE /api/bans?key=...` | lifts a ban (or a dry run's would-ban) and clears the source's escalation ladder. Accepts a key narrower than the current key width, so a ban persisted at an earlier width can be removed. Returns `{unbanned: bool, key}` |
+| `GET /api/rules` | the rule editor's payload: `effective` and `fromFile` (the editable sections `dryRun`, `detectors`, `allowlist`, `enforcement`), `overridden` (the sections the console owns), `builtIn` counts, `updated`, `actor`; `stale` when a reload made the saved edits inapplicable (the file configuration then runs and `effective` shows it), `unsaved` when the edits in force could not be persisted or published |
+| `PUT /api/rules` | the same editable shape back (POST is accepted as an alias). Validated by the same parser as the file; a bad regex or duration is a 422 with the reason and nothing changes. Sections identical to the file are not taken over. Unknown fields (anything outside the four editable sections) are a 400 |
 | `DELETE /api/rules` | discards the console's edits; the file configuration is back in force |
 | `GET /api/rules/compiled` | what the detectors actually run: `signatures`, `exclude`, `userAgents`, `crawlers`, `honeypots`, `payload`, `allowPaths`, `allowUA`, `allowCIDRs`, `trusted`, defaults folded in and duplicates removed |
 

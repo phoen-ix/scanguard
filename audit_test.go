@@ -207,7 +207,7 @@ func TestBanEventsSurviveARejectFlood(t *testing.T) {
 		l.add(Event{Kind: eventReject, Key: "203.0.113.1/32"})
 	}
 
-	bans := l.sinceKind(0, 500, eventBan)
+	bans := evs(l.sinceKind(0, 500, eventBan))
 	if len(bans) != 5 {
 		t.Fatalf("the ban filter returned %d events after a reject flood, want 5", len(bans))
 	}
@@ -217,14 +217,14 @@ func TestBanEventsSurviveARejectFlood(t *testing.T) {
 	if all := l.recent(0); len(all) != 10 || all[0].Kind != eventReject {
 		t.Errorf("the unfiltered ring should hold the 10 newest rejects, got %d events", len(all))
 	}
-	if got := l.sinceKind(bans[4].Seq, 0, eventBan); len(got) != 0 {
+	if got := evs(l.sinceKind(bans[4].Seq, 0, eventBan)); len(got) != 0 {
 		t.Errorf("polling from the newest ban returned %d events, want 0", len(got))
 	}
 	l.add(Event{Kind: eventUnban, Key: "203.0.113.1/32"})
-	if got := l.sinceKind(0, 0, eventUnban); len(got) != 1 {
+	if got := evs(l.sinceKind(0, 0, eventUnban)); len(got) != 1 {
 		t.Errorf("unbans share the ban ring; filter returned %d, want 1", len(got))
 	}
-	if got := l.sinceKind(0, 0, ""); len(got) != 10 {
+	if got := evs(l.sinceKind(0, 0, "")); len(got) != 10 {
 		t.Errorf("unfiltered sinceKind returned %d, want the ring size 10", len(got))
 	}
 }
@@ -241,11 +241,11 @@ func TestEventLogResizeKeepsTheNewestEntries(t *testing.T) {
 	if len(recent) != 5 || recent[0].Key != "203.0.113.10/32" || recent[4].Key != "203.0.113.6/32" {
 		t.Fatalf("after shrinking to 5 the ring holds %v, want the five newest, newest first", keysOf(recent))
 	}
-	oldest := l.sinceKind(0, 0, "")
+	oldest := evs(l.sinceKind(0, 0, ""))
 	if len(oldest) != 5 || oldest[0].Key != "203.0.113.6/32" || oldest[4].Key != "203.0.113.10/32" {
 		t.Errorf("polling after a shrink returned %v, want 6..10 oldest first", keysOf(oldest))
 	}
-	if bans := l.sinceKind(0, 0, eventBan); len(bans) != 5 {
+	if bans := evs(l.sinceKind(0, 0, eventBan)); len(bans) != 5 {
 		t.Errorf("the ban ring kept %d entries after the shrink, want 5", len(bans))
 	}
 

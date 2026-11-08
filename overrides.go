@@ -73,6 +73,10 @@ func (o *Overrides) compatible() error {
 //   - notify.*. These carry secrets — an AbuseIPDB key, webhook URLs that
 //     routinely embed credentials — which is why the API redacts them. A surface
 //     that can rewrite a webhook URL can exfiltrate every ban event.
+//   - geo.*. Display only, and it makes outbound calls to an endpoint that a
+//     console edit should not be able to choose.
+//   - observeResponse. It decides whether the ResponseWriter is wrapped, which
+//     is a property of the routes (streaming or not), not a rule.
 //   - instanceName, uiMode, enabled. Structural: they decide which runtime this
 //     middleware belongs to and whether it exists at all.
 

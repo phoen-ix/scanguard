@@ -1,6 +1,7 @@
 package scanguard
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -338,6 +339,20 @@ func TestDefaultRulesCompile(t *testing.T) {
 	} {
 		if s.sigMatcher.match(path) {
 			t.Errorf("default signatures falsely match %s — that is a self-inflicted outage", path)
+		}
+	}
+}
+
+// The default rules are written lower case (CLAUDE.md): matching is
+// case-insensitive, and a mixed-case entry suggests otherwise to the next
+// person who edits it. Escapes such as \S and \B are upper case by design.
+func TestDefaultRulesAreLowerCase(t *testing.T) {
+	escape := regexp.MustCompile(`\\.`)
+	for _, list := range [][]string{defaultSignatures, defaultUserAgents, defaultCrawlers, defaultPayloadPatterns} {
+		for _, p := range list {
+			if bare := escape.ReplaceAllString(p, ""); bare != strings.ToLower(bare) {
+				t.Errorf("default rule %q is not lower case", p)
+			}
 		}
 	}
 }

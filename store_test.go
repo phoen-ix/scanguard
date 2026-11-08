@@ -9,6 +9,14 @@ import (
 	"time"
 )
 
+// size reports how many bans the table holds, expired ones included. Only the
+// tests need it; the API counts what list() returns.
+func (m *memStore) size() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.bans)
+}
+
 func ban(keyStr string, expires time.Time) Ban {
 	return Ban{
 		Key:      keyStr,
@@ -253,7 +261,7 @@ func TestEventRingBufferIsBounded(t *testing.T) {
 		t.Errorf("lastSeq = %d, want 100", l.lastSeq())
 	}
 
-	since := l.sinceKind(95, 0, "")
+	since := evs(l.sinceKind(95, 0, ""))
 	if len(since) != 5 {
 		t.Fatalf("sinceKind(95) returned %d events, want 5", len(since))
 	}
@@ -399,3 +407,6 @@ func TestLookupSkipsLapsedEntriesInFrontOfAnActiveRange(t *testing.T) {
 		t.Error("everything lapsed, yet a ban was found")
 	}
 }
+
+// evs drops sinceKind's lastSeq for tests that only look at the events.
+func evs(events []Event, _ uint64) []Event { return events }

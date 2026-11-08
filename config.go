@@ -48,9 +48,11 @@ type StoreConfig struct {
 	Backend string `json:"backend,omitempty"`
 	// Path is the JSON snapshot location for the "file" backend.
 	Path string `json:"path,omitempty"`
-	// SnapshotInterval bounds how often the file backend rewrites its snapshot.
-	// Counter updates never trigger a write on their own; a 404 flood would
-	// otherwise burn IOPS rewriting the file thousands of times a second.
+	// SnapshotInterval is the janitor period, 30s at the least: expired bans are
+	// swept, the file snapshot is written if anything changed, and a Redis store
+	// is refreshed. A ban-list change is also written at once; counter updates
+	// never trigger a write, or a 404 flood would rewrite the file thousands of
+	// times a second.
 	SnapshotInterval string `json:"snapshotInterval,omitempty"`
 	// FailOpen decides what happens when the backend is unusable — Redis
 	// unreachable, or the file backend's directory unwritable and its snapshot
@@ -1260,7 +1262,11 @@ func (c *Config) parseAdmin(s *settings) error {
 	if s.adminEnabled && s.adminToken == "" && !s.adminSSO {
 		// This page can unban IPs and edit detection rules from inside the reverse
 		// proxy, and Traefik contributes no authentication to it whatsoever.
-		return errors.New("admin.enabled is true but neither admin.token nor admin.trustForwardedUser is set: " +
+		which := "admin.enabled is true"
+		if c.UIMode && !c.Admin.Enabled {
+			which = "uiMode is true (which turns the admin surface on)"
+		}
+		return errors.New(which + " but neither admin.token nor admin.trustForwardedUser is set: " +
 			"the admin UI would be reachable, and mutable, by anyone who can reach the router it is attached to")
 	}
 	if s.adminToken != "" && len(s.adminToken) < 16 {

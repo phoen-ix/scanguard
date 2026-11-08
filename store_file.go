@@ -25,10 +25,11 @@ type snapshotFile struct {
 const snapshotVersion = 1
 
 // fileStore is the memory store plus a JSON snapshot, so bans survive a Traefik
-// restart. Treat the file as a cache rather than a ledger: durably fsyncing it
-// would need the syscall package, which Traefik gates behind the useUnsafe flag
-// and which marks a plugin as unsafe in the catalog. Temp-write plus rename gives
-// atomic replacement, which is the property that actually matters here.
+// restart. Treat the file as a cache rather than a ledger: it is not fsynced.
+// (*os.File).Sync is plain os and would work under Yaegi, but a sync per ban
+// under a scan is the IOPS cost the snapshot design avoids, and losing the last
+// few bans to a power cut costs one re-detection each. Temp-write plus rename
+// gives atomic replacement, which is the property that actually matters here.
 type fileStore struct {
 	*memStore
 	path     string
@@ -67,8 +68,14 @@ func newFileStore(s *settings) (*fileStore, error) {
 			return nil, fmt.Errorf("store.path: %s is not writable and store.failOpen is false: %w", dir, err)
 		}
 		warnOnce(fs.instance, "state-dir-unwritable",
-			"state directory is not writable; scanguard will run in memory only and bans will not survive a restart",
+			"state directory is not writable; scanguard will run in memory only and new bans will not survive a restart",
 			map[string]interface{}{"dir": dir, "error": err.Error()})
+		// A read-only volume can still hold a snapshot worth enforcing: the
+		// load used to be skipped along with the writes, so it restored nothing.
+		if loaded, lerr := fs.load(); lerr == nil && loaded > 0 {
+			logInfo(fs.instance, "restored bans from a read-only state snapshot",
+				map[string]interface{}{"path": fs.path, "bans": loaded})
+		}
 		return fs, nil
 	}
 	fs.writable = true

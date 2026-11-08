@@ -529,12 +529,6 @@ func (m *memStore) markDirty() {
 	m.mu.Unlock()
 }
 
-func (m *memStore) size() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return len(m.bans)
-}
-
 // setMax changes the ban-table cap, evicting at once if the table is over it.
 // A reload that changes store.maxEntries rebuilds the real store with the new
 // cap; the dry-run shadow list is this type too and has to follow.

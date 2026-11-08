@@ -252,6 +252,11 @@ A `uiMode` instance is a *view* onto the shared runtime, not a second
 configuration of it — it contributes only the admin surface and cannot overwrite
 your detectors.
 
+The console works behind basicAuth or forwardAuth: its API calls carry the
+browser's credentials, and a 401 from the proxy is reported as the proxy's, not
+as a wrong token. Open it at the prefix with a trailing slash in prefix mode;
+the bare prefix redirects there.
+
 ## ⚠️ Client IP, or how to take your own site down
 
 If Traefik sits behind Cloudflare, a load balancer, or a Kubernetes Service,
@@ -353,11 +358,11 @@ store:
     password: ""
     db: 0
     keyPrefix: "scanguard:"
-    timeout: 2s
+    timeout: 2s              # > 0; keyPrefix may not contain * ? [ ] \
 
 clientIP:
   trustedProxies: []         # NO DEFAULT — see the warning above
-  header: ""                 # e.g. Cf-Connecting-Ip; only honoured from a trusted peer
+  header: ""                 # e.g. Cf-Connecting-Ip; only honoured from a trusted peer, last value wins
   ipv4Prefix: 32             # ban-key width
   ipv6Prefix: 64             # /128 bans are useless; a host owns a whole /64
 
@@ -371,18 +376,18 @@ detectors:
   honeypots:   { enabled: true,  paths: [] }
   userAgent:   { enabled: true,  useDefaults: true, patterns: [], banEmptyUA: false,
                  crawlers: ignore }   # ignore | ban | block | exempt — settable per router
-  badPaths:    { enabled: true,  capacity: 20, leak: 10s, statuses: [400,401,403,404,405,501] }
+  badPaths:    { enabled: true,  capacity: 20, leak: 10s, statuses: [400,401,403,404,405,501] }   # capacity at most 128
   bruteForce:  { enabled: false, capacity: 5, window: 60s, statuses: [401,403], paths: [] }
   rateAbuse:   { enabled: false, rps: 50, burst: 100 }
   uaRotation:  { enabled: false, capacity: 8, leak: 60s }   # distinct user-agents per source; capacity 2-128, leak > 0
-  payload:     { enabled: false, useDefaults: true, patterns: [], scanQuery: true, scanBody: false, maxBodyBytes: 8192 }
+  payload:     { enabled: false, useDefaults: true, patterns: [], scanQuery: true, scanBody: false, maxBodyBytes: 8192 }   # at most 1 MiB
 
 enforcement:
-  rejectStatus: 403          # 404 hides the middleware's existence
+  rejectStatus: 403          # 200-599; 404 hides the middleware's existence
   rejectBody: ""
   escalation: ["1h", "24h", "168h", "0"]   # "0" means permanent
   decay: 24h                 # behave this long and drop a rung
-  tarpit: { enabled: false, delay: 3s, maxConcurrent: 50 }   # maxConcurrent: at most 10000
+  tarpit: { enabled: false, delay: 3s, maxConcurrent: 50 }   # delay > 0 when enabled; maxConcurrent at most 10000
   subnet:                    # range escalation — see "Range escalation"
     enabled: false
     threshold: 5             # this many banned sources in one range ...
@@ -393,11 +398,12 @@ enforcement:
 
 notify:
   timeout: 5s
-  webhooks: []               # none by default; each entry: { url, method: POST, headers: {}, events: [ban, unban] }
-  chat: { kind: "", url: "", events: [] }   # discord | slack | ntfy | gotify
-  abuseipdb: { enabled: false, apiKey: "", report: true, check: false, minConfidence: 75, cacheTTL: 24h }
+  webhooks: []               # none by default; each entry: { url, method: POST|PUT|PATCH, headers: {}, events: [ban, unban] }
+  chat: { kind: "", url: "", events: [] }   # discord | slack | ntfy | gotify; url must be http(s)
+  abuseipdb: { enabled: false, apiKey: "", report: true, check: false, minConfidence: 75, cacheTTL: 24h,
+               endpoint: https://api.abuseipdb.com }   # crawler and reputation bans are never reported
 
-geo: { enabled: false, provider: ip-api, cacheTTL: 168h }   # console display only
+geo: { enabled: false, provider: ip-api, cacheTTL: 168h, endpoint: http://ip-api.com }   # console display only
 
 admin:
   enabled: false             # off by default; no default token
@@ -405,7 +411,7 @@ admin:
   token: ""                  # 16+ characters, compared in constant time
   trustForwardedUser: false  # honour X-Forwarded-User from Authelia/Authentik/oauth2-proxy — see the note below
   readOnly: false
-  eventLogSize: 500
+  eventLogSize: 500          # at most 50000
   serveOnDetectionRoutes: false   # also answer pathPrefix on every route the detector protects; leave it off
 ```
 

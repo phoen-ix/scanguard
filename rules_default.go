@@ -65,8 +65,9 @@ var defaultSignatures = []string{
 	// dot-directory; anywhere else it is an API route — /api/v1/credentials,
 	// /vault/secrets — and the unanchored form banned that application's own
 	// logged-in users on first visit. With an extension it is a file, and a file
-	// by that name is a probe wherever it sits.
-	`(?:^/|/\.[^/]+/)(?:credentials|secrets|id_rsa)(?:\.txt|\.json|\.yml|\.yaml)?$`,
+	// by that name is a probe wherever it sits: the next pattern, which the
+	// optional extension here used to duplicate (and which() then named this one).
+	`(?:^/|/\.[^/]+/)(?:credentials|secrets|id_rsa)$`,
 	`/(?:credentials|secrets|id_rsa)\.(?:txt|json|yml|yaml)$`,
 	// Cloud, container and mail credentials, all dotfiles a webroot never serves.
 	// Seen probed as one set by the same wordlists that ask for /.env: 1,616
@@ -195,7 +196,7 @@ var defaultSignatures = []string{
 	// elFinder's PHP connector (CVE-2019-9194, CVE-2021-32682) and the Hikvision
 	// command-injection endpoint (CVE-2021-36260), both probed as single requests.
 	`/filemanager/php/connector(?:\.minimal)?\.php`,
-	`/SDK/webLanguage`,
+	`/sdk/weblanguage`,
 
 	// Measured over 15 days of live traffic at one deployment (946k requests).
 	// Each was requested only by sources that also probed for something else, and

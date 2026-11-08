@@ -12,7 +12,7 @@ http:
           store:
             backend: file
             path: /var/lib/scanguard/state.json
-            snapshotInterval: 15s
+            snapshotInterval: 30s   # the minimum; the janitor runs on it
 
           clientIP:
             # No default, deliberately. Listing a CIDR here means "believe the
@@ -120,6 +120,10 @@ http:
           - "dev:$apr1$Q8kV1Zqm$xVsvGx1CxK/g5T8Q2yqBn1"
 
   routers:
+    # No Host in the rule, so this also answers hostnames nothing else serves.
+    # In production, give unknown vhosts a catch-all router of their own with
+    # scanguard on it (HostRegexp(`^.+$`), priority 1): otherwise a probe for
+    # /wp-login.php on an unknown vhost is a Traefik 404 no middleware sees.
     site:
       rule: PathPrefix(`/`)
       entryPoints: [web]
@@ -147,16 +151,6 @@ http:
       entryPoints: [web]
       service: sse
       priority: 100
-      middlewares: [scanguard]
-
-    # Catch-all: without this, probes aimed at a hostname you do not serve are
-    # answered 404 by Traefik's router and never reach any middleware, so the
-    # classic "scan /wp-login.php on an unknown vhost" case is invisible.
-    catchall:
-      rule: HostRegexp(`^.+$`)
-      entryPoints: [web]
-      service: noop
-      priority: 1
       middlewares: [scanguard]
 
     scanguard-console:

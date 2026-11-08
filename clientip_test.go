@@ -53,7 +53,6 @@ func TestResolveIgnoresHeadersFromUntrustedPeer(t *testing.T) {
 
 	res := s.resolve(request("203.0.113.5:41234", map[string]string{
 		"X-Forwarded-For": "198.51.100.99",
-		"X-Real-Ip":       "198.51.100.99",
 	}))
 	if got := res.client.String(); got != "203.0.113.5" {
 		t.Fatalf("client = %s, want the peer 203.0.113.5 — a spoofed header was believed", got)

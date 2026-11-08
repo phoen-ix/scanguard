@@ -490,10 +490,8 @@ func (rt *runtime) apiEvents(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	writeJSON(rw, http.StatusOK, EventsResponse{
-		Events:  rt.events.sinceKind(since, limit, kind),
-		LastSeq: rt.events.lastSeq(),
-	})
+	events, last := rt.events.sinceKind(since, limit, kind)
+	writeJSON(rw, http.StatusOK, EventsResponse{Events: events, LastSeq: last})
 }
 
 // banRequest is the body of a manual ban or unban.
@@ -617,7 +615,7 @@ func (rt *runtime) apiRules(s *settings, rw http.ResponseWriter, req *http.Reque
 		rt.writeRules(rw, http.StatusOK)
 
 	default:
-		writeJSON(rw, http.StatusMethodNotAllowed, map[string]string{"error": "GET, PUT or DELETE"})
+		writeJSON(rw, http.StatusMethodNotAllowed, map[string]string{"error": "GET, PUT (POST is accepted as an alias) or DELETE"})
 	}
 }
 
