@@ -169,6 +169,47 @@ func TestInvalidValuesAreRejected(t *testing.T) {
 		"subnet window not a duration": func(c *Config) {
 			c.Enforcement.Subnet.Window = "soon"
 		},
+		// Durations where "0" does not mean "never" but "broken".
+		"redis timeout 0 (every command would time out at once)": func(c *Config) {
+			c.Store.Backend = "redis"
+			c.Store.Redis.Address = "127.0.0.1:6379"
+			c.Store.Redis.Timeout = "0"
+		},
+		"abuseipdb cacheTTL 0 (every score stale on arrival)": func(c *Config) {
+			c.Notify.AbuseIPDB.CacheTTL = "0"
+		},
+		"geo cacheTTL 0": func(c *Config) {
+			c.Geo.CacheTTL = "0"
+		},
+		"tarpit enabled with delay 0": func(c *Config) {
+			c.Enforcement.Tarpit = TarpitConfig{Enabled: true, Delay: "0"}
+		},
+		"reject status 1xx (the body would go out as 200)": func(c *Config) {
+			c.Enforcement.RejectStatus = 103
+		},
+		"badPaths capacity above the remembered set": func(c *Config) {
+			c.Detectors.BadPaths.Capacity = maxDistinctPaths + 1
+		},
+		"webhook with a method that carries no body": func(c *Config) {
+			c.Notify.Webhooks = []WebhookConfig{{URL: "https://example.com", Method: "GET"}}
+		},
+		"chat with a non-http URL": func(c *Config) {
+			c.Notify.Chat = ChatConfig{Kind: "slack", URL: "hooks.slack.com/services/x"}
+		},
+		"abuseipdb minConfidence above 100": func(c *Config) {
+			c.Notify.AbuseIPDB.MinConfidence = 101
+		},
+		"redis keyPrefix with glob characters": func(c *Config) {
+			c.Store.Backend = "redis"
+			c.Store.Redis.Address = "127.0.0.1:6379"
+			c.Store.Redis.KeyPrefix = "sg[prod]:"
+		},
+		"payload maxBodyBytes above the ceiling": func(c *Config) {
+			c.Detectors.Payload.MaxBodyBytes = maxPayloadBodyBytes + 1
+		},
+		"eventLogSize above the ceiling": func(c *Config) {
+			c.Admin.EventLogSize = maxEventLogSize + 1
+		},
 	}
 
 	for name, mutate := range cases {
@@ -176,6 +217,35 @@ func TestInvalidValuesAreRejected(t *testing.T) {
 		mutate(cfg)
 		if _, err := cfg.parse(); err == nil {
 			t.Errorf("%s: expected the configuration to be refused", name)
+		}
+	}
+}
+
+// The values the new refusals sit next to must still be accepted: the
+// defaults, a disabled tarpit with delay 0, the top of each range.
+func TestValidationBoundariesAreAccepted(t *testing.T) {
+	cases := map[string]func(*Config){
+		"tarpit disabled with delay 0":  func(c *Config) { c.Enforcement.Tarpit.Delay = "0" },
+		"reject status 200":             func(c *Config) { c.Enforcement.RejectStatus = 200 },
+		"reject status 599":             func(c *Config) { c.Enforcement.RejectStatus = 599 },
+		"badPaths capacity at the cap":  func(c *Config) { c.Detectors.BadPaths.Capacity = maxDistinctPaths },
+		"webhook PUT":                   func(c *Config) { c.Notify.Webhooks = []WebhookConfig{{URL: "https://example.com", Method: "put"}} },
+		"minConfidence 100":             func(c *Config) { c.Notify.AbuseIPDB.MinConfidence = 100 },
+		"minConfidence 0 means default": func(c *Config) { c.Notify.AbuseIPDB.MinConfidence = 0 },
+		"maxBodyBytes at the ceiling":   func(c *Config) { c.Detectors.Payload.MaxBodyBytes = maxPayloadBodyBytes },
+		"eventLogSize at the ceiling":   func(c *Config) { c.Admin.EventLogSize = maxEventLogSize },
+		"redis keyPrefix with a colon and a dash": func(c *Config) {
+			c.Store.Backend = "redis"
+			c.Store.Redis.Address = "127.0.0.1:1"
+			c.Store.Redis.KeyPrefix = "sg-prod:"
+			c.Store.FailOpen = true
+		},
+	}
+	for name, mutate := range cases {
+		cfg := CreateConfig()
+		mutate(cfg)
+		if _, err := cfg.parse(); err != nil {
+			t.Errorf("%s: refused: %v", name, err)
 		}
 	}
 }

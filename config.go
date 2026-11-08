@@ -3,6 +3,7 @@ package scanguard
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -527,6 +528,15 @@ const permanent time.Duration = 0
 // denial of service the cap exists to prevent, not a setting anyone needs.
 const maxTarpitConcurrent = 10000
 
+// maxPayloadBodyBytes caps detectors.payload.maxBodyBytes. peekBody buffers up
+// to this much of every request body with a declared length inside the proxy,
+// and the field is console-editable.
+const maxPayloadBodyBytes = 1 << 20
+
+// maxEventLogSize caps admin.eventLogSize. Each ring entry can hold about a
+// kilobyte of attacker-controlled text, and there are two rings.
+const maxEventLogSize = 50000
+
 // parseDuration accepts Go duration syntax plus "0", "never" and "permanent",
 // all of which mean "does not expire".
 func parseDuration(field, raw string, def time.Duration) (time.Duration, error) {
@@ -763,6 +773,11 @@ func (c *Config) parseStore(s *settings) error {
 	if s.redisTimeout, err = parseDuration("store.redis.timeout", c.Store.Redis.Timeout, 2*time.Second); err != nil {
 		return err
 	}
+	if s.redisTimeout == permanent {
+		// "0" reads as "never" everywhere else, but here it reached
+		// SetDeadline(now) and every Redis command timed out before it was sent.
+		return errors.New("store.redis.timeout must be a positive duration")
+	}
 	s.failOpen = c.Store.FailOpen
 	s.maxEntries = c.Store.MaxEntries
 	if s.maxEntries <= 0 {
@@ -771,6 +786,12 @@ func (c *Config) parseStore(s *settings) error {
 	s.redis = c.Store.Redis
 	if strings.TrimSpace(s.redis.KeyPrefix) == "" {
 		s.redis.KeyPrefix = "scanguard:"
+	}
+	// The prefix becomes the SCAN MATCH pattern. Glob characters in it would
+	// write keys literally and then match none of them back, so every refresh
+	// emptied the local cache and every ban held for one janitor interval.
+	if strings.ContainsAny(s.redis.KeyPrefix, `*?[]\`) {
+		return fmt.Errorf("store.redis.keyPrefix: %q must not contain the glob characters * ? [ ] or \\", s.redis.KeyPrefix)
 	}
 	return nil
 }
@@ -895,6 +916,12 @@ func (c *Config) parseDetectors(s *settings) error {
 	if s.badPaths.Capacity <= 0 {
 		s.badPaths.Capacity = 20
 	}
+	// Same bucket as uaRotation, same ceiling: the remembered set is capped at
+	// maxDistinctPaths and starts over when full, so above it a path seen before
+	// counts as new again and the capacity is never reached.
+	if s.badPaths.Enabled && s.badPaths.Capacity > maxDistinctPaths {
+		return fmt.Errorf("detectors.badPaths.capacity: %d is above %d, the most distinct paths a source is remembered for", s.badPaths.Capacity, maxDistinctPaths)
+	}
 	if s.badPathsLeak, err = parseDuration("detectors.badPaths.leak", d.BadPaths.Leak, 10*time.Second); err != nil {
 		return err
 	}
@@ -950,6 +977,10 @@ func (c *Config) parseDetectors(s *settings) error {
 	if s.payload.MaxBodyBytes <= 0 {
 		s.payload.MaxBodyBytes = 8192
 	}
+	if s.payload.MaxBodyBytes > maxPayloadBodyBytes {
+		// Console-editable, and buffered per request inside the proxy.
+		return fmt.Errorf("detectors.payload.maxBodyBytes: %d is above the ceiling of %d", s.payload.MaxBodyBytes, maxPayloadBodyBytes)
+	}
 
 	s.uaRot = d.UARotation
 	if s.uaRot.Capacity == 0 {
@@ -974,8 +1005,10 @@ func (c *Config) parseEnforcement(s *settings) error {
 	if s.rejectStatus == 0 {
 		s.rejectStatus = 403
 	}
-	if s.rejectStatus < 100 || s.rejectStatus > 599 {
-		return fmt.Errorf("enforcement.rejectStatus: %d is not a valid HTTP status code", s.rejectStatus)
+	// 200-599: a 1xx WriteHeader is informational, so the body write that
+	// follows it sent a 200 OK, and the console offers this field with no hint.
+	if s.rejectStatus < 200 || s.rejectStatus > 599 {
+		return fmt.Errorf("enforcement.rejectStatus: %d is not a final HTTP status code (200-599)", s.rejectStatus)
 	}
 	s.rejectBody = c.Enforcement.RejectBody
 
@@ -1008,6 +1041,9 @@ func (c *Config) parseEnforcement(s *settings) error {
 	s.tarpitEnabled = c.Enforcement.Tarpit.Enabled
 	if s.tarpitDelay, err = parseDuration("enforcement.tarpit.delay", c.Enforcement.Tarpit.Delay, 3*time.Second); err != nil {
 		return err
+	}
+	if s.tarpitEnabled && s.tarpitDelay == permanent {
+		return errors.New("enforcement.tarpit.delay must be a positive duration when the tarpit is enabled")
 	}
 	n := c.Enforcement.Tarpit.MaxConcurrent
 	if n <= 0 {
@@ -1063,8 +1099,15 @@ func (c *Config) parseNotify(s *settings) error {
 		if strings.TrimSpace(w.URL) == "" {
 			return fmt.Errorf("notify.webhooks[%d].url is required", i)
 		}
-		if !strings.HasPrefix(w.URL, "http://") && !strings.HasPrefix(w.URL, "https://") {
+		if !isHTTPURL(w.URL) {
 			return fmt.Errorf("notify.webhooks[%d].url must be an http(s) URL, got %q", i, w.URL)
+		}
+		// The event is the request body, so only the methods that carry one.
+		// Anything else failed per delivery, in the log, after the fact.
+		switch strings.ToUpper(strings.TrimSpace(w.Method)) {
+		case "", http.MethodPost, http.MethodPut, http.MethodPatch:
+		default:
+			return fmt.Errorf("notify.webhooks[%d].method: %q is not one of POST, PUT, PATCH", i, w.Method)
 		}
 		if err := validateEventFilter(fmt.Sprintf("notify.webhooks[%d].events", i), w.Events); err != nil {
 			return err
@@ -1079,6 +1122,9 @@ func (c *Config) parseNotify(s *settings) error {
 		if strings.TrimSpace(c.Notify.Chat.URL) == "" {
 			return errors.New("notify.chat.url is required when notify.chat.kind is set")
 		}
+		if !isHTTPURL(c.Notify.Chat.URL) {
+			return fmt.Errorf("notify.chat.url must be an http(s) URL, got %q", c.Notify.Chat.URL)
+		}
 		if err := validateEventFilter("notify.chat.events", c.Notify.Chat.Events); err != nil {
 			return err
 		}
@@ -1086,8 +1132,18 @@ func (c *Config) parseNotify(s *settings) error {
 	if c.Notify.AbuseIPDB.Enabled && strings.TrimSpace(c.Notify.AbuseIPDB.APIKey) == "" {
 		return errors.New("notify.abuseipdb.apiKey is required when abuseipdb is enabled")
 	}
+	// 0 means the default (75); AbuseIPDB scores run 0-100.
+	if mc := c.Notify.AbuseIPDB.MinConfidence; mc < 0 || mc > 100 {
+		return fmt.Errorf("notify.abuseipdb.minConfidence: %d is outside 1-100", mc)
+	}
 	if s.abuseCacheTTL, err = parseDuration("notify.abuseipdb.cacheTTL", c.Notify.AbuseIPDB.CacheTTL, 24*time.Hour); err != nil {
 		return err
+	}
+	if s.abuseCacheTTL == permanent {
+		// A zero TTL made every cached score stale on arrival: the reputation
+		// detector, which reads the cache only, could never fire, and every
+		// request re-queued a lookup against a thousand-a-day quota.
+		return errors.New("notify.abuseipdb.cacheTTL must be a positive duration")
 	}
 
 	s.geoEnabled = c.Geo.Enabled
@@ -1101,7 +1157,18 @@ func (c *Config) parseNotify(s *settings) error {
 	if s.geoCacheTTL, err = parseDuration("geo.cacheTTL", c.Geo.CacheTTL, 168*time.Hour); err != nil {
 		return err
 	}
+	if s.geoCacheTTL == permanent {
+		// Same failure as above, against ip-api's 45 lookups a minute.
+		return errors.New("geo.cacheTTL must be a positive duration")
+	}
 	return nil
+}
+
+// isHTTPURL reports whether raw is an http or https URL, which is all the
+// notifier knows how to send to.
+func isHTTPURL(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	return strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://")
 }
 
 // validateEventFilter refuses event kinds a notifier can never receive. Only
@@ -1143,6 +1210,11 @@ func (c *Config) parseAdmin(s *settings) error {
 	s.eventLogSize = c.Admin.EventLogSize
 	if s.eventLogSize <= 0 {
 		s.eventLogSize = 500
+	}
+	if s.eventLogSize > maxEventLogSize {
+		// Two rings of this many events, each entry up to about a kilobyte of
+		// attacker-controlled text, held for the life of the process.
+		return fmt.Errorf("admin.eventLogSize: %d is above the ceiling of %d", s.eventLogSize, maxEventLogSize)
 	}
 
 	if s.adminEnabled && s.adminSSO {
