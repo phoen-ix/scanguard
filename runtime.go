@@ -2,6 +2,7 @@ package scanguard
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -47,6 +48,10 @@ type runtime struct {
 	detectFP         string
 	uiFP             string
 	storeFingerprint string
+	// storePassword sits beside storeFingerprint rather than in it: a fast hash
+	// of a password is a guessing oracle, so a rotation is detected by comparing
+	// the password itself.
+	storePassword string
 	// notifyFingerprint and geoFingerprint decide whether a reload rebuilds the
 	// notifier and the geo cache. Both carry state worth keeping across a reload
 	// — the AbuseIPDB report dedupe and score cache, a week of country lookups —
@@ -227,6 +232,7 @@ func acquireRuntimeLocked(s *settings, cfg *Config, fp string) (*runtime, error)
 		rt = &runtime{
 			name:              s.instanceName,
 			storeFingerprint:  storeFingerprint(s),
+			storePassword:     storePassword(s),
 			notifyFingerprint: notifyFingerprint(s),
 			geoFingerprint:    geoFingerprint(s),
 			counters:          newCounters(s.maxEntries),
@@ -311,7 +317,10 @@ func acquireRuntimeLocked(s *settings, cfg *Config, fp string) (*runtime, error)
 	merged := *s
 	inheritAdmin(&merged, rt.settings())
 
-	if newFP := storeFingerprint(s); newFP != rt.storeFingerprint {
+	// The password is compared beside the fingerprint, not hashed into it (see
+	// the storePassword field); left out, a rotated one needed a Traefik restart.
+	newFP, newPW := storeFingerprint(s), storePassword(s)
+	if newFP != rt.storeFingerprint || subtle.ConstantTimeCompare([]byte(newPW), []byte(rt.storePassword)) != 1 {
 		store, err := newBanStore(s)
 		if err != nil {
 			return nil, err
@@ -344,6 +353,7 @@ func acquireRuntimeLocked(s *settings, cfg *Config, fp string) (*runtime, error)
 		rt.setDeps(store, rt.notifier(), rt.geo())
 		claimStateFileLocked(s.instanceName, store)
 		rt.storeFingerprint = newFP
+		rt.storePassword = newPW
 		// The new backend may have brought persisted bans with it — this is the
 		// ordinary startup path whenever Traefik builds the console (memory store,
 		// no store block of its own) before the detector (file or Redis). The
@@ -1090,9 +1100,8 @@ func storeFingerprint(s *settings) string {
 		m["redisAddr"] = s.redis.Address
 		m["redisDB"] = strconv.Itoa(s.redis.DB)
 		m["redisKey"] = s.redis.KeyPrefix
-		// The credential and the deadline are connection state the client is
-		// built with; left out, a rotated Redis password needed a Traefik restart.
-		m["redisPassword"] = s.redis.Password
+		// The deadline is connection state the client is built with. So is the
+		// password, which acquireRuntimeLocked compares beside this hash.
 		m["redisTimeout"] = s.redisTimeout.String()
 		m["redisUsername"] = s.redis.Username
 		m["redisTLS"] = strconv.FormatBool(s.redis.TLS)
@@ -1100,6 +1109,15 @@ func storeFingerprint(s *settings) string {
 		m["redisTLSCA"] = s.redis.TLSCAFile
 	}
 	return mapFingerprint(m)
+}
+
+// storePassword is the credential the active backend connects with: the Redis
+// password, or nothing for a backend that has none.
+func storePassword(s *settings) string {
+	if s.storeBackend != "redis" {
+		return ""
+	}
+	return s.redis.Password
 }
 
 // notifyFingerprint captures what a notifier is built from.

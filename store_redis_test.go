@@ -734,6 +734,41 @@ func TestRedisAuthAndPrefix(t *testing.T) {
 	}
 }
 
+// The Redis password is kept out of the hashed store fingerprint and compared
+// on its own, so a rotation must still rebuild the store, and a reload that
+// leaves the store block alone must keep it.
+func TestARotatedRedisPasswordRebuildsTheStore(t *testing.T) {
+	f := newFakeRedis(t)
+	f.password = "first-password-0123"
+	withRedis := func(password, honeypot string) func(*Config) {
+		return func(c *Config) {
+			c.Store.Backend = "redis"
+			c.Store.Redis.Address = f.addr()
+			c.Store.Redis.Password = password
+			c.Store.Redis.Timeout = "500ms"
+			c.Store.FailOpen = false
+			c.Detectors.Honeypots.Paths = []string{honeypot}
+		}
+	}
+	_, rt := consoleHandler(t, withRedis("first-password-0123", "/trap-a"))
+	store := rt.store()
+
+	reloadDetector(t, t.Name(), withRedis("first-password-0123", "/trap-b"))
+	if rt.store() != store {
+		t.Error("a reload that left the store block alone rebuilt the store")
+	}
+
+	// failOpen is false, so the new store connects with the new password or
+	// the reload fails.
+	f.mu.Lock()
+	f.password = "second-password-0123"
+	f.mu.Unlock()
+	reloadDetector(t, t.Name(), withRedis("second-password-0123", "/trap-b"))
+	if rt.store() == store {
+		t.Error("a password-only change did not rebuild the store")
+	}
+}
+
 // An ACL user authenticates with AUTH user pass; a wrong user is refused.
 func TestRedisACLUsername(t *testing.T) {
 	f := newFakeRedis(t)

@@ -16,15 +16,18 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -684,6 +687,7 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 	roundTwoChecks(build, token)
 	manifestChecks(build)
 	settingChecks(build, token, stateDir)
+	redisPasswordChecks(build, token)
 
 	// A read-only console serves everything and refuses every mutation.
 	ro, err := build(map[string]interface{}{
@@ -1173,6 +1177,143 @@ func settingChecks(build func(map[string]interface{}) (http.Handler, error), tok
 		return written
 	})
 	check("a debounced ban reaches the snapshot", written, "no snapshot holding the ban within 3s")
+}
+
+// redisPasswordChecks rotates the Redis password on reload. The password is
+// compared beside the store fingerprint rather than hashed into it, and the
+// interpreter must still see a password-only change as a store change.
+func redisPasswordChecks(build func(map[string]interface{}) (http.Handler, error), token string) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		fatal("could not listen for the fake Redis: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	f := &fakeRedis{password: "first-password-0123"}
+	go f.serve(ln)
+
+	config := func(password, honeypot string) map[string]interface{} {
+		return map[string]interface{}{
+			"instanceName": "smoke-redis",
+			"store": map[string]interface{}{
+				"backend":  "redis",
+				"failOpen": false,
+				"redis":    map[string]interface{}{"address": ln.Addr().String(), "password": password, "timeout": "1s"},
+			},
+			"detectors": map[string]interface{}{"honeypots": map[string]interface{}{"enabled": true, "paths": []string{honeypot}}},
+			"admin":     map[string]interface{}{"enabled": true, "pathPrefix": "/__scanguard", "token": token},
+		}
+	}
+	if _, err := build(config("first-password-0123", "/trap-a")); err != nil {
+		fatal("New rejected the Redis configuration: %v", err)
+	}
+	// From here the old password is refused, so a store rebuilt with it fails
+	// New (failOpen is false).
+	f.setPassword("second-password-0123")
+	_, err = build(config("first-password-0123", "/trap-b"))
+	check("a reload that leaves the store block alone keeps the Redis store", err == nil,
+		"the store was rebuilt: %v", err)
+	_, err = build(config("second-password-0123", "/trap-b"))
+	check("a password-only change rebuilds the Redis store", err == nil && f.offered("second-password-0123"),
+		"err=%v, new password offered=%v", err, f.offered("second-password-0123"))
+}
+
+// fakeRedis answers just enough RESP for the store to connect and load an empty
+// keyspace, and records the passwords it is offered.
+type fakeRedis struct {
+	mu       sync.Mutex
+	password string
+	seen     []string
+}
+
+func (f *fakeRedis) setPassword(p string) {
+	f.mu.Lock()
+	f.password = p
+	f.mu.Unlock()
+}
+
+func (f *fakeRedis) offered(p string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, s := range f.seen {
+		if s == p {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeRedis) serve(ln net.Listener) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go f.handle(conn)
+	}
+}
+
+func (f *fakeRedis) handle(conn net.Conn) {
+	defer func() { _ = conn.Close() }()
+	r := bufio.NewReader(conn)
+	for {
+		args, err := readCommand(r)
+		if err != nil {
+			return
+		}
+		reply := "+OK\r\n"
+		switch strings.ToUpper(args[0]) {
+		case "AUTH":
+			f.mu.Lock()
+			pass := args[len(args)-1]
+			f.seen = append(f.seen, pass)
+			if pass != f.password {
+				reply = "-WRONGPASS invalid username-password pair\r\n"
+			}
+			f.mu.Unlock()
+		case "SCAN":
+			reply = "*2\r\n$1\r\n0\r\n*0\r\n"
+		case "GET":
+			reply = "$-1\r\n"
+		}
+		if _, err := conn.Write([]byte(reply)); err != nil {
+			return
+		}
+	}
+}
+
+// readCommand reads one RESP array of bulk strings.
+func readCommand(r *bufio.Reader) ([]string, error) {
+	n, err := readLength(r, '*')
+	if err != nil {
+		return nil, err
+	}
+	args := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		size, err := readLength(r, '$')
+		if err != nil {
+			return nil, err
+		}
+		buf := make([]byte, size+2)
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return nil, err
+		}
+		args = append(args, string(buf[:size]))
+	}
+	if len(args) == 0 {
+		return nil, fmt.Errorf("empty command")
+	}
+	return args, nil
+}
+
+func readLength(r *bufio.Reader, prefix byte) (int, error) {
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return 0, err
+	}
+	if len(line) < 3 || line[0] != prefix {
+		return 0, fmt.Errorf("unexpected RESP line %q", line)
+	}
+	return strconv.Atoi(strings.TrimSpace(line[1:]))
 }
 
 // janitorChecks waits out one janitor tick, so the sweep, the expiry claim and
