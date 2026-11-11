@@ -22,7 +22,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           # Must match the go directive in go.mod. Traefik interprets this plugin
-          # with Yaegi v0.16.1, which exposes only the Go 1.22 standard library —
+          # with Yaegi (v0.16.3 in v3.7.18), which exposes only the Go 1.22 standard library —
           # building with a newer toolchain would happily accept APIs that fail at
           # plugin load time.
           go-version: "1.22"

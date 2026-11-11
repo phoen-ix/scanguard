@@ -473,9 +473,9 @@ cd examples && export COMPOSE_PROJECT_NAME=scanguard_e2e && docker compose up -d
 ```
 
 **`tools/yaegi-smoke` is the most important thing in this repository.** Traefik
-interprets plugins with [Yaegi](https://github.com/traefik/yaegi) v0.16.1, which
-exposes only the Go 1.22 standard library, so whole classes of bug are invisible
-to `go build` and `go test`. The traps, and what the smoke test asserts:
+interprets plugins with [Yaegi](https://github.com/traefik/yaegi) (v0.16.3 in
+Traefik v3.7.18), which exposes only the Go 1.22 standard library, so whole
+classes of bug are invisible to `go build` and `go test`. The traps, and what the smoke test asserts:
 [docs/development.md](docs/development.md).
 
 ### E2E

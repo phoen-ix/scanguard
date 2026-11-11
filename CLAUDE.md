@@ -2,7 +2,8 @@
 
 Traefik middleware plugin (Go, one package at the repo root) that bans HTTP
 scanners and serves its own console. Traefik does not compile it: it
-**interprets** it with Yaegi v0.16.1, which exposes only the Go 1.22 stdlib.
+**interprets** it with Yaegi (v0.16.3 in the pinned Traefik v3.7.18, v0.16.1 in
+v3.6), which exposes only the Go 1.22 stdlib.
 docs/development.md explains the interpreter traps in full.
 
 ## Commands
@@ -68,8 +69,9 @@ Anything that starts Docker goes through `~/repos/.fleet/scripts/slot heavy scan
   tour authenticates with it (`X-Scanguard-Token`).
 - Traefik is pinned to a patch version in `examples/docker-compose.yml` and in
   `ci.yml` (matrix, the `sed`, and the render-check steps' `if:`), and in the
-  e2e overlay `examples/docker-compose.e2e.yml`. Bump them together and re-run
-  `streaming-check.sh`.
+  e2e overlay `examples/docker-compose.e2e.yml`. Bump them together, move
+  `tools/yaegi-smoke/go.mod`'s Yaegi and mapstructure to what that Traefik
+  pins, and re-run `streaming-check.sh`.
 - The harness keeps `enforcement.subnet` and `detectors.uaRotation` off (the
   defaults). scanner-sim bans nine sources in 198.51.100.0/24 and `uniqueIp()`
   hands out consecutive addresses, so tests' sources share /24s: with range

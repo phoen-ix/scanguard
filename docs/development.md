@@ -2,8 +2,9 @@
 
 **`tools/yaegi-smoke` is the most important thing in this repository.** Traefik
 does not compile plugins, it interprets them with
-[Yaegi](https://github.com/traefik/yaegi), which is pinned at v0.16.1 and exposes
-only the **Go 1.22** standard library.
+[Yaegi](https://github.com/traefik/yaegi) — v0.16.3 in the pinned Traefik v3.7.18,
+which the smoke test follows, and v0.16.1 in v3.6 — which exposes only the
+**Go 1.22** standard library.
 
 How to run it, and the other checks: [README → Development](../README.md#development).
 
