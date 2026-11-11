@@ -10,7 +10,7 @@ One artifact. No sidecar, no database, no agent. MIT.
 
 <img src="docs/screenshots/console-overview.png" alt="The scanguard console: request and ban counters, then the active ban list with the detector and rule behind each ban" width="800">
 
-**Status:** [v0.2.0](https://github.com/phoen-ix/scanguard/releases/tag/v0.2.0), tested against Traefik v3.7.17.
+**Status:** [v0.2.0](https://github.com/phoen-ix/scanguard/releases/tag/v0.2.0), tested against Traefik v3.7.18.
 
 </div>
 
@@ -308,7 +308,7 @@ it surfaces weeks later as "the chat stopped working", never as an error.
 scanguard forwards `Flush`, `Hijack`, `ReadFrom` and `Push`, skips wrapping
 protocol-upgrade requests entirely, and does not wrap at all when no
 response-status detector is enabled. `examples/streaming-check.sh` is the release
-gate, and it passes against Traefik v3.7.17. **Re-run it after every Traefik
+gate, and it passes against Traefik v3.7.18. **Re-run it after every Traefik
 upgrade** — and if you ever see a `flusher-unavailable` warning in the log, set
 `observeResponse: false` on that route.
 
