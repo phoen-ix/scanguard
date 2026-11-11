@@ -1241,6 +1241,66 @@ func TestCrawlerPolicyIsExcludedFromTheConfigFingerprint(t *testing.T) {
 	}
 }
 
+// The secrets stay out of configFingerprint, which reaches every console reader
+// through rulesStamp, and are compared beside it: rotating any one of them must
+// still count as a configuration change.
+func TestSecretsAreComparedNotHashed(t *testing.T) {
+	base := func() *Config {
+		c := CreateConfig()
+		c.Store.Redis.Password = "first-password-0"
+		c.Admin.Token = "first-token-0123456789"
+		c.Notify.AbuseIPDB.APIKey = "first-key"
+		c.Notify.Chat.URL = "https://chat.example.test/first"
+		c.Notify.Webhooks = []WebhookConfig{{
+			URL:     "https://hooks.example.test/first",
+			Headers: map[string]string{"Authorization": "Bearer first"},
+		}}
+		return c
+	}
+	rotations := map[string]func(*Config){
+		"store.redis.password":       func(c *Config) { c.Store.Redis.Password = "rotated-password-0" },
+		"admin.token":                func(c *Config) { c.Admin.Token = "rotated-token-0123456789" },
+		"notify.abuseipdb.apiKey":    func(c *Config) { c.Notify.AbuseIPDB.APIKey = "rotated-key" },
+		"notify.chat.url":            func(c *Config) { c.Notify.Chat.URL = "https://chat.example.test/rotated" },
+		"notify.webhooks[0].url":     func(c *Config) { c.Notify.Webhooks[0].URL = "https://hooks.example.test/rotated" },
+		"notify.webhooks[0].headers": func(c *Config) { c.Notify.Webhooks[0].Headers["Authorization"] = "Bearer rotated" },
+	}
+	if !sameConfig(newConfigID(base()), newConfigID(base())) {
+		t.Fatal("two identical configurations compared different")
+	}
+	for name, rotate := range rotations {
+		a, b := base(), base()
+		rotate(b)
+		if configFingerprint(a) != configFingerprint(b) {
+			t.Errorf("%s reaches the hash", name)
+		}
+		if sameConfig(newConfigID(a), newConfigID(b)) {
+			t.Errorf("rotating %s did not count as a configuration change", name)
+		}
+	}
+}
+
+// End to end: a secret-only reload applies, rebuilds the notifier when it was a
+// notify credential, and leaves rulesStamp alone.
+func TestARotatedSecretAppliesWithoutMovingTheRulesStamp(t *testing.T) {
+	_, rt := consoleHandler(t, func(c *Config) { c.Notify.AbuseIPDB.APIKey = "first-key" })
+	stamp, notifier := rt.rulesStamp(), rt.notifier()
+
+	reloadDetector(t, t.Name(), func(c *Config) {
+		c.Admin.Token = "rotated-token-0123456789"
+		c.Notify.AbuseIPDB.APIKey = "rotated-key"
+	})
+	if got := rt.settings().adminToken; got != "rotated-token-0123456789" {
+		t.Errorf("the rotated admin token was not applied: %q", got)
+	}
+	if rt.notifier() == notifier {
+		t.Error("a rotated AbuseIPDB key did not rebuild the notifier")
+	}
+	if rt.rulesStamp() != stamp {
+		t.Error("rulesStamp moved with a secret")
+	}
+}
+
 // A crawler refused by policy is not the same finding as a scanner, and filing
 // them under one detector made the statistics lie. SemrushBot-BA is the ordering
 // canary: it is in defaultUserAgents as a scanner AND matches the crawler list.

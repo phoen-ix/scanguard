@@ -45,18 +45,19 @@ type runtime struct {
 	// separately. Collapsing them into one fingerprint would make whichever was
 	// constructed last silently overwrite the other's settings — which is exactly
 	// the trap the comparable CrowdSec plugin documents and does not solve.
-	detectFP         string
-	uiFP             string
+	detectID         configID
+	uiID             configID
 	storeFingerprint string
-	// storePassword sits beside storeFingerprint rather than in it: a fast hash
-	// of a password is a guessing oracle, so a rotation is detected by comparing
-	// the password itself.
+	// storePassword and notifySecrets sit beside their fingerprints rather than
+	// in them: a fast hash of a secret is a guessing oracle, so a rotation is
+	// detected by comparing the secret itself (sameSecret).
 	storePassword string
 	// notifyFingerprint and geoFingerprint decide whether a reload rebuilds the
 	// notifier and the geo cache. Both carry state worth keeping across a reload
 	// — the AbuseIPDB report dedupe and score cache, a week of country lookups —
 	// and a reload that changed a honeypot path used to throw it away.
 	notifyFingerprint string
+	notifySecrets     string
 	geoFingerprint    string
 
 	// depsV holds the three things a configuration reload replaces: the ban store,
@@ -209,8 +210,8 @@ var lastAcquireAny atomic.Int64
 // apart; a minute is generous.
 const reloadBurst = time.Minute
 
-func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
-	rt, err := acquireRuntimeLocked(s, cfg, fp)
+func acquireRuntime(s *settings, cfg *Config, id configID) (*runtime, error) {
+	rt, err := acquireRuntimeLocked(s, cfg, id)
 	if err == nil {
 		now := time.Now().UnixNano()
 		rt.lastAcquired.Store(now)
@@ -219,7 +220,7 @@ func acquireRuntime(s *settings, cfg *Config, fp string) (*runtime, error) {
 	return rt, err
 }
 
-func acquireRuntimeLocked(s *settings, cfg *Config, fp string) (*runtime, error) {
+func acquireRuntimeLocked(s *settings, cfg *Config, id configID) (*runtime, error) {
 	registryMu.Lock()
 	defer registryMu.Unlock()
 
@@ -229,11 +230,13 @@ func acquireRuntimeLocked(s *settings, cfg *Config, fp string) (*runtime, error)
 		if err != nil {
 			return nil, err
 		}
+		notifyFP, notifySecrets := notifyFingerprint(s)
 		rt = &runtime{
 			name:              s.instanceName,
 			storeFingerprint:  storeFingerprint(s),
 			storePassword:     storePassword(s),
-			notifyFingerprint: notifyFingerprint(s),
+			notifyFingerprint: notifyFP,
+			notifySecrets:     notifySecrets,
 			geoFingerprint:    geoFingerprint(s),
 			counters:          newCounters(s.maxEntries),
 			shadow:            newMemStore(s.maxEntries),
@@ -249,9 +252,9 @@ func acquireRuntimeLocked(s *settings, cfg *Config, fp string) (*runtime, error)
 		claimStateFileLocked(s.instanceName, store)
 		rt.stats.StartedAt = time.Now().UTC()
 		if s.uiMode {
-			rt.uiFP = fp
+			rt.uiID = id
 		} else {
-			rt.detectFP = fp
+			rt.detectID = id
 			if base, cerr := cloneConfig(cfg); cerr == nil {
 				base.normalizeDefaults()
 				rt.baseConfig = base
@@ -284,7 +287,7 @@ func acquireRuntimeLocked(s *settings, cfg *Config, fp string) (*runtime, error)
 	// contributes the admin surface and nothing else, so a console that declares
 	// only `uiMode: true` and a token cannot wipe out the detector's rules.
 	if s.uiMode {
-		if rt.uiFP == fp {
+		if sameConfig(rt.uiID, id) {
 			return rt, nil
 		}
 		// Read, merge and publish under mu, so a rule save on the other path
@@ -301,14 +304,14 @@ func acquireRuntimeLocked(s *settings, cfg *Config, fp string) (*runtime, error)
 		// declared. Not carrying it here meant the flag worked only when Traefik
 		// happened to build the console before the detector.
 		merged.adminServeShared = s.adminServeShared
-		rt.uiFP = fp
+		rt.uiID = id
 		rt.applySettings(&merged)
 		rt.mu.Unlock()
 		logInfo(s.instanceName, "admin console configuration applied", nil)
 		return rt, nil
 	}
 
-	if rt.detectFP == fp {
+	if sameConfig(rt.detectID, id) {
 		return rt, nil
 	}
 
@@ -320,7 +323,7 @@ func acquireRuntimeLocked(s *settings, cfg *Config, fp string) (*runtime, error)
 	// The password is compared beside the fingerprint, not hashed into it (see
 	// the storePassword field); left out, a rotated one needed a Traefik restart.
 	newFP, newPW := storeFingerprint(s), storePassword(s)
-	if newFP != rt.storeFingerprint || subtle.ConstantTimeCompare([]byte(newPW), []byte(rt.storePassword)) != 1 {
+	if newFP != rt.storeFingerprint || !sameSecret(newPW, rt.storePassword) {
 		store, err := newBanStore(s)
 		if err != nil {
 			return nil, err
@@ -365,16 +368,18 @@ func acquireRuntimeLocked(s *settings, cfg *Config, fp string) (*runtime, error)
 	// The notifier and the geo cache are rebuilt only when their own settings
 	// changed; see the fingerprint fields.
 	n := rt.notifier()
-	if newFP := notifyFingerprint(&merged); newFP != rt.notifyFingerprint {
+	notifyFP, notifySecrets := notifyFingerprint(&merged)
+	if notifyFP != rt.notifyFingerprint || !sameSecret(notifySecrets, rt.notifySecrets) {
 		n = rt.newNotifier(&merged)
-		rt.notifyFingerprint = newFP
+		rt.notifyFingerprint = notifyFP
+		rt.notifySecrets = notifySecrets
 	}
 	g := rt.geo()
 	if newFP := geoFingerprint(&merged); newFP != rt.geoFingerprint {
 		g = newGeoCache(&merged)
 		rt.geoFingerprint = newFP
 	}
-	rt.detectFP = fp
+	rt.detectID = id
 	rt.setDeps(rt.store(), n, g)
 
 	// The file configuration changed underneath the console's edits. Re-layer them
@@ -1120,18 +1125,77 @@ func storePassword(s *settings) string {
 	return s.redis.Password
 }
 
-// notifyFingerprint captures what a notifier is built from.
-func notifyFingerprint(s *settings) string {
-	cfg, err := json.Marshal(&s.notify)
+// notifyFingerprint captures what a notifier is built from, minus its
+// credentials, which it returns beside the hash for sameSecret.
+func notifyFingerprint(s *settings) (string, string) {
+	n, secrets := splitNotifySecrets(s.notify)
+	cfg, err := json.Marshal(&n)
 	if err != nil {
-		return ""
+		return "", secrets
 	}
 	return mapFingerprint(map[string]string{
 		"instance": s.instanceName,
 		"notify":   string(cfg),
 		"timeout":  s.notifyTimeout.String(),
 		"cacheTTL": s.abuseCacheTTL.String(),
-	})
+	}), secrets
+}
+
+// notifySecretSet is the part of a notify block that carries credentials: the
+// AbuseIPDB key, the chat URL and the webhooks, whose URLs and headers
+// routinely embed them.
+type notifySecretSet struct {
+	AbuseIPDBKey string          `json:"abuseIPDBKey"`
+	ChatURL      string          `json:"chatURL"`
+	Webhooks     []WebhookConfig `json:"webhooks"`
+}
+
+// splitNotifySecrets returns n without its credentials, and the credentials
+// encoded for sameSecret.
+func splitNotifySecrets(n NotifyConfig) (NotifyConfig, string) {
+	buf, err := json.Marshal(&notifySecretSet{AbuseIPDBKey: n.AbuseIPDB.APIKey, ChatURL: n.Chat.URL, Webhooks: n.Webhooks})
+	if err != nil {
+		buf = nil
+	}
+	n.AbuseIPDB.APIKey = ""
+	n.Chat.URL = ""
+	n.Webhooks = nil
+	return n, string(buf)
+}
+
+// configSecretSet is every credential configFingerprint leaves out.
+type configSecretSet struct {
+	RedisPassword string `json:"redisPassword"`
+	AdminToken    string `json:"adminToken"`
+	Notify        string `json:"notify"`
+}
+
+// configID identifies a plugin configuration for acquireRuntime: fp hashes
+// everything except the secrets, which are kept as they are and compared in
+// constant time. A fast hash of a secret is a guessing oracle, and fp reaches
+// every console reader through rulesStamp.
+type configID struct {
+	fp      string
+	secrets string
+}
+
+func newConfigID(c *Config) configID {
+	_, notify := splitNotifySecrets(c.Notify)
+	buf, err := json.Marshal(&configSecretSet{RedisPassword: c.Store.Redis.Password, AdminToken: c.Admin.Token, Notify: notify})
+	if err != nil {
+		buf = nil
+	}
+	return configID{fp: configFingerprint(c), secrets: string(buf)}
+}
+
+// sameConfig compares two configurations secrets included, so rotating any
+// of them still counts as a change.
+func sameConfig(a, b configID) bool {
+	return a.fp == b.fp && sameSecret(a.secrets, b.secrets)
+}
+
+func sameSecret(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 // geoFingerprint captures what a geo cache is built from.
@@ -1146,8 +1210,9 @@ func geoFingerprint(s *settings) string {
 	})
 }
 
-// configFingerprint hashes a whole plugin configuration. acquireRuntime compares
-// it to decide whether a Traefik reload actually changed anything.
+// configFingerprint hashes a whole plugin configuration except its secrets
+// (see configID). acquireRuntime compares it to decide whether a Traefik reload
+// actually changed anything.
 //
 // The parameter is *Config, NOT interface{}, and that is the entire point. Yaegi
 // empties an interpreted struct when it passes through an interface{} parameter:
@@ -1186,6 +1251,9 @@ func configFingerprint(c *Config) string {
 	// never mutated here. Same idiom as inheritAdmin, which Yaegi already runs.
 	stripped := *c
 	stripped.Detectors.UserAgent.Crawlers = ""
+	stripped.Store.Redis.Password = ""
+	stripped.Admin.Token = ""
+	stripped.Notify, _ = splitNotifySecrets(c.Notify)
 	buf, err := json.Marshal(&stripped)
 	if err != nil {
 		return ""

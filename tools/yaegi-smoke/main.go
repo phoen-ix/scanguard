@@ -688,6 +688,7 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 	manifestChecks(build)
 	settingChecks(build, token, stateDir)
 	redisPasswordChecks(build, token)
+	secretRotationChecks(build, token)
 
 	// A read-only console serves everything and refuses every mutation.
 	ro, err := build(map[string]interface{}{
@@ -1215,6 +1216,66 @@ func redisPasswordChecks(build func(map[string]interface{}) (http.Handler, error
 	_, err = build(config("second-password-0123", "/trap-b"))
 	check("a password-only change rebuilds the Redis store", err == nil && f.offered("second-password-0123"),
 		"err=%v, new password offered=%v", err, f.offered("second-password-0123"))
+}
+
+// secretRotationChecks rotates only secrets — the admin token and a webhook URL.
+// They are compared beside the configuration hash rather than hashed into it,
+// so the interpreter must still see the reload as a change, and the hash, which
+// rulesStamp carries to every console reader, must not move.
+func secretRotationChecks(build func(map[string]interface{}) (http.Handler, error), token string) {
+	var mu sync.Mutex
+	var paths []string
+	sink := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		mu.Lock()
+		paths = append(paths, req.URL.Path)
+		mu.Unlock()
+		rw.WriteHeader(http.StatusOK)
+	}))
+	defer sink.Close()
+	config := func(adminToken, hookPath string) map[string]interface{} {
+		return map[string]interface{}{
+			"instanceName": "smoke-secrets",
+			"notify": map[string]interface{}{
+				"timeout":  "5s",
+				"webhooks": []interface{}{map[string]interface{}{"url": sink.URL + hookPath}},
+			},
+			"admin": map[string]interface{}{"enabled": true, "pathPrefix": "/__scanguard", "token": adminToken},
+		}
+	}
+	stamp := func(h http.Handler, t string) string {
+		rec := do(h, "GET", "/__scanguard/api/state", "203.0.113.60:5000", map[string]string{"X-Scanguard-Token": t})
+		var state struct {
+			RulesStamp string `json:"rulesStamp"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &state)
+		return state.RulesStamp
+	}
+
+	h, err := build(config(token, "/first"))
+	if err != nil {
+		fatal("New rejected the secrets configuration: %v", err)
+	}
+	before := stamp(h, token)
+	rotated := "smoke-token-secret-rotation-0"
+	h, err = build(config(rotated, "/second"))
+	if err != nil {
+		fatal("rebuilding with rotated secrets failed: %v", err)
+	}
+	after := stamp(h, rotated)
+	check("a secret-only reload applies the rotated token", after != "", "the rotated token was refused")
+	check("rulesStamp does not move with a secret", before != "" && before == after, "before %q, after %q", before, after)
+
+	do(h, "GET", "/wp-login.php", "203.0.113.160:5000", nil)
+	delivered := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(paths) > 0
+	}
+	waitFor(5*time.Second, delivered)
+	mu.Lock()
+	got := append([]string(nil), paths...)
+	mu.Unlock()
+	check("a rotated webhook URL rebuilds the notifier", len(got) > 0 && got[0] == "/second", "deliveries went to %v", got)
 }
 
 // fakeRedis answers just enough RESP for the store to connect and load an empty
