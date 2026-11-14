@@ -10,7 +10,7 @@ services:
     expose: ["6379"]
 
   replica-a:
-    image: traefik:v3.7.18
+    image: traefik:v3.7.19
     command: [--configFile=/etc/traefik/traefik.yml]
     ports:
       - "${SG_REPLICA_A_WEB:-127.0.0.1:8801}:80"
@@ -22,7 +22,7 @@ services:
     depends_on: [site, redis]
 
   replica-b:
-    image: traefik:v3.7.18
+    image: traefik:v3.7.19
     command: [--configFile=/etc/traefik/traefik.yml]
     ports:
       - "${SG_REPLICA_B_WEB:-127.0.0.1:8802}:80"
