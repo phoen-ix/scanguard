@@ -54,10 +54,13 @@ test('the forwarded identity is who the audit trail names', async ({ page, reque
   await expect(toast(page)).toHaveText(`Banned ${ip}/32`)
   await banRow(page, `${ip}/32`).getByRole('button', { name: 'unblock' }).click()
   await expect(toast(page)).toHaveText(`Unblocked ${ip}/32`)
+  const mine = eventRows(page, `${ip}/32`)
+  await expect(mine.filter({ has: page.locator('td.k-unban') })).toHaveCount(1)
+  await expect(mine.filter({ has: page.locator('td.k-ban') })).toHaveCount(1)
   await page.locator('#event-filter').getByRole('button', { name: 'unbans', exact: true }).click()
   // The ban's row leaves the feed; the unban's names who lifted it.
-  await expect(eventRows(page, `${ip}/32`)).toHaveCount(1)
-  await expect(eventRows(page, `${ip}/32`).locator('td').nth(6)).toHaveText('operator@e2e.example')
+  await expect(mine).toHaveCount(1)
+  await expect(mine.locator('td').nth(6)).toHaveText('operator@e2e.example')
 
   const field = page.locator('#rules-form .rule-group').filter({ has: page.getByRole('heading', { name: 'Honeypots', exact: true }) }).getByLabel('Trap paths')
   await field.fill(`${await field.inputValue()}\n/e2e-sso/other-trap`)
