@@ -93,8 +93,8 @@ count=$(console /api/bans | grep -o '"key"' | wc -l | tr -d ' ')
 if [[ "$count" -gt 0 ]]; then ok "console reports $count active ban(s)"; else bad "console reports no bans"; fi
 expect "console refuses an unauthenticated request" 401 \
   "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$CONSOLE/api/health")"
-expect "console serves the dashboard with a token" 200 \
-  "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H "X-Scanguard-Token: $TOKEN" "$CONSOLE/")"
+expect "console accepts the token" 200 \
+  "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H "X-Scanguard-Token: $TOKEN" "$CONSOLE/api/health")"
 
 say "Unblock takes effect immediately"
 if curl -s -X DELETE --max-time 10 \

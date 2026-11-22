@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -2249,10 +2250,14 @@ func TestCrawlerPolicyWorksWithTheUserAgentDetectorOff(t *testing.T) {
 // raw string (a template literal's backtick would end it). None of that is
 // checked anywhere else.
 func TestConsoleScriptKeepsItsInvariants(t *testing.T) {
-	for _, bad := range []string{"innerHTML", "=>", "\nconst ", "\nlet ", "document.write", "eval("} {
+	for _, bad := range []string{"innerHTML", "=>", "document.write", "eval("} {
 		if strings.Contains(appJS, bad) {
 			t.Errorf("app.js contains %q", bad)
 		}
+	}
+	// Anywhere: every function body is indented, and "\nlet " saw none of them.
+	if m := regexp.MustCompile(`\b(?:let|const)\s+[A-Za-z_$][\w$]*\s*[=;,]`).FindString(appJS); m != "" {
+		t.Errorf("app.js declares %q; ES5 has var only", strings.TrimSpace(m))
 	}
 	if strings.Contains(indexHTML, "<script>") || strings.Contains(indexHTML, "onclick=") {
 		t.Error("index.html carries inline script, which the CSP forbids")

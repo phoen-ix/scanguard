@@ -190,15 +190,7 @@ jobs:
 
       - name: bans survive a restart
         working-directory: examples
-        run: |
-          before=$(curl -s -H "X-Scanguard-Token: dev-token-change-me-0123456789" \
-            http://localhost:9900/api/bans | grep -o '"key"' | wc -l)
-          docker compose restart traefik
-          sleep 10
-          after=$(curl -s -H "X-Scanguard-Token: dev-token-change-me-0123456789" \
-            http://localhost:9900/api/bans | grep -o '"key"' | wc -l)
-          echo "bans before=$before after=$after"
-          [ "$after" -gt 0 ] && [ "$after" -eq "$before" ]
+        run: ./restart-check.sh
 
       - name: no degraded-streaming warnings
         working-directory: examples
