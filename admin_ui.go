@@ -1445,20 +1445,24 @@ function syncRules(stamp, readOnly) {
 }
 
 function refresh() {
-  var readOnly = false;
   return api("api/state").then(function (s) {
-    readOnly = !!s.readOnly;
+    var readOnly = !!s.readOnly;
     renderState(s);
     pulse();
-    rulesStamp = s.rulesStamp || "";
-    return api("api/rules/compiled");
-  }).then(function (compiled) {
-    renderRules(compiled);
-    // Never overwrite a half-typed rule set. An unban elsewhere on the page
-    // triggers a refresh, and losing someone's unsaved regex to it would be
-    // its own small betrayal.
-    if (!rulesDirty) { return loadRules(readOnly); }
-    return null;
+    // Through syncRules, as the poll does. Taking the stamp straight from here
+    // swallowed a change saved elsewhere that a ban, an unblock or a save saw
+    // first: a dirty editor was never warned, and its Save overwrote that
+    // change. A moved stamp reloads what it has to by itself.
+    var synced = syncRules(s.rulesStamp, readOnly);
+    if (synced) { return synced; }
+    return api("api/rules/compiled").then(function (compiled) {
+      renderRules(compiled);
+      // Never overwrite a half-typed rule set. An unban elsewhere on the page
+      // triggers a refresh, and losing someone's unsaved regex to it would be
+      // its own small betrayal.
+      if (!rulesDirty) { return loadRules(readOnly); }
+      return null;
+    });
   }).catch(fail);
 }
 

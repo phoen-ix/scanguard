@@ -67,6 +67,28 @@ test('an edit is marked until saved, and a data refresh does not wipe it', async
   await expect(page.locator('.rule-row.changed')).toHaveCount(0)
 })
 
+test('a change saved elsewhere warns an editor with unsaved edits, also when a ban sees it first', async ({ page, request }) => {
+  // No poll until the ban below has refreshed the page: the ban is what sees the change first.
+  await page.clock.install()
+  await editorReady(page)
+  await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 500)
+  const traps = field(page, 'Honeypots', 'Trap paths')
+  await traps.fill(`${await traps.inputValue()}\n/e2e-mine`)
+  await expect(unsaved(page)).toBeVisible()
+
+  // Another operator saves.
+  const { effective } = await api(request, '/api/rules')
+  effective.detectors.honeypots.paths.push('/e2e-theirs')
+  await api(request, '/api/rules', { method: 'PUT', data: effective })
+
+  const ip = uniqueIp()
+  await banViaForm(page, ip, '1h', 'e2e sees it first')
+  await expect(toast(page)).toHaveText(`Banned ${ip}/32`)
+  await page.clock.resume()
+  await expect(page.getByRole('alert')).toContainText('The rule set changed on the server while you were editing')
+  await expect(traps).toHaveValue(/\/e2e-mine$/)
+})
+
 test('saving applies on the next request, is marked, and survives a reload', async ({ page, request }) => {
   const trap = `/e2e-trap-${Date.now()}`
   const ip = uniqueIp()
