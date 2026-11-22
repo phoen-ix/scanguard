@@ -4,15 +4,16 @@ Every user-facing feature of scanguard and the test that exercises it. The
 console suite is `e2e/tests/` (`npx playwright test --list`; run it with
 `scripts/e2e.sh`). The plugin's request-path behaviour has no page: it is
 exercised against a live Traefik by the `examples/*.sh` checks (CI `integration`
-job, fleet `traefik-integration`) and by `go test`, cited as (c).
+job, fleet `traefik-integration`) and by `go test`, cited as (c). (d) marks a test that waits for an owner decision (`test.fixme`).
 
-Inventory, 2026-10-31, from the repo root:
+Inventory, from the repo root (`coverage_test.go` checks every count in this
+file against these commands and the marks below):
 
 ```bash
-# admin routes (serveAdmin) - 10 cases, 11 paths
+# admin routes (serveAdmin) - 11 cases, 12 paths
 grep -oE 'case "/[^"]*"(, "[^"]*")*:' admin.go
-# console: panels, forms, inputs, buttons, filter chips, tiles, rule-editor groups, toasts - 44 items
-grep -oE '<h2[^>]*>[A-Za-z ]+|<(form|button|input)[^>]*id="[a-z-]+"|data-kind="[a-z]*"|tile\(tiles, "[^"]+"|\{ title: "[^"]+"|toast\("[^"]+' admin_ui.go
+# console: panels, forms, inputs, buttons, filter chips, tiles, rule-editor groups, toasts - 46 items
+grep -oE '<h2[^>]*>[A-Za-z ]+|<(form|button|input)[^>]*id="[a-z-]+"|data-kind="[a-z]*"|^  \["[a-z]+", "[a-z ]+"\]|\{ title: "[^"]+"|toast\("[^"]+' admin_ui.go
 # request-path features - 32 rows: the 9 detectors of the README "What it does" table,
 # then one row per behaviour the Configuration reference's keys switch on (tuning
 # knobs such as capacities and timeouts fold into their detector's row)
@@ -28,11 +29,18 @@ or `Authorization: Bearer`), **read-only operator** (`admin.readOnly`), **SSO us
 `e2e/fixtures/consoles.yml`, added to the running harness for the length of the run;
 two Traefik replicas sharing a Redis come from the overlay `examples/docker-compose.e2e.yml`.
 
-**Totals: 172 items — ✅ 151, ❌ 21** ((a) 2, (c) 19).
+**Totals: 171 items — ✅ 144, ❌ 27** ((a) 2, (c) 24, (d) 1).
 
 Test names are `file › [describe ›] title`.
 
-## Admin routes × callers (54)
+## Admin routes × callers (41)
+
+Every route `serveAdmin` serves (`sweep.spec.ts` reads them from `admin.go`), on
+the plugin as Traefik interprets it. Every method on every route as every
+caller (guest, wrong token, forged `X-Forwarded-User` on a token console, token,
+Bearer, read-only, SSO user, SSO console without an identity) is the Go walk,
+`admin_routes_test.go › TestEveryAdminRouteAnswersEachCallerAndMethod`, which
+reads the routes from `serveAdmin`'s switch.
 
 | Route | guest | wrong token | operator (token / Bearer) |
 |---|---|---|---|
@@ -40,24 +48,24 @@ Test names are `file › [describe ›] title`.
 | `/index.html` — served to everyone with CSP, `no-store`, `nosniff`, `no-referrer`; HEAD 200; POST 405 | ✅ `sweep.spec.ts › admin routes › /index.html is served to every caller, with the console's security headers` | ✅ same test | ✅ same test |
 | `/app.css` — served to everyone with CSP, `no-store`, `nosniff`, `no-referrer`; HEAD 200; POST 405 | ✅ `sweep.spec.ts › admin routes › /app.css is served to every caller, with the console's security headers` | ✅ same test | ✅ same test |
 | `/app.js` — served to everyone with CSP, `no-store`, `nosniff`, `no-referrer`; HEAD 200; POST 405 | ✅ `sweep.spec.ts › admin routes › /app.js is served to every caller, with the console's security headers` | ✅ same test | ✅ same test |
-| `/api/state` (guest/wrong token: 401 + `WWW-Authenticate`) | ✅ `sweep.spec.ts › admin routes › GET /api/state as guest` | ✅ `sweep.spec.ts › admin routes › GET /api/state as a wrong token` | ✅ `sweep.spec.ts › admin routes › GET /api/state as the token`, `sweep.spec.ts › admin routes › GET /api/state as a Bearer token` |
-| `/api/events` (guest/wrong token: 401 + `WWW-Authenticate`) | ✅ `sweep.spec.ts › admin routes › GET /api/events as guest` | ✅ `sweep.spec.ts › admin routes › GET /api/events as a wrong token` | ✅ `sweep.spec.ts › admin routes › GET /api/events as the token`, `sweep.spec.ts › admin routes › GET /api/events as a Bearer token` |
-| `/api/sources` (guest/wrong token: 401 + `WWW-Authenticate`) | ✅ `sweep.spec.ts › admin routes › GET /api/sources as guest` | ✅ `sweep.spec.ts › admin routes › GET /api/sources as a wrong token` | ✅ `sweep.spec.ts › admin routes › GET /api/sources as the token`, `sweep.spec.ts › admin routes › GET /api/sources as a Bearer token` |
-| `/api/bans` (guest/wrong token: 401 + `WWW-Authenticate`) | ✅ `sweep.spec.ts › admin routes › GET /api/bans as guest` | ✅ `sweep.spec.ts › admin routes › GET /api/bans as a wrong token` | ✅ `sweep.spec.ts › admin routes › GET /api/bans as the token`, `sweep.spec.ts › admin routes › GET /api/bans as a Bearer token` |
-| `/api/rules` (guest/wrong token: 401 + `WWW-Authenticate`) | ✅ `sweep.spec.ts › admin routes › GET /api/rules as guest` | ✅ `sweep.spec.ts › admin routes › GET /api/rules as a wrong token` | ✅ `sweep.spec.ts › admin routes › GET /api/rules as the token`, `sweep.spec.ts › admin routes › GET /api/rules as a Bearer token` |
-| `/api/rules/compiled` (guest/wrong token: 401 + `WWW-Authenticate`) | ✅ `sweep.spec.ts › admin routes › GET /api/rules/compiled as guest` | ✅ `sweep.spec.ts › admin routes › GET /api/rules/compiled as a wrong token` | ✅ `sweep.spec.ts › admin routes › GET /api/rules/compiled as the token`, `sweep.spec.ts › admin routes › GET /api/rules/compiled as a Bearer token` |
-| `/api/health` (guest/wrong token: 401 + `WWW-Authenticate`) | ✅ `sweep.spec.ts › admin routes › GET /api/health as guest` | ✅ `sweep.spec.ts › admin routes › GET /api/health as a wrong token` | ✅ `sweep.spec.ts › admin routes › GET /api/health as the token`, `sweep.spec.ts › admin routes › GET /api/health as a Bearer token` |
+| `/api/state` (guest/wrong token: 401 + `WWW-Authenticate`, also for every change) | ✅ `sweep.spec.ts › admin routes › GET /api/state as guest`, `› every change to /api/state is a 401 for a guest and a wrong token` | ✅ `… GET /api/state as a wrong token`, same | ✅ `… GET /api/state as the token`, `… as a Bearer token` |
+| `/api/events` (guest/wrong token: 401 + `WWW-Authenticate`, also for every change) | ✅ `sweep.spec.ts › admin routes › GET /api/events as guest`, `› every change to /api/events is a 401 for a guest and a wrong token` | ✅ `… GET /api/events as a wrong token`, same | ✅ `… GET /api/events as the token`, `… as a Bearer token` |
+| `/api/sources` (guest/wrong token: 401 + `WWW-Authenticate`, also for every change) | ✅ `sweep.spec.ts › admin routes › GET /api/sources as guest`, `› every change to /api/sources is a 401 for a guest and a wrong token` | ✅ `… GET /api/sources as a wrong token`, same | ✅ `… GET /api/sources as the token`, `… as a Bearer token` |
+| `/api/bans` (guest/wrong token: 401 + `WWW-Authenticate`, also for every change) | ✅ `sweep.spec.ts › admin routes › GET /api/bans as guest`, `› every change to /api/bans is a 401 for a guest and a wrong token` | ✅ `… GET /api/bans as a wrong token`, same | ✅ `… GET /api/bans as the token`, `… as a Bearer token` |
+| `/api/rules` (guest/wrong token: 401 + `WWW-Authenticate`, also for every change) | ✅ `sweep.spec.ts › admin routes › GET /api/rules as guest`, `› every change to /api/rules is a 401 for a guest and a wrong token` | ✅ `… GET /api/rules as a wrong token`, same | ✅ `… GET /api/rules as the token`, `… as a Bearer token` |
+| `/api/rules/compiled` (guest/wrong token: 401 + `WWW-Authenticate`, also for every change) | ✅ `sweep.spec.ts › admin routes › GET /api/rules/compiled as guest`, `› every change to /api/rules/compiled is a 401 for a guest and a wrong token` | ✅ `… GET /api/rules/compiled as a wrong token`, same | ✅ `… GET /api/rules/compiled as the token`, `… as a Bearer token` |
+| `/api/health` (guest/wrong token: 401 + `WWW-Authenticate`, also for every change) | ✅ `sweep.spec.ts › admin routes › GET /api/health as guest`, `› every change to /api/health is a 401 for a guest and a wrong token` | ✅ `… GET /api/health as a wrong token`, same | ✅ `… GET /api/health as the token`, `… as a Bearer token` |
 
 | Item | Test |
 |---|---|
 | unknown `/api/*` endpoint: 404 for the operator, 401 for anyone else | ✅ `sweep.spec.ts › admin routes › an unknown endpoint is a 404 for the operator and a 401 for anyone else` |
-| 405 for a method an endpoint does not take (6 endpoints) | ✅ `sweep.spec.ts › admin routes › POST /api/state is refused with 405`, `… POST /api/events …`, `… POST /api/sources …`, `… POST /api/rules/compiled …`, `… PATCH /api/bans …`, `… PATCH /api/rules …` |
-| 403 for a mutation without `X-Scanguard-Action` (CSRF guard; 4 mutations) | ✅ `sweep.spec.ts › admin routes › POST /api/bans without the anti-CSRF header is refused with 403`, `… DELETE /api/bans …`, `… PUT /api/rules …`, `… DELETE /api/rules …` |
 | 400s: unknown event kind, malformed ban JSON, unknown rule field, `clientIP`/`store`/`admin`/`notify` not editable | ✅ `sweep.spec.ts › admin routes › malformed requests are refused with the reason` |
-| 403 for every mutation on a read-only console | ✅ `readonly.spec.ts › the API refuses every change, whoever asks` |
 | failed logins counted in `stats.authFailures` | ✅ `gate.spec.ts › a wrong token is refused, counted, and not remembered` |
-
-(4 asset rows × 3 caller columns = 12, 7 API rows × 4 callers = 28, 14 further items: 54.)
+| 405 for every method a route does not take (`/api/health` included) | ❌ (c) `admin_routes_test.go › TestEveryAdminRouteAnswersEachCallerAndMethod` |
+| 403 for every change without `X-Scanguard-Action` (CSRF guard; POST/DELETE bans, PUT/POST/DELETE rules) | ❌ (c) same |
+| 403 for every change on a read-only console | ❌ (c) same; `tools/yaegi-smoke` under the interpreter |
+| a forged `X-Forwarded-User` on a token console: refused alone, never the actor beside a token | ❌ (c) same; `TestATokenConsoleNeverTakesTheForwardedUserAsTheActor` |
+| `/favicon.ico` 404 without a failed login; the bare prefix 308s to the directory form | ❌ (c) `TestEveryAdminRouteAnswersEachCallerAndMethod` |
 
 ## Console pages × roles (8)
 
@@ -68,7 +76,7 @@ Test names are `file › [describe ›] title`.
 | `/sso/` (SSO user) | ✅ `sweep.spec.ts › SSO console without an identity (/sso-anon/) › as a guest: the API refuses with 401 and Unlock keeps the gate up` (no `X-Forwarded-User`; `sweep.spec.ts › SSO console (/sso/) › as a guest: …` is a signed-in user's first visit, before Unlock) | ✅ `sweep.spec.ts › SSO console (/sso/) › as its operator: every panel` |
 | `/orphan/` (operator, no detector) | ✅ `sweep.spec.ts › orphan console (/orphan/) › as a guest: …` | ✅ `… › as its operator: every panel` |
 
-## Console features (45, from the extraction command)
+## Console features (46, from the extraction command)
 
 | # | Item | Test |
 |---|---|---|
@@ -83,9 +91,12 @@ Test names are `file › [describe ›] title`.
 | 9 | `input id="ban-reason"` — given / defaulted | ✅ `bans.spec.ts › a manual ban from the form is listed, enforced, and lifted by unblock`, `› a range and a permanent ban, with their expiry` |
 | 10 | Most probed paths | ✅ `panels.spec.ts › most probed paths and top sources rank what was requested` |
 | 11 | Top sources | ✅ same |
-| 12 | Rules that fired | ✅ `panels.spec.ts › rules that fired names the detector and the pattern` |
+| 12 | Rules that fired | ✅ `panels.spec.ts › rules that fired names the detector and the pattern, and counts each firing` |
 | 13 | Live activity — events stream in | ✅ `activity.spec.ts › a detection and the rejects after it stream in without a reload` |
-| 14–17 | filter chips `all`, `ban`, `reject`, `unban` (with `aria-pressed`) | ✅ `activity.spec.ts › the kind filter shows one kind at a time` |
+| 14 | filter chip `all` (with `aria-pressed`) | ✅ `activity.spec.ts › the kind filter shows one kind at a time` |
+| 15 | filter chip `ban` | ✅ same |
+| 16 | filter chip `reject` | ✅ same |
+| 17 | filter chip `unban` | ✅ same; `sso.spec.ts › the forwarded identity is who the audit trail names` |
 | 18 | `input id="follow"` | ✅ `activity.spec.ts › follow keeps the newest event in view; unticked, the feed stays where it was scrolled` |
 | 19 | Detectors (on/off, hit counts) | ✅ `panels.spec.ts › detectors show which are on and how often each fired` |
 | 20 | Configuration | ✅ `panels.spec.ts › configuration and compiled ruleset show what is in force` |
@@ -114,14 +125,19 @@ Test names are `file › [describe ›] title`.
 | 43 | toast "Reverted to the file configuration" | ✅ `rules.spec.ts › Revert asks first, then hands control back to the file` |
 | 44 | toast "Banned …" (and "Unblocked …", "No ban found for …") | ✅ `bans.spec.ts › a manual ban from the form is listed, enforced, and lifted by unblock`, `› unblocking a ban that is already gone says so` |
 | 45 | Health (failed logins, evicted sources, dropped notifications, expired bans) | ✅ `panels.spec.ts › health shows the counters that used to be sent and never shown` |
+| 46 | toast "The rule editor has not loaded; reload the page." | ✅ `orphan.spec.ts › the rule editor says no detector shares its instance name` |
 
-## Cross-cutting flows and states (33)
+## Cross-cutting flows and states (37)
 
 | Item | Test |
 |---|---|
 | login: right token unlocks | ✅ `gate.spec.ts › the right token unlocks, a reload keeps the session, Lock forgets it` |
 | session survives a reload | ✅ same |
 | logout (Lock), and a reload after it | ✅ same |
+| Lock forgets what was typed into the ban form | ✅ `gate.spec.ts › Lock forgets what was typed into the ban form` |
+| Lock while a poll is in flight: its answer is dropped, nothing more is fetched, the next sign-in works | ✅ `gate.spec.ts › Lock while a poll is in flight: its answer is dropped, and the next sign-in works`; SSO: `sso.spec.ts › Lock while a poll is in flight stops the polling; nothing is fetched until Unlock` |
+| the Expires column counts down while the page is open | ✅ `bans.spec.ts › the expiry counts down while the page is open` |
+| a rule change saved elsewhere warns an editor with unsaved edits, also when a ban sees it first | ✅ `rules.spec.ts › a change saved elsewhere warns an editor with unsaved edits, also when a ban sees it first` |
 | Lock empties the token field and resets the activity filter | ✅ `gate.spec.ts › the right token unlocks, a reload keeps the session, Lock forgets it`; `activity.spec.ts › Lock resets the kind filter, so the next session starts on "all"` |
 | console behind chained basicAuth (the browser's credentials reach every API call) | ✅ `auth.spec.ts › the console works behind basicAuth: the token unlocks and the data loads`, `› without the proxy credentials the gate blames the proxy, not the token` |
 | a proxy's 401 is told apart from the plugin's | ✅ `gate.spec.ts › a 401 from a proxy in front of the console is not blamed on the token` |
@@ -180,7 +196,7 @@ Test names are `file › [describe ›] title`.
 | subnet escalation (opt-in): a /24 of banned sources bans the range; unblock lifts it | ✅ `rules.spec.ts › range escalation: three banned sources in one /24 ban the range, and unblock lifts it` |
 | forwarded-header spoofing is attributed to the real peer | ❌ (c) `examples/scanner-sim.sh` "Spoofing"; `TestResolveWalksForwardedForRightToLeft` |
 | allowlisted user agents and paths | ❌ (c) `TestExemptRules`, `TestAllowlistedPathIsNotAWayAroundABan` |
-| bans survive a Traefik restart | ❌ (c) `ci.yml` integration "bans survive a restart"; `TestFileStoreRoundTrip` |
+| bans survive a Traefik restart (the same keys, still refused) | ❌ (c) `examples/restart-check.sh` (CI integration "bans survive a restart"); `TestFileStoreRoundTrip` |
 | console rule edits survive a Traefik restart | ❌ (c) `examples/rules-check.sh` "Edits survive a Traefik restart"; `TestRuleEditPersistsAcrossRestart` |
 | WebSocket upgrade and SSE flush through the middleware | ❌ (c) `examples/streaming-check.sh` |
 | webhook and chat notifications (ban, unban by console and by expiry; no per-reject flood; dead endpoint survivable) | ❌ (c) `examples/notify-check.sh` (webhook sink in the harness); `TestWebhookDelivery`, `TestChatPayloadsPerProvider`, `TestExpiredBansAreReportedToNotifiers` |
@@ -190,3 +206,18 @@ Test names are `file › [describe ›] title`.
 | Redis backend: a console ban, a detection and a rule edit (and lifting / reverting them) reach the other replica | ✅ `replicas.spec.ts › a ban from one console blocks on the other replica, and so does lifting it`, `› a detection on one replica bans the source on the other`, `› a rule edit on one console reaches the other replica, and so does reverting it` |
 | plugin-catalog `testData` accepted | ❌ (c) `TestManifestTestDataShape` |
 | plugin loads under Yaegi (Go 1.22 stdlib) | ❌ (c) `tools/yaegi-smoke` (CI `yaegi` job), and every e2e run (the harness interprets the working tree) |
+
+## Done twice (7)
+
+Each action twice in a row on one page, by mouse and keyboard only
+(`repeat.spec.ts`).
+
+| Item | Test |
+|---|---|
+| a wrong token, then the right one | ✅ `repeat.spec.ts › a wrong token, then the right one` |
+| two bans unblocked one after the other | ✅ `repeat.spec.ts › two bans unblocked one after the other` |
+| the same address banned twice: one row, the second ban | ✅ `repeat.spec.ts › the same address banned twice: one row, with the second ban` |
+| the rule editor saved twice in a row | ✅ `repeat.spec.ts › the rule editor › saved twice in a row` |
+| saved, reverted, and saved again | ✅ `repeat.spec.ts › the rule editor › saved, reverted, and saved again` |
+| a refused save (422), corrected and saved | ✅ `repeat.spec.ts › the rule editor › a refused save, corrected and saved` |
+| two form bans in a row, the second with only an address: its duration | ❌ (d) `repeat.spec.ts › two bans in a row: the second, with only an address typed, is not permanent` (fixme: should the duration go back to 1h after a ban?) |

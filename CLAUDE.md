@@ -17,10 +17,11 @@ gp=$(mktemp -d); mkdir -p "$gp/src/github.com/phoen-ix"; ln -s "$PWD" "$gp/src/g
 # e2e: the examples/ harness (Traefik + nginx + webhook sink), fixed ports
 # (rules-check.sh restarts Traefik itself, under the project that serves :9900)
 cd examples && export COMPOSE_PROJECT_NAME=scanguard_e2e && docker compose up -d
-./scanner-sim.sh && ./streaming-check.sh && ./rules-check.sh && ./notify-check.sh
+./scanner-sim.sh && ./streaming-check.sh && ./rules-check.sh && ./notify-check.sh && ./restart-check.sh
 docker compose down -v --remove-orphans
 # console e2e suite (starts and removes its own harness, project scanguard_e2e)
 scripts/e2e.sh [playwright args]               # e2e/COVERAGE.md maps features to tests
+(cd e2e && npm run typecheck && npm run lint)   # tsc + no-floating-promises (CI e2e job)
 # docs screenshots (starts and removes its own harness, project scanguard_docs)
 (cd e2e && npm ci && npx playwright install chromium)
 scripts/docs-screenshots.sh [outdir]           # default docs/screenshots
@@ -84,7 +85,17 @@ Anything that starts Docker goes through `~/repos/.fleet/scripts/slot heavy scan
   SSO and orphan consoles come from `e2e/fixtures/consoles.yml`, which
   global-setup copies into `examples/dynamic/zz-e2e-consoles.yml` (gitignored)
   for the run. `scripts/e2e.sh` adds the overlay `examples/docker-compose.e2e.yml`:
-  Redis plus two Traefik replicas on 8801/9901 and 8802/9902.
+  Redis plus two Traefik replicas on 8801/9901 and 8802/9902. Under `CI` a test
+  that passes only on its retry fails the run (`failOnFlakyTests`).
+- Tests guard themselves: `hygiene_test.go` scans every e2e, Go and shell test
+  file for steps a user would not take (sleeps, forced or synthetic events,
+  actions retried until they work; each kept use is allowlisted with its
+  reason), `admin_routes_test.go` walks every route `serveAdmin` serves (read
+  with go/ast) with every method as every kind of caller, `e2e/tests/source.ts`
+  reads routes, panels, tiles and rule groups from the source instead of
+  copying them, and `coverage_test.go` checks every count in `e2e/COVERAGE.md`.
+  `npm install` in e2e/ writes `node_modules/go.mod`, so eslint's dependency
+  `flatted` (it ships a Go package) stays out of this module's `./...`.
 - Docs tour (`e2e/docs/`): screenshot names are stable once committed;
   `tour.spec.ts` pins every server timestamp to 2026-06-15 10:00 Vienna so two
   runs give identical PNGs. Optimise with oxipng before committing.

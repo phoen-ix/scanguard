@@ -1,6 +1,9 @@
 package scanguard
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -596,5 +599,56 @@ func TestSubnetAndUARotationDefaults(t *testing.T) {
 	}
 	if s.subnet.Enabled || s.uaRot.Enabled || s.subnetWindow != 24*time.Hour || s.uaRotLeak != time.Minute {
 		t.Errorf("parsed subnet=%+v window=%s uaRot=%+v leak=%s", s.subnet, s.subnetWindow, s.uaRot, s.uaRotLeak)
+	}
+}
+
+// The README says how many built-in rules there are; the lists are in
+// rules_default.go, and a count kept by hand drifts.
+func TestReadmeCountsTheBuiltInRules(t *testing.T) {
+	b, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("| %d curated paths", len(defaultSignatures)),
+		fmt.Sprintf("added to the %d built-ins", len(defaultCrawlers)),
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("README.md does not say %q", want)
+		}
+	}
+}
+
+// The harness tokens are written out in the e2e suite, the scripts and CI; each
+// copy has to be the one the harness configures.
+func TestHarnessTokensAreOneValue(t *testing.T) {
+	for config, re := range map[string]*regexp.Regexp{
+		"examples/dynamic/scanguard.yml":     regexp.MustCompile(`dev-token-[\w-]+`),
+		"e2e/fixtures/replicas/replicas.yml": regexp.MustCompile(`e2e-redis-token-[\w-]+`),
+	} {
+		b, err := os.ReadFile(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := re.FindString(string(b))
+		copies := 0
+		for _, glob := range []string{"e2e/*/*.ts", "examples/*.sh", "scripts/*.sh", ".github/workflows/*.yml", "README.md", "CLAUDE.md"} {
+			files, _ := filepath.Glob(glob)
+			for _, f := range files {
+				b, err := os.ReadFile(f)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, got := range re.FindAllString(string(b), -1) {
+					copies++
+					if got != want {
+						t.Errorf("%s has %s, but %s configures %s", f, got, config, want)
+					}
+				}
+			}
+		}
+		if want == "" || copies < 3 {
+			t.Errorf("%s: token %q, %d copies found; is the pattern still right?", config, want, copies)
+		}
 	}
 }

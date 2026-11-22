@@ -382,7 +382,7 @@ detectors:
   honeypots:   { enabled: true,  paths: [] }
   userAgent:   { enabled: true,  useDefaults: true, patterns: [], banEmptyUA: false,
                  crawlers: ignore,    # ignore | ban | block | exempt — settable per router
-                 crawlerPatterns: [] }   # your own crawlers, added to the twelve built-ins
+                 crawlerPatterns: [] }   # your own crawlers, added to the 12 built-ins
   badPaths:    { enabled: true,  capacity: 20, leak: 10s, statuses: [400,401,403,404,405,501] }   # capacity at most 128
   bruteForce:  { enabled: false, capacity: 5, window: 60s, statuses: [401,403], paths: [] }
   rateAbuse:   { enabled: false, rps: 50, burst: 100 }
