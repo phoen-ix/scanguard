@@ -60,14 +60,15 @@ test('the same address banned twice: one row, with the second ban', async ({ pag
   expect(await probe(request, ip, '/')).toBe(403)
 })
 
-// Owner decision (SUMMARY.md, scanguard Decide 2): after a ban, should the
-// duration keep the last value or go back to 1h? Today a permanent ban makes
-// the next one permanent too, unless the field is changed.
-test.fixme('two bans in a row: the second, with only an address typed, is not permanent', async ({ page }) => {
+// The duration goes back to 1h after a ban, like the address and the reason
+// (owner decision 2026-11-22): it used to stay, so a permanent ban made the
+// next one permanent too, unless the field was changed.
+test('two bans in a row: the second, with only an address typed, is not permanent', async ({ page }) => {
   const [a, b] = [uniqueIp(), uniqueIp()]
   await signIn(page)
   await banViaForm(page, a, '0', 'e2e permanent')
   await expect(toast(page)).toHaveText(`Banned ${a}/32`)
+  await expect(page.getByLabel('Ban duration')).toHaveValue('1h')
   await banViaForm(page, b)
   await expect(cells(banRow(page, `${b}/32`)).nth(6)).toHaveText('in 1h')
 })

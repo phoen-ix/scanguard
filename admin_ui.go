@@ -1585,8 +1585,9 @@ document.addEventListener("DOMContentLoaded", function () {
       body: { key: key, duration: $("ban-duration").value.trim() || "1h", reason: $("ban-reason").value.trim() }
     }).then(function (r) {
       toast("Banned " + r.ban.key);
-      $("ban-key").value = "";
-      $("ban-reason").value = "";
+      // The duration too, back to 1h: kept, a permanent ban made the next one
+      // permanent unless somebody noticed the field.
+      $("ban-form").reset();
       return refresh();
     }).catch(fail);
   });

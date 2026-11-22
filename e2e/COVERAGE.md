@@ -29,7 +29,7 @@ or `Authorization: Bearer`), **read-only operator** (`admin.readOnly`), **SSO us
 `e2e/fixtures/consoles.yml`, added to the running harness for the length of the run;
 two Traefik replicas sharing a Redis come from the overlay `examples/docker-compose.e2e.yml`.
 
-**Totals: 172 items — ✅ 144, ❌ 28** ((a) 2, (c) 25, (d) 1).
+**Totals: 172 items — ✅ 145, ❌ 27** ((a) 2, (c) 25, (d) 0).
 
 Test names are `file › [describe ›] title`.
 
@@ -221,4 +221,4 @@ Each action twice in a row on one page, by mouse and keyboard only
 | the rule editor saved twice in a row | ✅ `repeat.spec.ts › the rule editor › saved twice in a row` |
 | saved, reverted, and saved again | ✅ `repeat.spec.ts › the rule editor › saved, reverted, and saved again` |
 | a refused save (422), corrected and saved | ✅ `repeat.spec.ts › the rule editor › a refused save, corrected and saved` |
-| two form bans in a row, the second with only an address: its duration | ❌ (d) `repeat.spec.ts › two bans in a row: the second, with only an address typed, is not permanent` (fixme: should the duration go back to 1h after a ban?) |
+| two form bans in a row, the second with only an address: the duration is back at 1h | ✅ `repeat.spec.ts › two bans in a row: the second, with only an address typed, is not permanent` |
