@@ -17,6 +17,8 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: process.env.CI ? 1 : 0,
+  // A pass on the retry is a failure: a flaky test hides a race in the product or the test.
+  failOnFlakyTests: !!process.env.CI,
   reporter: 'list',
   use: {
     ...devices['Desktop Chrome'],
