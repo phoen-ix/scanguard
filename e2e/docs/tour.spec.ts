@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 
 import { expect, test, type Locator, type Page } from '@playwright/test'
 
+import { RULE_GROUPS } from '../tests/source'
 import { TOKEN, api, seed } from './seed'
 
 /* The docs tour: one screenshot per console state (docs/screenshots/README.md
@@ -74,7 +75,7 @@ async function open(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.locator('#app')).toBeVisible()
   // The last thing refresh() paints.
-  await expect(page.locator('#rules-form .rule-group')).toHaveCount(11)
+  await expect(page.locator('#rules-form .rule-group')).toHaveCount(RULE_GROUPS.length)
 }
 
 /** Viewport shot, or the box around `els` (capped at 2400 CSS px). */
@@ -122,7 +123,7 @@ test('access gate', async ({ page }) => {
   await page.fill('#token', TOKEN)
   await page.click('#gate-form button[type=submit]')
   await expect(page.locator('#app')).toBeVisible()
-  await expect(page.locator('#rules-form .rule-group')).toHaveCount(11)
+  await expect(page.locator('#rules-form .rule-group')).toHaveCount(RULE_GROUPS.length)
 })
 
 test.describe('with bans', () => {

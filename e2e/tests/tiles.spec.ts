@@ -1,4 +1,4 @@
-import { TILES, api, expect, probe, test, tile, uniqueIp, unlock } from './helpers'
+import { TILES, TILE_LABELS, api, expect, polls, probe, test, tile, uniqueIp, unlock } from './helpers'
 
 /* The six counter tiles and the drill-down each one opens beneath the row. */
 
@@ -12,6 +12,10 @@ test.beforeAll(async ({ playwright }) => {
   await probe(request, ip, '/')
   await probe(request, null, '/')
   await request.dispose()
+})
+
+test('TILES says what every tile in TILE_ORDER shows', () => {
+  expect(TILES.map((t) => t.label)).toEqual(TILE_LABELS)
 })
 
 for (const t of TILES) {
@@ -61,6 +65,8 @@ test('each list says what it holds', async ({ page, request }) => {
 
   await tile(page, 'active bans').click()
   const { bans, bansTotal } = await api(request, '/api/state')
+  // The page has drawn that state before it is compared with it.
+  await expect(page.locator('#ban-count')).toContainText(String(bansTotal))
   await expect(detail(page).locator('tbody tr')).toHaveCount(bans.length)
   await expect(page.locator('#tile-detail-note')).toHaveText(
     bansTotal > bans.length ? `The newest ${bans.length} of ${bansTotal} active bans — the same rows as the Active bans panel below.`
@@ -91,8 +97,7 @@ test('an open tile and its list survive the poll without losing focus', async ({
   await button.press('Enter')
   await expect(detail(page)).toBeVisible()
   // Two polls later the same element is still the focused, expanded tile.
-  await page.waitForResponse((r) => r.url().endsWith('/api/state'))
-  await page.waitForResponse((r) => r.url().endsWith('/api/state'))
+  await polls(page, '/api/state')
   await expect(button).toBeFocused()
   await expect(button).toHaveAttribute('aria-expanded', 'true')
 })

@@ -1,4 +1,4 @@
-import { api, banRow, banViaForm, cells, expect, probe, test, toast, uniqueIp, unlock } from './helpers'
+import { api, banRow, banViaForm, cells, expect, polls, probe, test, toast, uniqueIp, unlock } from './helpers'
 
 /* The Active bans panel: manual bans from the form, unblock, and detector bans
  * arriving while the page is open. */
@@ -24,7 +24,7 @@ test('a manual ban from the form is listed, enforced, and lifted by unblock', as
   await row.getByRole('button', { name: 'unblock' }).click()
   await expect(toast(page)).toHaveText(`Unblocked ${key}`)
   await expect(row).toHaveCount(0)
-  expect(await probe(request, ip, '/')).not.toBe(403)
+  expect(await probe(request, ip, '/')).toBe(200)
 })
 
 test('the expiry counts down while the page is open', async ({ page }) => {
@@ -68,14 +68,14 @@ for (const [what, key, duration, message] of [
   ['an IPv6 prefix narrower than the key width', '2001:db8::1/128', '1h', 'is narrower than the /64 that requests are keyed at'],
   ['a duration that is not one', '198.18.0.9', 'soon', 'duration: "soon" is not a valid duration'],
 ]) {
-  test(`the form refuses ${what}, with the reason`, async ({ page }) => {
+  test(`the form refuses ${what}, with the reason`, async ({ page, request }) => {
     await unlock(page)
-    const before = await page.locator('#bans tbody tr').count()
+    const before = (await api(request, '/api/state')).bansTotal
     await banViaForm(page, key, duration)
     await expect(toast(page)).toContainText(message)
-    // Nothing recorded, and the input stays for correcting.
+    // The input stays for correcting, and nothing was recorded.
     await expect(page.getByLabel('Address or CIDR to ban')).toHaveValue(key)
-    await expect(page.locator('#bans tbody tr')).toHaveCount(before)
+    expect((await api(request, '/api/state')).bansTotal).toBe(before)
   })
 }
 
@@ -83,9 +83,10 @@ test('an empty address sends nothing', async ({ page }) => {
   await unlock(page)
   let posted = false
   page.on('request', (r) => { if (r.method() === 'POST') posted = true })
+  const nextPoll = polls(page, '/api/state', 1)
   await page.getByRole('button', { name: 'Ban', exact: true }).click()
-  // The next poll has come and gone; no POST went out before it.
-  await page.waitForResponse((r) => r.url().endsWith('/api/state'))
+  // A poll sent after the click has come back; no POST went out before it.
+  await nextPoll
   expect(posted).toBe(false)
   await expect(toast(page)).toBeHidden()
 })
@@ -110,9 +111,9 @@ test('focus on an unblock button survives the poll', async ({ page, request }) =
   await button.focus()
   await expect(button).toBeFocused()
   // Another ban arriving above the row and two polls must not rebuild it.
+  const twoPolls = polls(page, '/api/state')
   await api(request, '/api/bans', { method: 'POST', data: { key: uniqueIp(), duration: '1h', reason: 'e2e newer' } })
-  await page.waitForResponse((r) => r.url().endsWith('/api/state'))
-  await page.waitForResponse((r) => r.url().endsWith('/api/state'))
+  await twoPolls
   await expect(button).toBeFocused()
   await button.press('Enter')
   await expect(toast(page)).toHaveText(`Unblocked ${ip}/32`)

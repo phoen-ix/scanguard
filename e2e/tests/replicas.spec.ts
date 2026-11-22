@@ -38,8 +38,8 @@ test('a ban from one console blocks on the other replica, and so does lifting it
   const row = banRow(page, `${ip}/32`)
   await row.getByRole('button', { name: 'unblock' }).click()
   await expect(toast(page)).toHaveText(`Unblocked ${ip}/32`)
-  expect(await status(request, B.site, ip, '/')).not.toBe(403)
-  await expect.poll(() => status(request, A.site, ip, '/'), SYNC).not.toBe(403)
+  expect(await status(request, B.site, ip, '/')).toBe(200)
+  await expect.poll(() => status(request, A.site, ip, '/'), SYNC).toBe(200)
 })
 
 test('a detection on one replica bans the source on the other', async ({ request }) => {

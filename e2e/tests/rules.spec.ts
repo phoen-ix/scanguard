@@ -1,6 +1,6 @@
 import { type Page } from '@playwright/test'
 
-import { SITE, api, banRow, banViaForm, cells, eventRows, expect, probe, ruleGroup, test, tile, toast, uniqueIp, unlock } from './helpers'
+import { RULE_GROUPS, SITE, TOKEN, api, banRow, banViaForm, cells, eventRows, expect, probe, ruleGroup, test, tile, toast, uniqueIp, unlock } from './helpers'
 
 /* The rule editor. Saving changes the harness's one runtime for everybody, so
  * every test hands control back to the file configuration afterwards. */
@@ -18,15 +18,12 @@ const FILE_META = "Running Traefik's file configuration. Saving here takes over 
 
 async function editorReady(page: Page): Promise<void> {
   await unlock(page)
-  await expect(page.locator('#rules-form .rule-group')).toHaveCount(11)
+  await expect(page.locator('#rules-form .rule-group')).toHaveCount(RULE_GROUPS.length)
 }
 
 test('shows the file configuration, one group per section, nothing marked', async ({ page }) => {
   await editorReady(page)
-  await expect(page.locator('#rules-form h3')).toHaveText([
-    'General', 'Path signatures', 'Honeypots', 'Scanner user-agents', 'Distinct failing paths',
-    'Brute force', 'Request rate', 'User-agent rotation', 'Payload probes', 'Allowlist', 'Enforcement',
-  ])
+  await expect(page.locator('#rules-form h3')).toHaveText(RULE_GROUPS)
   await expect(page.locator('#rules-meta')).toHaveText(FILE_META)
   await expect(badge(page)).toBeHidden()
   await expect(unsaved(page)).toBeHidden()
@@ -106,7 +103,7 @@ test('saving applies on the next request, is marked, and survives a reload', asy
   expect(await probe(request, uniqueIp(), trap)).toBe(403)
 
   await page.reload()
-  await expect(page.locator('#rules-form .rule-group')).toHaveCount(11)
+  await expect(page.locator('#rules-form .rule-group')).toHaveCount(RULE_GROUPS.length)
   await expect(field(page, 'Honeypots', 'Trap paths')).toHaveValue(new RegExp(`${trap}$`))
   await expect(badge(page)).toBeVisible()
   await expect(page.locator('.rule-row.changed')).toHaveCount(1)
@@ -163,7 +160,7 @@ test('dry run: detectors record what they would ban, nothing is blocked', async 
   const ip = uniqueIp()
   expect(await probe(request, ip, '/wp-login.php')).toBe(404)
   await expect(eventRows(page, `${ip}/32`).locator('td.k-ban')).toHaveText('ban (dry)')
-  expect(await probe(request, ip, '/')).not.toBe(403)
+  expect(await probe(request, ip, '/')).toBe(200)
 
   page.once('dialog', (d) => void d.accept())
   await revert(page).click()
@@ -211,7 +208,7 @@ test('every kind of field in every group round-trips: checkbox, choice, number, 
   }
 
   await page.reload()
-  await expect(page.locator('#rules-form .rule-group')).toHaveCount(11)
+  await expect(page.locator('#rules-form .rule-group')).toHaveCount(RULE_GROUPS.length)
   for (const [group, label, , shown] of edits) await expect(field(page, group, label)).toHaveValue(shown)
   await expect(field(page, 'Scanner user-agents', 'Ban requests with no User-Agent')).toBeChecked()
   await expect(field(page, 'Payload probes', 'Scan the request body')).toBeChecked()
@@ -238,9 +235,11 @@ test('an allowlist edit exempts the range at once, and the ban form refuses it',
   await save(page).click()
   await expect(toast(page)).toHaveText('Rules applied')
 
-  expect(await probe(request, '192.0.2.10', '/wp-login.php')).not.toBe(403)
+  const exempt = async () => ((await api(request, '/api/state')).topExempt.find((e: { key: string }) => e.key === 'allowlist-cidr')?.count ?? 0) as number
+  const before = await exempt()
+  expect(await probe(request, '192.0.2.10', '/wp-login.php')).toBe(404)
   await tile(page, 'exempt').click()
-  await expect(page.locator('#tile-detail tbody tr').filter({ hasText: 'allowlist-cidr' })).toHaveCount(1)
+  await expect(page.locator('#tile-detail tbody tr').filter({ hasText: 'allowlist-cidr' }).locator('td').nth(1)).toHaveText(String(before + 1))
 
   await banViaForm(page, '192.0.2.10')
   await expect(toast(page)).toHaveText('refusing to ban 192.0.2.10/32: it overlaps allowlisted 192.0.2.0/24')
@@ -269,7 +268,7 @@ test('range escalation: three banned sources in one /24 ban the range, and unblo
 
   await row.getByRole('button', { name: 'unblock' }).click()
   await expect(toast(page)).toHaveText(`Unblocked ${range}`)
-  expect(await probe(request, fresh, '/')).not.toBe(403)
+  expect(await probe(request, fresh, '/')).toBe(200)
 })
 
 test('leaving with unsaved edits asks first; with none it does not', async ({ page, context }) => {
@@ -283,9 +282,9 @@ test('leaving with unsaved edits asks first; with none it does not', async ({ pa
   await expect.poll(() => dialogs).toEqual(['beforeunload'])
 
   const clean = await context.newPage()
-  await clean.addInitScript((t) => sessionStorage.setItem('scanguard.token', t), 'dev-token-change-me-0123456789')
+  await clean.addInitScript((t) => sessionStorage.setItem('scanguard.token', t), TOKEN)
   await clean.goto('/')
-  await expect(clean.locator('#rules-form .rule-group')).toHaveCount(11)
+  await expect(clean.locator('#rules-form .rule-group')).toHaveCount(RULE_GROUPS.length)
   clean.on('dialog', (d) => { dialogs.push(`clean ${d.type()}`); void d.accept() })
   const closed = clean.waitForEvent('close')
   await clean.close({ runBeforeUnload: true })

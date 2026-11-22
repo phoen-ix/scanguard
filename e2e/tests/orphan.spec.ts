@@ -29,4 +29,7 @@ test('the rule editor says no detector shares its instance name', async ({ page 
   await unlock(page, ORPHAN)
   await expect(page.getByRole('alert')).toHaveText('no detection middleware has been configured for this instance yet')
   await expect(page.locator('#rules-form .rule-group')).toHaveCount(0)
+  // Save with nothing loaded submits nothing, and says why.
+  await page.getByRole('button', { name: 'Save and apply' }).click()
+  await expect(page.getByRole('status')).toHaveText('The rule editor has not loaded; reload the page.')
 })

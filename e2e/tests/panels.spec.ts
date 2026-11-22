@@ -1,4 +1,4 @@
-import { CONSOLE, expect, probe, test, uniqueIp, unlock } from './helpers'
+import { CONSOLE, DETECTORS, api, expect, probe, test, uniqueIp, unlock } from './helpers'
 
 /* The read-out panels: rankings, detectors, configuration, compiled ruleset,
  * header and footer. Against the harness configuration (examples/dynamic/scanguard.yml). */
@@ -13,10 +13,14 @@ test('most probed paths and top sources rank what was requested', async ({ page,
   await expect(page.locator('#top-sources tbody tr').filter({ hasText: `${ip}/32` }).locator('td')).toHaveText([`${ip}/32`, '40'])
 })
 
-test('rules that fired names the detector and the pattern', async ({ page, request }) => {
+test('rules that fired names the detector and the pattern, and counts each firing', async ({ page, request }) => {
+  // Earlier tests fired it too: the count has to move by this test's one probe.
+  const fired = async () => ((await api(request, '/api/state')).topRules.find((r: { key: string }) => r.key.startsWith('signature: ') && r.key.includes('wp-login'))?.count ?? 0) as number
+  const before = await fired()
   expect(await probe(request, uniqueIp(), '/wp-login.php')).toBe(403)
   await unlock(page)
-  await expect(page.locator('#top-rules tbody tr').filter({ hasText: 'signature: ' }).filter({ hasText: 'wp-login' })).toHaveCount(1)
+  const row = page.locator('#top-rules tbody tr').filter({ hasText: 'signature: ' }).filter({ hasText: 'wp-login' })
+  await expect(row.locator('td').nth(1)).toHaveText(String(before + 1))
   await expect(page.locator('#top-rules-empty')).toBeHidden()
 })
 
@@ -24,7 +28,7 @@ test('detectors show which are on and how often each fired', async ({ page, requ
   expect(await probe(request, uniqueIp(), '/admin.php')).toBe(403)
   await unlock(page)
   const chips = page.locator('#detectors .dchip')
-  await expect(chips).toHaveCount(11)
+  await expect(chips).toHaveCount(DETECTORS)
   await expect(chips.filter({ hasText: /^rate-abuse$/ })).toHaveAttribute('title', 'disabled')
   // The two the panel used to leave out: the crawler policy (ignore in the
   // harness) and the AbuseIPDB reputation check (off).
@@ -59,11 +63,12 @@ test('configuration and compiled ruleset show what is in force', async ({ page }
 })
 
 test('health shows the counters that used to be sent and never shown', async ({ page, request }) => {
-  // One failed login, so the row has something to show.
+  // One failed login more than before, so the row has something of this test's to show.
+  const before = (await api(request, '/api/state')).stats.authFailures as number
   await request.get(CONSOLE + '/api/health', { headers: { 'X-Scanguard-Token': 'not-the-token-0123456789' } })
   await unlock(page)
   const kv = (term: string) => page.locator('#health dt').filter({ hasText: new RegExp(`^${term}$`) }).locator('xpath=following-sibling::dd[1]')
-  await expect(kv('failed logins')).toHaveText(/^[1-9]\d*$/)
+  await expect(kv('failed logins')).toHaveText(String(before + 1))
   await expect(kv('failed logins')).toHaveClass(/alert/)
   await expect(kv('evicted sources')).toHaveText('0')
   await expect(kv('dropped notifications')).toHaveText('0')

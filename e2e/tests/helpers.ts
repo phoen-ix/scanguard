@@ -1,14 +1,11 @@
-import { expect, test as base, type APIRequestContext, type Locator, type Page } from '@playwright/test'
+import { expect, test as base, type APIRequestContext, type Locator, type Page, type Request } from '@playwright/test'
 
 import { CONSOLE, CONSOLES, MAIN, SITE, type Console } from './consoles'
 
 export * from './consoles'
+export * from './source'
 
-export const PANELS = [
-  'Active bans', 'Most probed paths', 'Top sources', 'Rules that fired', 'Live activity',
-  'Detectors', 'Configuration', 'Health', 'Compiled ruleset', 'Rule editor',
-]
-
+/** What each tile's list shows; tiles.spec.ts checks it names every tile in TILE_ORDER. */
 export const TILES = [
   { label: 'requests seen', title: 'Requests seen', cols: ['host', 'requests'] },
   { label: 'blocked', title: 'Blocked requests', cols: ['time', 'source', 'path', 'rule'] },
@@ -71,6 +68,16 @@ export async function unlock(page: Page, c: Console = MAIN): Promise<void> {
   await page.goto(c.base)
   await expect(page.locator('#app')).toBeVisible()
   await expect(page.locator('#subtitle')).toContainText(' · up ')
+}
+
+/** Resolves once `n` requests to `path`, sent after this call, have been answered: call it
+ * before the action, await it after. A request already on its way does not count. */
+export function polls(page: Page, path: string, n = 2): Promise<unknown> {
+  const sent = new Set<Request>()
+  const track = (r: Request) => { if (r.url().includes(path)) sent.add(r) }
+  page.on('request', track)
+  let answered = 0
+  return page.waitForResponse((r) => sent.has(r.request()) && ++answered === n).finally(() => page.off('request', track))
 }
 
 export const bansTable = (page: Page) => page.locator('#bans')

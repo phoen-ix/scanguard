@@ -35,10 +35,18 @@ test('the console works behind basicAuth: the token unlocks and the data loads',
 })
 
 test('without the proxy credentials the gate blames the proxy, not the token', async ({ browser }) => {
-  // A context with no HTTP credentials: the page itself is a 401 from basicAuth.
+  // The page loaded while the browser still had its basicAuth credentials (the
+  // route adds them to the page's own files only); every API call goes without
+  // and meets basicAuth's real 401.
   const context = await browser.newContext({ httpCredentials: undefined })
   const page = await context.newPage()
-  const res = await page.goto('/auth/')
-  expect(res?.status()).toBe(401)
+  const basic = 'Basic ' + Buffer.from('dev:dev').toString('base64')
+  await page.route((url) => url.pathname.startsWith('/auth/') && !url.pathname.startsWith('/auth/api/'),
+    (route) => route.continue({ headers: { ...route.request().headers(), authorization: basic } }))
+  await page.goto('/auth/')
+  await page.getByLabel('Access token').fill(TOKEN)
+  await page.getByRole('button', { name: 'Unlock' }).click()
+  await expect(page.getByRole('alert')).toHaveText('The proxy in front of the console refused the request (HTTP 401). Sign in to it and reload.')
+  await expect(page.locator('#app')).toBeHidden()
   await context.close()
 })

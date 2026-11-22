@@ -1,16 +1,13 @@
-import { CONSOLE, CONSOLES, PANELS, TOKEN, expect, test, unlock } from './helpers'
+import { API, ASSETS, CONSOLE, CONSOLES, PANELS, TILE_LABELS, TOKEN, expect, test, unlock } from './helpers'
 
 /* Breadth: every admin route as every kind of caller, and every console page
- * as a guest and as its operator. The routes are serveAdmin's switch in
- * admin.go (COVERAGE.md has the extraction command). */
+ * as a guest and as its operator, on the plugin as Traefik interprets it. The
+ * routes are serveAdmin's own cases (source.ts reads admin.go). Every method
+ * on every route as every caller, read-only and anti-CSRF included, is the Go
+ * walk's: admin_routes_test.go. */
 
-const ASSETS = [
-  ['/', 'text/html'],
-  ['/index.html', 'text/html'],
-  ['/app.css', 'text/css'],
-  ['/app.js', 'application/javascript'],
-]
-const API = ['/api/state', '/api/events', '/api/sources', '/api/bans', '/api/rules', '/api/rules/compiled', '/api/health']
+const TYPES: Record<string, string> = { html: 'text/html', css: 'text/css', js: 'application/javascript' }
+const typeOf = (path: string) => TYPES[path.split('.')[1] ?? 'html']
 const CALLERS: Record<string, Record<string, string>> = {
   guest: {},
   'a wrong token': { 'X-Scanguard-Token': 'not-the-token-0123456789' },
@@ -20,12 +17,12 @@ const CALLERS: Record<string, Record<string, string>> = {
 const authorised = (caller: string) => caller === 'the token' || caller === 'a Bearer token'
 
 test.describe('admin routes', () => {
-  for (const [path, type] of ASSETS) {
+  for (const path of ASSETS) {
     test(`${path} is served to every caller, with the console's security headers`, async ({ request }) => {
       for (const headers of Object.values(CALLERS)) {
         const res = await request.get(CONSOLE + path, { headers })
         expect(res.status(), path).toBe(200)
-        expect(res.headers()['content-type']).toContain(type)
+        expect(res.headers()['content-type']).toContain(typeOf(path))
         expect(res.headers()['content-security-policy']).toContain("default-src 'none'")
         expect(res.headers()['cache-control']).toContain('no-store')
         expect(res.headers()['x-content-type-options']).toBe('nosniff')
@@ -55,6 +52,14 @@ test.describe('admin routes', () => {
         expect(res.headers()['content-security-policy']).toContain("frame-ancestors 'none'")
       })
     }
+    test(`every change to ${path} is a 401 for a guest and a wrong token`, async ({ request }) => {
+      for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
+        for (const caller of ['guest', 'a wrong token']) {
+          const headers = { ...CALLERS[caller], 'X-Scanguard-Action': '1' }
+          expect((await request.fetch(CONSOLE + path, { method, headers, data: {} })).status(), `${method} as ${caller}`).toBe(401)
+        }
+      }
+    })
   }
 
   test('an unknown endpoint is a 404 for the operator and a 401 for anyone else', async ({ request }) => {
@@ -63,34 +68,6 @@ test.describe('admin routes', () => {
     expect(await known.json()).toEqual({ error: 'no such endpoint' })
     expect((await request.get(`${CONSOLE}/api/nope`)).status()).toBe(401)
   })
-
-  for (const [method, path, allowed] of [
-    ['POST', '/api/state', 'GET only'],
-    ['POST', '/api/events', 'GET only'],
-    ['POST', '/api/sources', 'GET only'],
-    ['POST', '/api/rules/compiled', 'GET only'],
-    ['PATCH', '/api/bans', 'GET, POST or DELETE'],
-    ['PATCH', '/api/rules', 'GET, PUT (POST is accepted as an alias) or DELETE'],
-  ]) {
-    test(`${method} ${path} is refused with 405`, async ({ request }) => {
-      const res = await request.fetch(CONSOLE + path, { method, headers: { ...CALLERS['the token'], 'X-Scanguard-Action': '1' } })
-      expect(res.status()).toBe(405)
-      expect(await res.json()).toEqual({ error: allowed })
-    })
-  }
-
-  for (const [method, path] of [
-    ['POST', '/api/bans'],
-    ['DELETE', '/api/bans?key=198.18.0.1'],
-    ['PUT', '/api/rules'],
-    ['DELETE', '/api/rules'],
-  ]) {
-    test(`${method} ${path.split('?')[0]} without the anti-CSRF header is refused with 403`, async ({ request }) => {
-      const res = await request.fetch(CONSOLE + path, { method, headers: CALLERS['the token'], data: {} })
-      expect(res.status()).toBe(403)
-      expect(await res.json()).toEqual({ error: 'mutations require the X-Scanguard-Action header' })
-    })
-  }
 
   test('malformed requests are refused with the reason', async ({ request }) => {
     const headers = { ...CALLERS['the token'], 'X-Scanguard-Action': '1', 'Content-Type': 'application/json' }
@@ -130,7 +107,7 @@ for (const c of CONSOLES) {
     test('as its operator: every panel', async ({ page }) => {
       await unlock(page, c)
       for (const name of PANELS) await expect(page.getByRole('heading', { name: new RegExp(`^${name}`) })).toBeVisible()
-      await expect(page.locator('#tiles').getByRole('button')).toHaveCount(6)
+      await expect(page.locator('#tiles').getByRole('button')).toHaveCount(TILE_LABELS.length)
       await expect(page.locator('#footer-instance')).toHaveText(c.name === 'main' ? 'default' : `e2e-${c.base.slice(1, -1)}`)
     })
   })

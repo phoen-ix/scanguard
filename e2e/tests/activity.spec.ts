@@ -1,4 +1,4 @@
-import { TOKEN, api, cells, eventRows, expect, probe, test, uniqueIp, unlock } from './helpers'
+import { TOKEN, api, cells, eventRows, expect, polls, probe, test, uniqueIp, unlock } from './helpers'
 
 /* Live activity: the event feed, its kind filter and the follow toggle. */
 
@@ -70,8 +70,7 @@ test('a filter click racing the poll does not duplicate rows', async ({ page, re
   // Click the same filter the poll is about to answer for, several times in a row.
   for (const name of ['rejects', 'bans', 'all', 'bans']) await chip(page, name).click()
   await expect(chip(page, 'bans')).toHaveAttribute('aria-pressed', 'true')
-  await page.waitForResponse((r) => r.url().includes('/api/events'))
-  await page.waitForResponse((r) => r.url().includes('/api/events'))
+  await polls(page, '/api/events')
   await expect(eventRows(page, `${ip}/32`)).toHaveCount(1)
 })
 
