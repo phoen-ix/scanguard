@@ -395,6 +395,12 @@ var timer = null;
 var POLL_MS = 3000;
 var POLL_MAX_MS = 30000;
 var pollDelay = POLL_MS;
+// session counts Locks. An answer to a request sent before the last Lock
+// belongs to a session that has ended: a poll in flight at Lock used to paint
+// the old session behind the gate and poll on, without the token, so its 401
+// reported "That token was not accepted." and cleared the field someone was
+// typing the next token into (an SSO console simply kept polling).
+var session = 0;
 
 function $(id) { return document.getElementById(id); }
 
@@ -418,12 +424,16 @@ function headers(mutating) {
 // which no cross-origin form can set, not by withholding credentials.
 function api(path, options) {
   var opts = options || {};
+  var mine = session;
+  // Dropped as "unauthorized", which every caller already treats as handled.
+  function ended() { return mine !== session; }
   return fetch(BASE + path, {
     method: opts.method || "GET",
     headers: headers(!!opts.method && opts.method !== "GET"),
     body: opts.body ? JSON.stringify(opts.body) : undefined,
     cache: "no-store"
   }).then(function (r) {
+    if (ended()) { throw new Error("unauthorized"); }
     if (r.status === 401) {
       // The plugin's own 401 names its realm. One without it came from
       // whatever sits in front of the console, and the token is not to blame.
@@ -437,6 +447,7 @@ function api(path, options) {
     // Traefik, a gateway's HTML) is not JSON, and r.json() on it surfaced
     // "Unexpected token <" where "HTTP 502" is the useful message.
     return r.text().then(function (text) {
+      if (ended()) { throw new Error("unauthorized"); }
       var data = null;
       if (text) { try { data = JSON.parse(text); } catch (e) { data = null; } }
       if (!r.ok) { throw new Error(data && data.error ? data.error : "HTTP " + r.status); }
@@ -463,6 +474,7 @@ function fail(err) {
 }
 
 function lock(message) {
+  session++;
   if (timer) { clearTimeout(timer); timer = null; }
   pollDelay = POLL_MS;
   setOffline(false);

@@ -69,6 +69,38 @@ test('Lock forgets what was typed into the ban form', async ({ page }) => {
   await expect(page.getByLabel('Ban reason')).toHaveValue('')
 })
 
+test('Lock while a poll is in flight: its answer is dropped, and the next sign-in works', async ({ page, request }) => {
+  expect(await probe(request, uniqueIp(), '/wp-login.php')).toBe(403) // events to paint
+  await page.goto('/')
+  await page.getByLabel('Access token').fill(TOKEN)
+  await page.getByRole('button', { name: 'Unlock' }).click()
+  await expect(page.locator('#subtitle')).toContainText(' · up ')
+
+  // Hold the next state poll until Lock has been pressed.
+  let release = () => {}
+  const held = new Promise<void>((r) => (release = r))
+  let inFlight = () => {}
+  const polled = new Promise<void>((r) => (inFlight = r))
+  await page.route('**/api/state', async (route) => { inFlight(); await held; await route.continue() })
+  await polled
+  await page.getByRole('button', { name: 'Lock', exact: true }).click()
+  await expect(page.getByLabel('Access token')).toBeFocused()
+
+  const sent: string[] = []
+  page.on('request', (r) => { if (r.url().includes('/api/')) sent.push(`${new URL(r.url()).pathname} ${r.headers()['x-scanguard-token'] ?? 'no token'}`) })
+  const stale = page.waitForResponse((r) => r.url().endsWith('/api/state'))
+  release()
+  await stale
+
+  await page.getByLabel('Access token').fill(TOKEN)
+  await page.getByRole('button', { name: 'Unlock' }).click()
+  await expect(page.locator('#subtitle')).toContainText(' · up ')
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  // Nothing went out for the ended session: every request since Lock is the new one's.
+  expect(sent[0]).toBe(`/api/health ${TOKEN}`)
+  expect(sent.filter((s) => !s.endsWith(TOKEN))).toEqual([])
+})
+
 test('a 401 from a proxy in front of the console is not blamed on the token', async ({ page }) => {
   // What chained basicAuth answers when the browser's credentials are missing:
   // a 401 without the plugin's realm.

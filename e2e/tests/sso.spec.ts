@@ -1,4 +1,4 @@
-import { SSO, api, banRow, banViaForm, eventRows, expect, test, toast, uniqueIp } from './helpers'
+import { SSO, api, banRow, banViaForm, eventRows, expect, probe, test, toast, uniqueIp } from './helpers'
 
 /* A console behind an auth proxy (admin.trustForwardedUser; fixtures/consoles.yml,
  * /sso/): Traefik sets X-Forwarded-User on every request, there is no token. */
@@ -18,6 +18,32 @@ test('the signed-in user unlocks without a token and stays unlocked across a rel
   await page.reload()
   await expect(page.getByLabel('Access token')).toBeVisible()
   await expect(page.locator('#app')).toBeHidden()
+})
+
+test('Lock while a poll is in flight stops the polling; nothing is fetched until Unlock', async ({ page, request }) => {
+  expect(await probe(request, uniqueIp(), '/e2e-sso/trap')).toBe(403) // events to paint
+  await page.goto(SSO.base)
+  await page.getByRole('button', { name: 'Unlock' }).click()
+  await expect(page.locator('#subtitle')).toContainText('e2e-sso · up ')
+
+  let release = () => {}
+  const held = new Promise<void>((r) => (release = r))
+  let inFlight = () => {}
+  const polled = new Promise<void>((r) => (inFlight = r))
+  await page.route('**/sso/api/state', async (route) => { inFlight(); await held; await route.continue() })
+  await polled
+  await page.getByRole('button', { name: 'Lock', exact: true }).click()
+  await expect(page.getByLabel('Access token')).toBeFocused()
+
+  const sent: string[] = []
+  page.on('request', (r) => { if (r.url().includes('/api/')) sent.push(new URL(r.url()).pathname) })
+  const stale = page.waitForResponse((r) => r.url().endsWith('/api/state'))
+  release()
+  await stale
+
+  await page.getByRole('button', { name: 'Unlock' }).click()
+  await expect(page.locator('#subtitle')).toContainText('e2e-sso · up ')
+  expect(sent[0]).toBe('/sso/api/health')
 })
 
 test('the forwarded identity is who the audit trail names', async ({ page, request }) => {
