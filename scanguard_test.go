@@ -978,6 +978,74 @@ func TestPrefixModeStillServesTheConsole(t *testing.T) {
 	}
 }
 
+// Consoles sharing an instanceName share its bans and rules, but each answers
+// with its own admin block, whichever one Traefik builds last. With one block
+// per runtime, a read-only team console made the main console read-only, and an
+// SSO console made a token console take any X-Forwarded-User.
+func TestSiblingConsolesKeepTheirOwnAdminBlock(t *testing.T) {
+	const teamToken = "team-console-token-0123"
+	consoles := map[string]func(*Config){
+		"main": func(c *Config) { c.UIMode, c.Admin.Enabled, c.Admin.Token = true, true, ruleToken },
+		"team": func(c *Config) {
+			c.UIMode, c.Admin.Enabled, c.Admin.Token, c.Admin.ReadOnly = true, true, teamToken, true
+		},
+		"sso": func(c *Config) { c.UIMode, c.Admin.Enabled, c.Admin.TrustForwardedUser = true, true, true },
+	}
+	token := func(v string) map[string]string { return map[string]string{headerToken: v, headerAction: "1"} }
+	user := map[string]string{headerSSOUser: "alice@example.org", headerAction: "1"}
+	for _, order := range [][]string{{"main", "sso", "team"}, {"team", "main", "sso"}, {"sso", "team", "main"}} {
+		t.Run(order[2]+" built last", func(t *testing.T) {
+			instance := t.Name()
+			resetRuntime(instance)
+			buildOn(t, instance, "detector@file", nil)
+			h := map[string]http.Handler{}
+			for _, name := range order {
+				h[name] = buildOn(t, instance, name+"@file", consoles[name])
+			}
+			for _, c := range []struct {
+				console, who string
+				headers      map[string]string
+				want         int
+			}{
+				{"main", "its own token", token(ruleToken), http.StatusOK},
+				{"main", "the team token", token(teamToken), http.StatusUnauthorized},
+				{"main", "a forwarded user", user, http.StatusUnauthorized},
+				{"team", "its own token", token(teamToken), http.StatusForbidden},
+				{"team", "the main token", token(ruleToken), http.StatusUnauthorized},
+				{"team", "a forwarded user", user, http.StatusUnauthorized},
+				{"sso", "a forwarded user", user, http.StatusOK},
+				{"sso", "the main token", token(ruleToken), http.StatusUnauthorized},
+			} {
+				req := httptest.NewRequest("POST", "/api/bans", strings.NewReader(`{"key":"198.51.100.7","duration":"1m"}`))
+				req.RemoteAddr = "203.0.113.30:1"
+				for k, v := range c.headers {
+					req.Header.Set(k, v)
+				}
+				rec := httptest.NewRecorder()
+				h[c.console].ServeHTTP(rec, req)
+				if rec.Code != c.want {
+					t.Errorf("%s console, %s: a ban answered %d, want %d", c.console, c.who, rec.Code, c.want)
+				}
+			}
+
+			// What stays shared: a rule saved on main reaches the team console,
+			// beside the ban main made.
+			if rec := ruleRequestAt(t, h["main"], "PUT", map[string]interface{}{"dryRun": true}, "/api/rules"); rec.Code != http.StatusOK {
+				t.Fatalf("main console rule save: %d %s", rec.Code, rec.Body)
+			}
+			rec := send(h["team"], "GET", "/api/state", "203.0.113.30:1", map[string]string{headerToken: teamToken})
+			var st StateResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+				t.Fatalf("team state: %d %s", rec.Code, rec.Body)
+			}
+			if !st.ReadOnly || !st.DryRun || st.BansTotal != 1 {
+				t.Errorf("team console state: readOnly=%v dryRun=%v bans=%d, want true, true, 1",
+					st.ReadOnly, st.DryRun, st.BansTotal)
+			}
+		})
+	}
+}
+
 // Crawler policy. The default must be "no opinion": a crawler is not a scanner,
 // and defaultCrawlers must not leak into the ruleset unless asked for.
 func TestCrawlerPolicyDefaultsToIgnore(t *testing.T) {

@@ -689,6 +689,7 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 	settingChecks(build, token, stateDir)
 	redisPasswordChecks(build, token)
 	secretRotationChecks(build, token)
+	siblingConsoleChecks(build, token)
 
 	// A read-only console serves everything and refuses every mutation.
 	ro, err := build(map[string]interface{}{
@@ -742,6 +743,45 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 		},
 	})
 	check("an invalid regular expression is refused", err != nil, "New accepted a broken pattern")
+}
+
+// siblingConsoleChecks builds a token console, a read-only team console and an
+// SSO console on one instance, each one last once: each answers with its own
+// admin block (handler.admin over a copy of the shared settings), not the last
+// one built.
+func siblingConsoleChecks(build func(map[string]interface{}) (http.Handler, error), token string) {
+	teamToken := "smoke-team-token-0123456789"
+	admins := map[string]map[string]interface{}{
+		"main": {"enabled": true, "token": token},
+		"team": {"enabled": true, "token": teamToken, "readOnly": true},
+		"sso":  {"enabled": true, "trustForwardedUser": true},
+	}
+	for _, order := range [][]string{{"main", "sso", "team"}, {"team", "main", "sso"}, {"sso", "team", "main"}} {
+		last := order[2] + " built last"
+		h := map[string]http.Handler{}
+		for _, name := range order {
+			c, err := build(map[string]interface{}{
+				"instanceName": "smoke-siblings-" + order[2], "uiMode": true,
+				"store": map[string]interface{}{"backend": "memory"}, "admin": admins[name],
+			})
+			if err != nil {
+				fatal("New rejected a sibling console: %v", err)
+			}
+			h[name] = c
+		}
+		ban := func(console, header, value string) int {
+			return doBody(h[console], "POST", "/api/bans", "203.0.113.61:5000", `{"key":"192.0.2.9"}`,
+				map[string]string{header: value, "X-Scanguard-Action": "1"}).Code
+		}
+		code := ban("main", "X-Scanguard-Token", token)
+		check(last+": a read-only sibling leaves the main console writable", code == 200, "got status %d", code)
+		code = ban("team", "X-Scanguard-Token", teamToken)
+		check(last+": the read-only console refuses its own token's ban", code == 403, "got status %d", code)
+		code = ban("main", "X-Forwarded-User", "mallory")
+		check(last+": an SSO sibling does not make the main console take X-Forwarded-User", code == 401, "got status %d", code)
+		code = ban("sso", "X-Forwarded-User", "alice")
+		check(last+": the SSO console takes its forwarded user", code == 200, "got status %d", code)
+	}
 }
 
 // subnetChecks runs range escalation on its own instance. It is the path that

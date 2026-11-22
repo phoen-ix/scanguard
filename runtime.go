@@ -286,6 +286,12 @@ func acquireRuntimeLocked(s *settings, cfg *Config, id configID) (*runtime, erro
 	// A UI-mode instance is a view onto the runtime, not a configurer of it. It
 	// contributes the admin surface and nothing else, so a console that declares
 	// only `uiMode: true` and a token cannot wipe out the detector's rules.
+	//
+	// The console itself answers with the admin block on its own handler (see
+	// handler.admin). The copy merged here is what is runtime-wide: the event
+	// ring's size, and the block a detector without one answers with under
+	// serveOnDetectionRoutes. With two consoles on one instance those come from
+	// whichever Traefik built last.
 	if s.uiMode {
 		if sameConfig(rt.uiID, id) {
 			return rt, nil
@@ -461,8 +467,9 @@ func (rt *runtime) carryOverridesLocked(store banStore) {
 // carried on the handler, not here. Copying it was the bug: a console configured
 // on its own guarded router turned every detector route into a second, unguarded
 // entrance to the same console. What is copied below is only what the shared
-// runtime genuinely needs to know — the token, the prefix, the ring size — so the
-// console instance can serve, and so serveAdmin can authenticate.
+// runtime genuinely needs to know: the ring size, and the block a detector
+// answers with under serveOnDetectionRoutes. A console, or a detector with its
+// own admin block, answers with its own (handler.admin).
 //
 // adminServeShared IS copied, because it is the explicit opt-in back into that
 // behaviour and has to reach the detection handlers to have any effect.

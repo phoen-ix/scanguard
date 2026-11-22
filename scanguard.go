@@ -59,16 +59,18 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		return nil, fmt.Errorf("scanguard (%s): %w", name, err)
 	}
 
-	// s is this middleware's OWN parsed settings. acquireRuntime may merge a
-	// sibling console's admin block into the shared object, so adminServeHere has
-	// to be read here, before that happens.
-	return &handler{
-		next:        next,
-		rt:          rt,
-		uiMode:      s.uiMode,
-		servePrefix: s.adminServeHere,
-		crawlers:    s.uaCrawlersDeclared,
-	}, nil
+	// s is this middleware's OWN parsed settings: what acquireRuntime published
+	// may hold a sibling console's admin block instead.
+	h := &handler{
+		next:     next,
+		rt:       rt,
+		uiMode:   s.uiMode,
+		crawlers: s.uaCrawlersDeclared,
+	}
+	if s.adminServeHere {
+		h.admin = s
+	}
+	return h, nil
 }
 
 // handler is the per-router middleware. It holds no durable state: that lives on
@@ -89,19 +91,24 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 // configFingerprint so two definitions differing only in this value do not fight
 // over the shared settings on every reload.
 //
-// servePrefix is the second exception, for exactly the same reason. It records
-// whether THIS middleware definition was itself configured to answer the admin
-// surface, captured from its own parsed settings before inheritAdmin merges the
-// console's admin block into the shared object. Reading the shared adminEnabled
-// here instead would mean that configuring the console once, on its own guarded
-// router, silently opened an unguarded copy of it on every route the detector
+// admin is the second exception, for exactly the same reason. It is THIS
+// definition's own parsed settings when it was itself configured to answer the
+// admin surface (uiMode, or its own admin.enabled), nil otherwise, and its admin
+// block (token, trustForwardedUser, readOnly, pathPrefix) is the one this router
+// answers with. Read from the shared settings instead, two consoles on one
+// instanceName both answered with whichever block Traefik built last: a
+// read-only team console made the main console read-only, and an SSO console
+// made a token console take any X-Forwarded-User. Nor does a detector that
+// declared no admin block answer the surface at all, unless the console opted
+// into serveOnDetectionRoutes: configuring the console once, on its own guarded
+// router, used to open an unguarded copy of it on every route the detector
 // protects.
 type handler struct {
-	next        http.Handler
-	rt          *runtime
-	uiMode      bool
-	servePrefix bool
-	crawlers    string
+	next     http.Handler
+	rt       *runtime
+	uiMode   bool
+	admin    *settings
+	crawlers string
 }
 
 // requestFacts is what the detectors, the ban record, the event log and the log
@@ -150,14 +157,20 @@ func (h *handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	// Admin surface. In uiMode this instance serves only the console and never
-	// calls next, so it belongs on its own router.
-	if s.adminEnabled && (h.servePrefix || s.adminServeShared) {
-		if h.uiMode || underPrefix(req.URL.Path, s.adminPrefix) {
-			h.rt.serveAdmin(s, h.uiMode, rw, req)
-			return
-		}
-	} else if h.uiMode {
-		http.NotFound(rw, req)
+	// calls next, so it belongs on its own router. It answers with this router's
+	// own admin block over the shared settings; a detector that declared none
+	// answers only under serveOnDetectionRoutes, with the block the runtime holds.
+	own := h.admin
+	if own == nil && s.adminEnabled && s.adminServeShared {
+		own = s
+	}
+	if own != nil && (h.uiMode || underPrefix(req.URL.Path, own.adminPrefix)) {
+		view := *s
+		view.adminPrefix = own.adminPrefix
+		view.adminToken = own.adminToken
+		view.adminSSO = own.adminSSO
+		view.adminReadOnly = own.adminReadOnly
+		h.rt.serveAdmin(&view, h.uiMode, rw, req)
 		return
 	}
 

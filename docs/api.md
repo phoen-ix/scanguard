@@ -36,6 +36,10 @@ set, which is what makes cross-site request forgery structurally impossible.
 Without it a mutation is a 403. With `admin.readOnly: true` every mutation is a
 403, whatever headers it carries.
 
+Each console checks its own `admin` block: with two consoles on one
+`instanceName`, one's token, `trustForwardedUser` or `readOnly` never applies to
+the other.
+
 ## Endpoints
 
 | | |

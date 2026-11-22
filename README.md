@@ -252,6 +252,13 @@ A `uiMode` instance is a *view* onto the shared runtime, not a second
 configuration of it — it contributes only the admin surface and cannot overwrite
 your detectors.
 
+Several consoles may share one `instanceName`, say a read-only team console
+beside the main one, or an SSO console beside a token console. They share the
+bans, the rules and the event log; each answers only with its own `admin` block
+(`token`, `trustForwardedUser`, `readOnly`, `pathPrefix`). `eventLogSize` and
+`serveOnDetectionRoutes` belong to the shared runtime instead: give them the same
+value on every console, or the one Traefik builds last wins.
+
 The console works behind basicAuth or forwardAuth: its API calls carry the
 browser's credentials, and a 401 from the proxy is reported as the proxy's, not
 as a wrong token. Open it at the prefix with a trailing slash in prefix mode;

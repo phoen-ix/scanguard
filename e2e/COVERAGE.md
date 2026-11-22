@@ -29,11 +29,11 @@ or `Authorization: Bearer`), **read-only operator** (`admin.readOnly`), **SSO us
 `e2e/fixtures/consoles.yml`, added to the running harness for the length of the run;
 two Traefik replicas sharing a Redis come from the overlay `examples/docker-compose.e2e.yml`.
 
-**Totals: 171 items — ✅ 144, ❌ 27** ((a) 2, (c) 24, (d) 1).
+**Totals: 172 items — ✅ 144, ❌ 28** ((a) 2, (c) 25, (d) 1).
 
 Test names are `file › [describe ›] title`.
 
-## Admin routes × callers (41)
+## Admin routes × callers (42)
 
 Every route `serveAdmin` serves (`sweep.spec.ts` reads them from `admin.go`), on
 the plugin as Traefik interprets it. Every method on every route as every
@@ -65,6 +65,7 @@ reads the routes from `serveAdmin`'s switch.
 | 403 for every change without `X-Scanguard-Action` (CSRF guard; POST/DELETE bans, PUT/POST/DELETE rules) | ❌ (c) same |
 | 403 for every change on a read-only console | ❌ (c) same; `tools/yaegi-smoke` under the interpreter |
 | a forged `X-Forwarded-User` on a token console: refused alone, never the actor beside a token | ❌ (c) same; `TestATokenConsoleNeverTakesTheForwardedUserAsTheActor` |
+| two consoles on one `instanceName` (token, read-only, SSO), each one built last: each takes only its own token, `readOnly` and `trustForwardedUser`; bans and rules stay shared | ❌ (c) `TestSiblingConsolesKeepTheirOwnAdminBlock`; `tools/yaegi-smoke` under the interpreter |
 | `/favicon.ico` 404 without a failed login; the bare prefix 308s to the directory form | ❌ (c) `TestEveryAdminRouteAnswersEachCallerAndMethod` |
 
 ## Console pages × roles (8)
