@@ -163,6 +163,11 @@ func (rt *runtime) serveAdmin(s *settings, uiMode bool, rw http.ResponseWriter, 
 	case "/api/rules/compiled":
 		rt.apiCompiledRules(s, rw, req)
 	case "/api/health":
+		// GET only, like every other read: it answered any method with 200.
+		if req.Method != http.MethodGet {
+			writeJSON(rw, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
+			return
+		}
 		writeJSON(rw, http.StatusOK, map[string]interface{}{
 			"ok":       true,
 			"instance": rt.name,

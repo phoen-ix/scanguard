@@ -714,20 +714,8 @@ func TestConsoleAssetsLoadWithoutTokenButDataDoesNot(t *testing.T) {
 		}
 	}
 
-	// The other half of the contract: serving the shell must not have opened up
-	// anything that reads or changes state.
-	for _, path := range []string{
-		"/__scanguard/api/health",
-		"/__scanguard/api/state",
-		"/__scanguard/api/events",
-		"/__scanguard/api/bans",
-		"/__scanguard/api/rules",
-		"/__scanguard/api/rules/compiled",
-	} {
-		if got := send(h, "GET", path, "203.0.113.21:1", nil).Code; got != 401 {
-			t.Errorf("%s without a token returned %d, want 401", path, got)
-		}
-	}
+	// The other half of the contract, that serving the shell opened up nothing
+	// that reads or changes state, is TestEveryAdminRouteAnswersEachCallerAndMethod's.
 }
 
 // Same contract for a uiMode instance, which serves the console at its router
