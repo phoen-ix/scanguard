@@ -4,9 +4,16 @@
   "type": "module",
   "scripts": {
     "test": "playwright test",
-    "docs": "playwright test -c playwright.docs.config.ts"
+    "docs": "playwright test -c playwright.docs.config.ts",
+    "typecheck": "tsc",
+    "lint": "eslint .",
+    "postinstall": "echo 'module node_modules' > node_modules/go.mod"
   },
   "devDependencies": {
-    "@playwright/test": "^1.64.1"
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^26.6.5",
+    "eslint": "^10.13.0",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.72.0"
   }
 }

@@ -139,7 +139,7 @@ for (const c of CONSOLES) {
 // The SSO console as a real guest: no X-Forwarded-User and no token to fall back on.
 test.describe('SSO console without an identity (/sso-anon/)', () => {
   test('as a guest: the API refuses with 401 and Unlock keeps the gate up', async ({ page, request }) => {
-    for (const headers of [{}, { 'X-Scanguard-Token': 'any-token-at-all-0123456789' }]) {
+    for (const headers of [{}, { 'X-Scanguard-Token': 'any-token-at-all-0123456789' }] as Record<string, string>[]) {
       const res = await request.get(`${CONSOLE}/sso-anon/api/health`, { headers })
       expect(res.status()).toBe(401)
       expect(res.headers()['www-authenticate']).toBe('Bearer realm="scanguard"')

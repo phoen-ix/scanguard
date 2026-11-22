@@ -98,6 +98,9 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npx playwright install --with-deps chromium
+      - name: typecheck and lint the suite (no floating promises)
+        working-directory: e2e
+        run: npm run typecheck && npm run lint
       - name: console e2e suite
         run: ARTIFACTS="$RUNNER_TEMP/e2e-run" scripts/e2e.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

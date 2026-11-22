@@ -87,7 +87,9 @@ test('follow keeps the newest event in view; unticked, the feed stays where it w
   await expect(eventRows(page, `${ip}/32`)).toHaveCount(21)
 
   await follow.uncheck()
-  await box.evaluate((el) => (el.scrollTop = 300))
+  await box.hover()
+  await page.mouse.wheel(0, 300)
+  await expect.poll(() => box.evaluate((el) => el.scrollTop)).toBeGreaterThan(0)
   const other = uniqueIp()
   await probe(request, other, '/.git/config')
   await expect(eventRows(page, `${other}/32`)).toHaveCount(1)

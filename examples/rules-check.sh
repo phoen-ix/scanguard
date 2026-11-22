@@ -84,10 +84,8 @@ say "Edits survive a Traefik restart"
 # `docker compose restart` only reaches the project named after this directory.
 project=$(docker ps --filter "publish=${CONSOLE##*:}" --format '{{.Label "com.docker.compose.project"}}' | head -n1)
 if [[ -n "$project" ]] && docker compose -p "$project" restart traefik >/dev/null 2>&1; then
-  # Give the old container time to actually go away first. Polling immediately can
-  # succeed against a Traefik that is still shutting down, which would make this
-  # check pass while measuring nothing.
-  sleep 3
+  # `docker compose restart` returns once the old container has stopped and the
+  # new one started, so what answers here is the new Traefik.
   for _ in $(seq 1 30); do
     curl -sf --max-time 3 -H "X-Scanguard-Token: $TOKEN" "$CONSOLE/api/health" >/dev/null 2>&1 && break
     sleep 1
