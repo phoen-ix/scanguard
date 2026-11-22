@@ -54,7 +54,7 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		return next, nil
 	}
 
-	rt, err := acquireRuntime(s, config, newConfigID(config))
+	rt, err := acquireRuntime(s, config, newConfigID(config), name)
 	if err != nil {
 		return nil, fmt.Errorf("scanguard (%s): %w", name, err)
 	}

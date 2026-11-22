@@ -256,8 +256,11 @@ Several consoles may share one `instanceName`, say a read-only team console
 beside the main one, or an SSO console beside a token console. They share the
 bans, the rules and the event log; each answers only with its own `admin` block
 (`token`, `trustForwardedUser`, `readOnly`, `pathPrefix`). `eventLogSize` and
-`serveOnDetectionRoutes` belong to the shared runtime instead: give them the same
-value on every console, or the one Traefik builds last wins.
+`serveOnDetectionRoutes` belong to the shared runtime instead, so every console on
+the instance (prefix mode included) must give them the same value; leaving them
+unset everywhere does. A console that disagrees with a sibling is a configuration
+error: scanguard refuses to load whichever Traefik builds second and logs the
+instance and both values.
 
 The console works behind basicAuth or forwardAuth: its API calls carry the
 browser's credentials, and a 401 from the proxy is reported as the proxy's, not
@@ -426,7 +429,7 @@ admin:
   token: ""                  # 16+ characters, compared in constant time
   trustForwardedUser: false  # honour X-Forwarded-User from Authelia/Authentik/oauth2-proxy — see the note below
   readOnly: false
-  eventLogSize: 500          # at most 50000
+  eventLogSize: 500          # at most 50000; the same on every console of an instance
   serveOnDetectionRoutes: false   # also answer pathPrefix on every route the detector protects; leave it off
 ```
 

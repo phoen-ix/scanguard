@@ -421,6 +421,7 @@ type AdminConfig struct {
 	// ReadOnly serves the dashboard but refuses every mutation.
 	ReadOnly bool `json:"readOnly,omitempty"`
 	// EventLogSize bounds the in-memory ring buffer backing the live event view.
+	// The instance has one: consoles sharing it must agree (see claimConsole).
 	EventLogSize int `json:"eventLogSize,omitempty"`
 	// ServeOnDetectionRoutes re-enables a behaviour that used to be implicit: every
 	// DETECTION middleware sharing this runtime answering the admin surface at
@@ -442,7 +443,8 @@ type AdminConfig struct {
 	//
 	// Leave this false. Set it only if you deliberately want the console answering
 	// on the same routers the detector protects, and understand that whatever
-	// guards the console's own router does not apply there.
+	// guards the console's own router does not apply there. Like EventLogSize, it
+	// is one value per instance.
 	ServeOnDetectionRoutes bool `json:"serveOnDetectionRoutes,omitempty"`
 }
 

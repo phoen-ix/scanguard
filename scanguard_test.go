@@ -1046,6 +1046,84 @@ func TestSiblingConsolesKeepTheirOwnAdminBlock(t *testing.T) {
 	}
 }
 
+// eventLogSize and serveOnDetectionRoutes are one value per runtime. Consoles on
+// one instanceName that disagree on either are a configuration error, whatever
+// the build order: the one Traefik builds second is refused, naming both values
+// and the instance, and changes nothing. Before, it silently won.
+func TestSiblingConsolesThatDisagreeOnSharedSettingsAreRefused(t *testing.T) {
+	consoles := map[string]func(*Config){
+		"main": func(c *Config) { c.UIMode, c.Admin.Enabled, c.Admin.Token = true, true, ruleToken },
+		"team": func(c *Config) {
+			c.UIMode, c.Admin.Enabled, c.Admin.Token, c.Admin.ReadOnly = true, true, "team-console-token-0123", true
+		},
+	}
+	for setting, c := range map[string]struct {
+		differ     func(*Config)
+		main, team string
+	}{
+		"eventLogSize":           {func(c *Config) { c.Admin.EventLogSize = 1200 }, "500", "1200"},
+		"serveOnDetectionRoutes": {func(c *Config) { c.Admin.ServeOnDetectionRoutes = true }, "false", "true"},
+	} {
+		for _, order := range [][]string{{"main", "team"}, {"team", "main"}} {
+			t.Run(setting+"/"+order[1]+" built second", func(t *testing.T) {
+				instance := t.Name()
+				resetRuntime(instance)
+				buildOn(t, instance, "detector@file", nil)
+				mutate := func(name string) func(*Config) {
+					return func(cfg *Config) {
+						consoles[name](cfg)
+						if name == "team" {
+							c.differ(cfg)
+						}
+					}
+				}
+				buildOn(t, instance, order[0]+"@file", mutate(order[0]))
+				before := *registry[instance].settings()
+
+				cfg := CreateConfig()
+				cfg.InstanceName = instance
+				mutate(order[1])(cfg)
+				_, err := New(context.Background(), okBackend(), cfg, order[1]+"@file")
+				if err == nil {
+					t.Fatalf("a console disagreeing on %s with its sibling was loaded", setting)
+				}
+				for _, want := range []string{instance, setting, c.main, c.team, order[0] + "@file"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("the refusal does not name %q: %v", want, err)
+					}
+				}
+				after := registry[instance].settings()
+				if after.eventLogSize != before.eventLogSize || after.adminServeShared != before.adminServeShared {
+					t.Errorf("the refused console changed the shared settings: eventLogSize %d -> %d, serveOnDetectionRoutes %v -> %v",
+						before.eventLogSize, after.eventLogSize, before.adminServeShared, after.adminServeShared)
+				}
+			})
+		}
+	}
+}
+
+// The check compares consoles built in one reload. A reload that changes the
+// value on every console in one edit is not refused for the value the other
+// console held in the reload before.
+func TestConsolesChangingSharedSettingsTogetherStillLoad(t *testing.T) {
+	instance := t.Name()
+	resetRuntime(instance)
+	for _, size := range []int{500, 1200} {
+		for _, name := range []string{"main", "team"} {
+			buildOn(t, instance, name+"@file", func(c *Config) {
+				c.UIMode, c.Admin.Enabled, c.Admin.Token, c.Admin.EventLogSize = true, true, ruleToken+name, size
+			})
+		}
+		// Traefik reloads at most every providersThrottleDuration (2s).
+		registryMu.Lock()
+		lastBuild = lastBuild.Add(-2 * buildPassGap)
+		registryMu.Unlock()
+	}
+	if got := len(registry[instance].events.all.buf); got != 1200 {
+		t.Errorf("event ring holds %d entries, want the consoles' new 1200", got)
+	}
+}
+
 // Crawler policy. The default must be "no opinion": a crawler is not a scanner,
 // and defaultCrawlers must not leak into the ruleset unless asked for.
 func TestCrawlerPolicyDefaultsToIgnore(t *testing.T) {

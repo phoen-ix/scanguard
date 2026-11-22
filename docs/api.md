@@ -38,7 +38,8 @@ Without it a mutation is a 403. With `admin.readOnly: true` every mutation is a
 
 Each console checks its own `admin` block: with two consoles on one
 `instanceName`, one's token, `trustForwardedUser` or `readOnly` never applies to
-the other.
+the other. `eventLogSize` and `serveOnDetectionRoutes` are one value per instance:
+a console that disagrees with a sibling on either is refused at load.
 
 ## Endpoints
 

@@ -78,7 +78,8 @@ func main() {
 	}
 	fmt.Println("PASS  New and CreateConfig are exported with the expected names")
 
-	build := func(raw map[string]interface{}) (http.Handler, error) {
+	// buildAs builds the middleware Traefik names name; build, the one most checks use.
+	buildAs := func(name string, raw map[string]interface{}) (http.Handler, error) {
 		results := createFn.Call(nil)
 		if len(results) != 1 {
 			return nil, fmt.Errorf("CreateConfig returned %d values, want 1", len(results))
@@ -102,7 +103,7 @@ func main() {
 			reflect.ValueOf(context.Background()),
 			reflect.ValueOf(http.Handler(backend())),
 			results[0],
-			reflect.ValueOf("scanguard@smoke"),
+			reflect.ValueOf(name),
 		})
 		if len(out) != 2 {
 			return nil, fmt.Errorf("New returned %d values, want 2", len(out))
@@ -116,8 +117,9 @@ func main() {
 		}
 		return h, nil
 	}
+	build := func(raw map[string]interface{}) (http.Handler, error) { return buildAs("scanguard@smoke", raw) }
 
-	runChecks(build)
+	runChecks(build, buildAs)
 
 	fmt.Println()
 	if failures > 0 {
@@ -216,7 +218,8 @@ func backend() http.HandlerFunc {
 	}
 }
 
-func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
+func runChecks(build func(map[string]interface{}) (http.Handler, error),
+	buildAs func(string, map[string]interface{}) (http.Handler, error)) {
 	stateDir, err := os.MkdirTemp("", "scanguard-smoke")
 	if err != nil {
 		fatal("could not create a temporary state directory: %v", err)
@@ -689,7 +692,7 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 	settingChecks(build, token, stateDir)
 	redisPasswordChecks(build, token)
 	secretRotationChecks(build, token)
-	siblingConsoleChecks(build, token)
+	siblingConsoleChecks(buildAs, token)
 
 	// A read-only console serves everything and refuses every mutation.
 	ro, err := build(map[string]interface{}{
@@ -748,8 +751,8 @@ func runChecks(build func(map[string]interface{}) (http.Handler, error)) {
 // siblingConsoleChecks builds a token console, a read-only team console and an
 // SSO console on one instance, each one last once: each answers with its own
 // admin block (handler.admin over a copy of the shared settings), not the last
-// one built.
-func siblingConsoleChecks(build func(map[string]interface{}) (http.Handler, error), token string) {
+// one built. A sibling that disagrees on eventLogSize is refused, in either order.
+func siblingConsoleChecks(buildAs func(string, map[string]interface{}) (http.Handler, error), token string) {
 	teamToken := "smoke-team-token-0123456789"
 	admins := map[string]map[string]interface{}{
 		"main": {"enabled": true, "token": token},
@@ -760,7 +763,7 @@ func siblingConsoleChecks(build func(map[string]interface{}) (http.Handler, erro
 		last := order[2] + " built last"
 		h := map[string]http.Handler{}
 		for _, name := range order {
-			c, err := build(map[string]interface{}{
+			c, err := buildAs(name+"@smoke", map[string]interface{}{
 				"instanceName": "smoke-siblings-" + order[2], "uiMode": true,
 				"store": map[string]interface{}{"backend": "memory"}, "admin": admins[name],
 			})
@@ -781,6 +784,25 @@ func siblingConsoleChecks(build func(map[string]interface{}) (http.Handler, erro
 		check(last+": an SSO sibling does not make the main console take X-Forwarded-User", code == 401, "got status %d", code)
 		code = ban("sso", "X-Forwarded-User", "alice")
 		check(last+": the SSO console takes its forwarded user", code == 200, "got status %d", code)
+	}
+
+	for _, order := range [][]string{{"main", "team"}, {"team", "main"}} {
+		instance := "smoke-disagree-" + order[1]
+		var err error
+		for _, name := range order {
+			admin := map[string]interface{}{"enabled": true, "token": token}
+			if name == "team" {
+				admin["eventLogSize"] = 1200
+			}
+			_, err = buildAs(name+"@smoke", map[string]interface{}{
+				"instanceName": instance, "uiMode": true,
+				"store": map[string]interface{}{"backend": "memory"}, "admin": admin,
+			})
+		}
+		check(order[1]+" built second: a console disagreeing with its sibling on eventLogSize is refused, naming both values",
+			err != nil && strings.Contains(err.Error(), instance) && strings.Contains(err.Error(), "1200") &&
+				strings.Contains(err.Error(), "500") && strings.Contains(err.Error(), order[0]+"@smoke"),
+			"got %v", err)
 	}
 }
 

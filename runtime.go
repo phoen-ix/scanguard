@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/netip"
 	"path/filepath"
 	"strconv"
@@ -148,6 +149,10 @@ type runtime struct {
 	// none saved" and "we have not looked yet" must not be confused.
 	overridesLoaded bool
 
+	// consoles holds, by middleware name, what each console set of the admin
+	// settings the runtime holds once; see claimConsole. Guarded by registryMu.
+	consoles map[string]consoleBuild
+
 	janitorOnce sync.Once
 	// lastAcquired is when acquireRuntime last returned this runtime (unix
 	// nanoseconds): every reload rebuilds every router, so a runtime the latest
@@ -210,8 +215,17 @@ var lastAcquireAny atomic.Int64
 // apart; a minute is generous.
 const reloadBurst = time.Minute
 
-func acquireRuntime(s *settings, cfg *Config, id configID) (*runtime, error) {
-	rt, err := acquireRuntimeLocked(s, cfg, id)
+// buildPassGap ends a build pass. Traefik builds every middleware of a reload in
+// one pass, each New milliseconds after the last, and a provider reloads at most
+// every providersThrottleDuration (2s by default).
+const buildPassGap = time.Second
+
+// lastBuild is when acquireRuntime was last called, passStart when the current
+// build pass began. Both are guarded by registryMu.
+var lastBuild, passStart time.Time
+
+func acquireRuntime(s *settings, cfg *Config, id configID, name string) (*runtime, error) {
+	rt, err := acquireRuntimeLocked(s, cfg, id, name)
 	if err == nil {
 		now := time.Now().UnixNano()
 		rt.lastAcquired.Store(now)
@@ -220,11 +234,22 @@ func acquireRuntime(s *settings, cfg *Config, id configID) (*runtime, error) {
 	return rt, err
 }
 
-func acquireRuntimeLocked(s *settings, cfg *Config, id configID) (*runtime, error) {
+func acquireRuntimeLocked(s *settings, cfg *Config, id configID, name string) (*runtime, error) {
 	registryMu.Lock()
 	defer registryMu.Unlock()
 
+	now := time.Now()
+	if now.Sub(lastBuild) > buildPassGap {
+		passStart = now
+	}
+	lastBuild = now
+
 	rt, exists := registry[s.instanceName]
+	if exists && s.adminServeHere {
+		if err := rt.claimConsole(name, s, now); err != nil {
+			return nil, err
+		}
+	}
 	if !exists {
 		store, err := newBanStore(s)
 		if err != nil {
@@ -250,6 +275,9 @@ func acquireRuntimeLocked(s *settings, cfg *Config, id configID) (*runtime, erro
 		}
 		rt.setDeps(store, rt.newNotifier(s), newGeoCache(s))
 		claimStateFileLocked(s.instanceName, store)
+		if s.adminServeHere {
+			_ = rt.claimConsole(name, s, now) // the first console has no sibling to disagree with
+		}
 		rt.stats.StartedAt = time.Now().UTC()
 		if s.uiMode {
 			rt.uiID = id
@@ -290,8 +318,7 @@ func acquireRuntimeLocked(s *settings, cfg *Config, id configID) (*runtime, erro
 	// The console itself answers with the admin block on its own handler (see
 	// handler.admin). The copy merged here is what is runtime-wide: the event
 	// ring's size, and the block a detector without one answers with under
-	// serveOnDetectionRoutes. With two consoles on one instance those come from
-	// whichever Traefik built last.
+	// serveOnDetectionRoutes. Consoles that disagree on those were refused above.
 	if s.uiMode {
 		if sameConfig(rt.uiID, id) {
 			return rt, nil
@@ -427,6 +454,37 @@ func acquireRuntimeLocked(s *settings, cfg *Config, id configID) (*runtime, erro
 		"ruleOverrides": ov.sections(),
 	})
 	return rt, nil
+}
+
+// consoleBuild is one console's values of the admin settings the runtime holds
+// once, and when that console was built.
+type consoleBuild struct {
+	eventLogSize int
+	serveShared  bool
+	at           time.Time
+}
+
+// claimConsole records this console's eventLogSize and serveOnDetectionRoutes,
+// or refuses them when a sibling console built in the same pass set others: the
+// runtime holds one event log and one switch, so the one built last silently won.
+// A record from an earlier pass is a configuration Traefik has since replaced.
+// The caller holds registryMu.
+func (rt *runtime) claimConsole(name string, s *settings, now time.Time) error {
+	for other, c := range rt.consoles {
+		if other == name || c.at.Before(passStart) {
+			continue
+		}
+		if c.eventLogSize != s.eventLogSize || c.serveShared != s.adminServeShared {
+			return fmt.Errorf("consoles on instanceName %q must agree on admin.eventLogSize and admin.serveOnDetectionRoutes, "+
+				"which the instance holds once: here %d and %t, on %s %d and %t",
+				s.instanceName, s.eventLogSize, s.adminServeShared, other, c.eventLogSize, c.serveShared)
+		}
+	}
+	if rt.consoles == nil {
+		rt.consoles = map[string]consoleBuild{}
+	}
+	rt.consoles[name] = consoleBuild{eventLogSize: s.eventLogSize, serveShared: s.adminServeShared, at: now}
+	return nil
 }
 
 // newNotifier builds a notifier that counts its drops into this runtime's
