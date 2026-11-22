@@ -497,6 +497,9 @@ function lock(message) {
   $("rules-meta").textContent = "";
   $("rules-error").hidden = true;
   $("rules-badge").hidden = true;
+  // And the ban form, or the next session found the address, reason and
+  // duration typed in this one.
+  $("ban-form").reset();
   $("tile-detail").hidden = true;
   $("app").hidden = true;
   $("gate").hidden = false;

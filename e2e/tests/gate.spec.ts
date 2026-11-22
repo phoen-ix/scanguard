@@ -52,6 +52,23 @@ test('the right token unlocks, a reload keeps the session, Lock forgets it', asy
   await expect(page.locator('#app')).toBeHidden()
 })
 
+test('Lock forgets what was typed into the ban form', async ({ page }) => {
+  await page.goto('/')
+  await page.getByLabel('Access token').fill(TOKEN)
+  await page.getByRole('button', { name: 'Unlock' }).click()
+  await page.getByLabel('Address or CIDR to ban').fill('198.18.0.1')
+  await page.getByLabel('Ban duration').fill('0')
+  await page.getByLabel('Ban reason').fill('half-typed')
+  await page.getByRole('button', { name: 'Lock', exact: true }).click()
+
+  await page.getByLabel('Access token').fill(TOKEN)
+  await page.getByRole('button', { name: 'Unlock' }).click()
+  await expect(page.locator('#subtitle')).toContainText(' · up ')
+  await expect(page.getByLabel('Address or CIDR to ban')).toHaveValue('')
+  await expect(page.getByLabel('Ban duration')).toHaveValue('1h')
+  await expect(page.getByLabel('Ban reason')).toHaveValue('')
+})
+
 test('a 401 from a proxy in front of the console is not blamed on the token', async ({ page }) => {
   // What chained basicAuth answers when the browser's credentials are missing:
   // a 401 without the plugin's realm.
