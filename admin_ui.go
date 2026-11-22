@@ -876,7 +876,9 @@ function renderBans(bans, total, readOnly) {
   for (var i = 0; i < body.rows.length; i++) { existing[body.rows[i].dataset.key] = body.rows[i]; }
   bans.forEach(function (b, idx) {
     var row = existing[b.key];
-    var fingerprint = JSON.stringify([b.key, b.detector, b.rule, b.reason, b.country, b.offences, b.hits, b.expires, b.dryRun, readOnly]);
+    // The expiry as shown, not as stored: with the absolute time the row never
+    // changed, and "in 1h" stood still for as long as the page was open.
+    var fingerprint = JSON.stringify([b.key, b.detector, b.rule, b.reason, b.country, b.offences, b.hits, fmtExpiry(b), b.dryRun, readOnly]);
     if (!row) {
       row = document.createElement("tr");
       row.dataset.key = b.key;

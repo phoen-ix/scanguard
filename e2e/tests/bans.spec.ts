@@ -27,6 +27,18 @@ test('a manual ban from the form is listed, enforced, and lifted by unblock', as
   expect(await probe(request, ip, '/')).not.toBe(403)
 })
 
+test('the expiry counts down while the page is open', async ({ page }) => {
+  const ip = uniqueIp()
+  await page.clock.install()
+  await unlock(page)
+  await banViaForm(page, ip, '1h', 'e2e countdown')
+  const expires = cells(banRow(page, `${ip}/32`)).nth(6)
+  await expect(expires).toHaveText('in 1h')
+  // Half an hour on the page's clock; the next poll redraws the row.
+  await page.clock.fastForward('31:00')
+  await expect(expires).toHaveText('in 29m')
+})
+
 test('a range and a permanent ban, with their expiry', async ({ page, request }) => {
   // A range of its own, outside the one uniqueIp() hands out.
   const range = '203.0.113.0/24'
