@@ -2,9 +2,12 @@
 
 **`tools/yaegi-smoke` is the most important thing in this repository.** Traefik
 does not compile plugins, it interprets them with
-[Yaegi](https://github.com/traefik/yaegi) — v0.16.3 in the pinned Traefik v3.7.19,
-which the smoke test follows, and v0.16.1 in v3.6 — which exposes only the
-**Go 1.22** standard library.
+[Yaegi](https://github.com/traefik/yaegi) — v0.16.3 in the pinned Traefik v3.8.0,
+which the smoke test follows, and in v3.7 — which exposes only the
+**Go 1.22** standard library. Traefik v3.8 also ships Yaegi v2 as an
+experimental runtime; it runs only plugins whose manifest sets `runtimeVersion: v2`
+(or all of them under `experimental.defaultRuntimeVersion: v2`), and
+`.traefik.yml` does not, so scanguard runs on v0.16.3.
 
 How to run it, and the other checks: [README → Development](../README.md#development).
 

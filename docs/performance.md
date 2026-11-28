@@ -1,7 +1,7 @@
 # Performance
 
 Measured on Traefik v3.7.10 (the pinned version at the time; the figures have not
-been re-taken since the pin moved to v3.7.19) with the example configuration,
+been re-taken since the pin moved to v3.8.0) with the example configuration,
 `wrk -t4 -c50` inside the compose network:
 
 | | req/s | avg latency |

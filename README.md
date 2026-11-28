@@ -10,7 +10,7 @@ One artifact. No sidecar, no database, no agent. MIT.
 
 <img src="docs/screenshots/console-overview.png" alt="The scanguard console: request and ban counters, then the active ban list with the detector and rule behind each ban" width="800">
 
-**Status:** [v0.2.0](https://github.com/phoen-ix/scanguard/releases/tag/v0.2.0), tested against Traefik v3.7.19.
+**Status:** [v0.2.0](https://github.com/phoen-ix/scanguard/releases/tag/v0.2.0), tested against Traefik v3.8.0.
 
 </div>
 
@@ -318,7 +318,7 @@ it surfaces weeks later as "the chat stopped working", never as an error.
 scanguard forwards `Flush`, `Hijack`, `ReadFrom` and `Push`, skips wrapping
 protocol-upgrade requests entirely, and does not wrap at all when no
 response-status detector is enabled. `examples/streaming-check.sh` is the release
-gate, and it passes against Traefik v3.7.19. **Re-run it after every Traefik
+gate, and it passes against Traefik v3.8.0. **Re-run it after every Traefik
 upgrade** — and if you ever see a `flusher-unavailable` warning in the log, set
 `observeResponse: false` on that route.
 
@@ -484,7 +484,7 @@ cd examples && export COMPOSE_PROJECT_NAME=scanguard_e2e && docker compose up -d
 
 **`tools/yaegi-smoke` is the most important thing in this repository.** Traefik
 interprets plugins with [Yaegi](https://github.com/traefik/yaegi) (v0.16.3 in
-Traefik v3.7.19), which exposes only the Go 1.22 standard library, so whole
+Traefik v3.8.0), which exposes only the Go 1.22 standard library, so whole
 classes of bug are invisible to `go build` and `go test`. The traps, and what the smoke test asserts:
 [docs/development.md](docs/development.md).
 

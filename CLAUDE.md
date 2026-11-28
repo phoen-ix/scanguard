@@ -2,8 +2,9 @@
 
 Traefik middleware plugin (Go, one package at the repo root) that bans HTTP
 scanners and serves its own console. Traefik does not compile it: it
-**interprets** it with Yaegi (v0.16.3 in the pinned Traefik v3.7.19, v0.16.1 in
-v3.6), which exposes only the Go 1.22 stdlib.
+**interprets** it with Yaegi (v0.16.3 in the pinned Traefik v3.8.0 and in v3.7;
+v3.8's experimental Yaegi v2 is opt-in and unused), which exposes only the Go
+1.22 stdlib.
 docs/development.md explains the interpreter traps in full.
 
 ## Commands
