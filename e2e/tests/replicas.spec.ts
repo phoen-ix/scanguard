@@ -1,14 +1,11 @@
 import { type APIRequestContext, type Page } from '@playwright/test'
 
-import { banRow, banViaForm, expect, test, toast, uniqueIp } from './helpers'
+import { REPLICA_A as A, REPLICA_B as B, REPLICA_TOKEN as TOKEN, banRow, banViaForm, expect, test, toast, uniqueIp } from './helpers'
 
 /* Two Traefik replicas sharing one Redis (examples/docker-compose.e2e.yml,
  * e2e/fixtures/replicas/): what one replica's console or detector does, the
  * other enforces after its next refresh from Redis - every 30 s. */
 
-const A = { site: process.env.E2E_REPLICA_A_SITE ?? 'http://localhost:8801', console: process.env.E2E_REPLICA_A_CONSOLE ?? 'http://localhost:9901' }
-const B = { site: process.env.E2E_REPLICA_B_SITE ?? 'http://localhost:8802', console: process.env.E2E_REPLICA_B_CONSOLE ?? 'http://localhost:9902' }
-const TOKEN = 'e2e-redis-token-0123456789'
 const SYNC = { timeout: 45_000, intervals: [1_000] }
 
 test.setTimeout(120_000)

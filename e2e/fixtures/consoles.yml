@@ -5,7 +5,8 @@
 #
 #   /ro/      read-only console (instance e2e-ro); its detector guards /e2e-ro/
 #   /sso/     console behind a stand-in auth proxy that sets X-Forwarded-User
-#             (instance e2e-sso, no token); its detector guards /e2e-sso/
+#             (instance e2e-sso, no token); its detector guards /e2e-sso/ and
+#             tells the harness's webhook sink about its bans and unbans
 #   /sso-anon/ the same console with no identity header: a real guest
 #   /orphan/  console whose instanceName no detector shares (e2e-orphan): every
 #             list stays empty and the rule editor has nothing to edit
@@ -48,6 +49,8 @@ http:
           store: { backend: memory }
           clientIP: { trustedProxies: [127.0.0.1/32, 172.16.0.0/12], header: X-Real-Ip }
           detectors: { honeypots: { enabled: true, paths: [/e2e-sso/trap] } }
+          # The harness's webhook sink: usecases/bans.spec.ts reads who it is told lifted a ban.
+          notify: { webhooks: [{ url: "http://hookrecv:8080/ban", events: [ban, unban] }] }
     e2e-sso-ui:
       plugin:
         scanguard:

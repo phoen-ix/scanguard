@@ -38,7 +38,7 @@ teardown() {
   rc=$?
   cd "$ROOT/examples"
   [ "$rc" = 0 ] || docker compose logs --tail=300 >"$ARTIFACTS/stack.log" 2>&1 || true
-  rm -f "$ROOT/examples/dynamic/zz-e2e-consoles.yml" # the suite's extra consoles, should it have died mid-run
+  rm -f "$ROOT"/examples/dynamic/zz-e2e-*.yml # the suite's extra consoles, should it have died mid-run
   docker compose down -v --remove-orphans --rmi local || true
   exit "$rc"
 }
