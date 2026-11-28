@@ -2,7 +2,9 @@
 
 Every user-facing feature of scanguard and the test that exercises it. The
 console suite is `e2e/tests/` (`npx playwright test --list`; run it with
-`scripts/e2e.sh`). The plugin's request-path behaviour has no page: it is
+`scripts/e2e.sh`). Every hand-over from one person to the next (operator,
+client, the person who runs it, the webhook consumer) is mapped to its use case
+in `e2e/tests/usecases/` by [COVERAGE.c.md](COVERAGE.c.md). The plugin's request-path behaviour has no page: it is
 exercised against a live Traefik by the `examples/*.sh` checks (CI `integration`
 job, fleet `traefik-integration`) and by `go test`, cited as (c). (d) marks a test that waits for an owner decision (`test.fixme`).
 
@@ -29,7 +31,7 @@ or `Authorization: Bearer`), **read-only operator** (`admin.readOnly`), **SSO us
 `e2e/fixtures/consoles.yml`, added to the running harness for the length of the run;
 two Traefik replicas sharing a Redis come from the overlay `examples/docker-compose.e2e.yml`.
 
-**Totals: 172 items — ✅ 145, ❌ 27** ((a) 2, (c) 25, (d) 0).
+**Totals: 172 items — ✅ 147, ❌ 25** ((a) 2, (c) 23, (d) 0).
 
 Test names are `file › [describe ›] title`.
 
@@ -138,7 +140,7 @@ reads the routes from `serveAdmin`'s switch.
 | Lock forgets what was typed into the ban form | ✅ `gate.spec.ts › Lock forgets what was typed into the ban form` |
 | Lock while a poll is in flight: its answer is dropped, nothing more is fetched, the next sign-in works | ✅ `gate.spec.ts › Lock while a poll is in flight: its answer is dropped, and the next sign-in works`; SSO: `sso.spec.ts › Lock while a poll is in flight stops the polling; nothing is fetched until Unlock` |
 | the Expires column counts down while the page is open | ✅ `bans.spec.ts › the expiry counts down while the page is open` |
-| a rule change saved elsewhere warns an editor with unsaved edits, also when a ban sees it first | ✅ `rules.spec.ts › a change saved elsewhere warns an editor with unsaved edits, also when a ban sees it first` |
+| a rule change saved elsewhere warns an editor with unsaved edits, also when a ban sees it first | ✅ `rules.spec.ts › a change saved elsewhere warns an editor with unsaved edits, also when a ban sees it first`; two operators' browsers: `usecases/rules.spec.ts › U7 …` |
 | Lock empties the token field and resets the activity filter | ✅ `gate.spec.ts › the right token unlocks, a reload keeps the session, Lock forgets it`; `activity.spec.ts › Lock resets the kind filter, so the next session starts on "all"` |
 | console behind chained basicAuth (the browser's credentials reach every API call) | ✅ `auth.spec.ts › the console works behind basicAuth: the token unlocks and the data loads`, `› without the proxy credentials the gate blames the proxy, not the token` |
 | a proxy's 401 is told apart from the plugin's | ✅ `gate.spec.ts › a 401 from a proxy in front of the console is not blamed on the token` |
@@ -148,7 +150,7 @@ reads the routes from `serveAdmin`'s switch.
 | the ban-list tile note says whether the list is complete | ✅ `tiles.spec.ts › each list says what it holds` |
 | lost connection: badge, backoff, recovery | ✅ `panels.spec.ts › a lost connection is shown, polling backs off, and it recovers by itself` |
 | editor fields for extra crawlers and the reject content type | ✅ `rules.spec.ts › every kind of field in every group round-trips: …` (iterates RULE_SCHEMA) |
-| stale remembered token → gate with the reason | ✅ `gate.spec.ts › a remembered token that stopped working sends the session back to the gate` |
+| stale remembered token → gate with the reason | ✅ `gate.spec.ts › a remembered token that stopped working sends the session back to the gate`; a token rotated in the config under an open session: `usecases/runner.spec.ts › U6 …` |
 | gate error other than 401 (misrouted prefix) | ✅ `gate.spec.ts › a gate failure other than a refused token is shown, not a blank page` |
 | SSO: unlock without a token, stay unlocked across a reload, Lock | ✅ `sso.spec.ts › the signed-in user unlocks without a token and stays unlocked across a reload` |
 | SSO: the forwarded identity is the actor (unban event, rule-editor meta) | ✅ `sso.spec.ts › the forwarded identity is who the audit trail names` |
@@ -197,10 +199,10 @@ reads the routes from `serveAdmin`'s switch.
 | subnet escalation (opt-in): a /24 of banned sources bans the range; unblock lifts it | ✅ `rules.spec.ts › range escalation: three banned sources in one /24 ban the range, and unblock lifts it` |
 | forwarded-header spoofing is attributed to the real peer | ❌ (c) `examples/scanner-sim.sh` "Spoofing"; `TestResolveWalksForwardedForRightToLeft` |
 | allowlisted user agents and paths | ❌ (c) `TestExemptRules`, `TestAllowlistedPathIsNotAWayAroundABan` |
-| bans survive a Traefik restart (the same keys, still refused) | ❌ (c) `examples/restart-check.sh` (CI integration "bans survive a restart"); `TestFileStoreRoundTrip` |
-| console rule edits survive a Traefik restart | ❌ (c) `examples/rules-check.sh` "Edits survive a Traefik restart"; `TestRuleEditPersistsAcrossRestart` |
+| bans survive a Traefik restart (the same keys, still refused) | ✅ `usecases/runner.spec.ts › U12 the bans the operator sees survive the runner's Traefik restart: the same rows, still refused, still liftable`; `examples/restart-check.sh`, `TestFileStoreRoundTrip` |
+| console rule edits survive a Traefik restart | ✅ `usecases/runner.spec.ts › U11 a rule the operator saved is still in their editor and still enforced after the runner restarts Traefik`; `examples/rules-check.sh`, `TestRuleEditPersistsAcrossRestart` |
 | WebSocket upgrade and SSE flush through the middleware | ❌ (c) `examples/streaming-check.sh` |
-| webhook and chat notifications (ban, unban by console and by expiry; no per-reject flood; dead endpoint survivable) | ❌ (c) `examples/notify-check.sh` (webhook sink in the harness); `TestWebhookDelivery`, `TestChatPayloadsPerProvider`, `TestExpiredBansAreReportedToNotifiers` |
+| webhook and chat notifications (ban, unban by console and by expiry; no per-reject flood; dead endpoint survivable) | ❌ (c) `examples/notify-check.sh` (webhook sink in the harness); `TestWebhookDelivery`, `TestChatPayloadsPerProvider`, `TestExpiredBansAreReportedToNotifiers`; an unblock's webhook naming who lifted it: `usecases/bans.spec.ts › U8 …` |
 | AbuseIPDB report / check | ❌ (a) needs an AbuseIPDB account; `TestAbuseIPDBReport`, `TestAbuseIPDBCheckIsAsyncAndCached` against a fake |
 | `SCANGUARD_DISABLE` kill switch | ❌ (c) `TestDisabledAndKillSwitch` |
 | console in prefix mode (`admin.pathPrefix` on a detection router) and `serveOnDetectionRoutes` | ❌ (c) `TestPrefixModeStillServesTheConsole`, `TestAdminPrefixNeedsAPathBoundary`, `TestServeOnDetectionRoutesReopensTheConsoleDeliberately` |

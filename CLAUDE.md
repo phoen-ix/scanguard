@@ -87,6 +87,13 @@ Anything that starts Docker goes through `~/repos/.fleet/scripts/slot heavy scan
   for the run. `scripts/e2e.sh` adds the overlay `examples/docker-compose.e2e.yml`:
   Redis plus two Traefik replicas on 8801/9901 and 8802/9902. Under `CI` a test
   that passes only on its retry fails the run (`failOnFlakyTests`).
+- Use cases (`e2e/tests/usecases/`, `e2e/COVERAGE.c.md`): one test per hand-over,
+  followed to the person who uses it. Operators sign in at the gate in their own
+  browser, clients are `clientAt(ip)`, and a spec imports only `./lib` and calls
+  no API (`hygiene_test.go`); background facts come from `given` in `lib.ts`.
+  U6 writes a console of its own (`examples/dynamic/zz-e2e-rotate.yml`); U11 and
+  U12 restart the harness's Traefik with `docker compose restart traefik`, so they
+  need the `COMPOSE_FILE` that `scripts/e2e.sh` exports.
 - Tests guard themselves: `hygiene_test.go` scans every e2e, Go and shell test
   file for steps a user would not take (sleeps, forced or synthetic events,
   actions retried until they work; each kept use is allowlisted with its

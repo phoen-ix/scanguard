@@ -491,7 +491,8 @@ classes of bug are invisible to `go build` and `go test`. The traps, and what th
 ### E2E
 
 `e2e/tests/` is a Playwright suite of the console;
-[e2e/COVERAGE.md](e2e/COVERAGE.md) maps each feature to its test.
+[e2e/COVERAGE.md](e2e/COVERAGE.md) maps each feature to its test, and
+[e2e/COVERAGE.c.md](e2e/COVERAGE.c.md) each hand-over to its use case.
 
 - **Covers** every panel, form, tile and rule-editor group, as a guest, an
   operator, a read-only operator and an SSO user, plus two Traefik replicas
