@@ -71,6 +71,63 @@ var allowedTestShapes = map[[2]string]struct {
 	{"examples/notify-check.sh", "sleep"}:          {5, "pauses of delivery polls and the router wait; a window in which rejects must NOT be delivered; the dead webhook's delivery timeout, after which a panic would have happened"},
 }
 
+// The use cases (e2e/tests/usecases/*.spec.ts) follow a hand-over to the one
+// who uses it, and reach the server only as that one does: an operator at the
+// gate in their own browser, a client through lib.ts's clientAt, the webhook
+// consumer through what it was sent. A background fact comes from lib.ts's
+// given, the one file that may call the API. The specs before them planted the
+// token, set the rules with a PUT and read the outcome from the API, so what
+// one person did was rarely what the next one met.
+var (
+	usecaseRules = map[string]*regexp.Regexp{
+		// The e2e helpers that talk to the console API or the site themselves:
+		// helpers.ts's api, probe and unlock (it plants the token), replicas.spec.ts's
+		// status, rules and open, and fetch. Containers and files are out of reach
+		// through the imports.
+		"api-call":        regexp.MustCompile(`(?m)(?:^|[^.\w])(?:api|probe|unlock|status|rules|open|fetch)\(`),
+		"request-context": regexp.MustCompile(`\.request\b|\brequest\.\w+\(`),
+		"planted-session": regexp.MustCompile(`\baddCookies\(|\bstorageState\b|\bsessionStorage\b|\baddInitScript\(`),
+	}
+	usecaseImport  = regexp.MustCompile(`(?m)^import\s+(?:[^;]*?\bfrom\s+)?['"]([^'"]+)['"]|\bimport\(\s*['"]([^'"]+)['"]`)
+	usecaseImports = map[string]bool{"./lib": true, "@playwright/test": true}
+)
+
+func importsOf(src string) []string {
+	var out []string
+	for _, m := range usecaseImport.FindAllStringSubmatch(src, -1) {
+		out = append(out, m[1]+m[2])
+	}
+	return out
+}
+
+func TestAUseCaseReachesTheServerOnlyAsAPersonOrAClient(t *testing.T) {
+	specs, err := filepath.Glob("e2e/tests/usecases/*.spec.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) < 4 {
+		t.Fatalf("found only %d use-case specs; is the glob still right?", len(specs))
+	}
+	for _, p := range specs {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f := shapeFindings(usecaseRules, string(b)); len(f) > 0 {
+			t.Errorf("%s: %v. A use case reaches the server only as a person or a client does; a background fact belongs in lib.ts's given.", p, f)
+		}
+		imported := importsOf(string(b))
+		if len(imported) == 0 {
+			t.Errorf("%s imports nothing; is the import pattern still right?", p)
+		}
+		for _, m := range imported {
+			if !usecaseImports[m] {
+				t.Errorf("%s imports %q; a use case is written against ./lib and @playwright/test only", p, m)
+			}
+		}
+	}
+}
+
 func tsFindings(src string) map[string]int {
 	found := map[string]int{}
 	for name, re := range tsShapes {
@@ -183,6 +240,38 @@ func TestTheHygieneScanCatchesWhatItIsFor(t *testing.T) {
 	} {
 		if got := tsFindings(src); !equalCounts(got, want) {
 			t.Errorf("%q: %v, want %v", src, got, want)
+		}
+	}
+	for src, want := range map[string]map[string]int{
+		// What the use cases replaced, verbatim from the specs before them.
+		"await unlock(page)": {"api-call": 1},
+		"await page.addInitScript((t) => sessionStorage.setItem('scanguard.token', t), TOKEN)":           {"planted-session": 2},
+		"expect(await probe(request, ip, trap)).toBe(403)":                                               {"api-call": 1},
+		"await api(request, '/api/rules', { method: 'PUT', data: effective })":                           {"api-call": 1},
+		"const { effective } = await (await rules(request, A.console)).json()":                           {"api-call": 1},
+		"await expect.poll(() => status(request, B.site, ip, '/'), SYNC).toBe(403)":                      {"api-call": 1},
+		"await open(page, B.console)":                                                                    {"api-call": 1},
+		"(await request.get(site + path, { headers: { 'X-Real-Ip': ip }, maxRedirects: 0 })).status()":   {"request-context": 1},
+		"await page.request.get('/api/state')":                                                           {"request-context": 1},
+		"const r = await fetch(`${CONSOLE}/api/health`)":                                                 {"api-call": 1},
+		"await context.addCookies(cookies)\nawait browser.newContext({ storageState: 'operator.json' })": {"planted-session": 2},
+		// ... and what a use case is made of.
+		"const operator = await browserOf(browser, THE_OPERATOR)\nexpect(await scanner.gets('/wp-login.php')).toBe(403)\n" +
+			"await expect.poll(() => delivered(scanner.key)).toEqual(['ban'])\nawait theRunner.restartsTraefik()\n" +
+			"test.afterEach(() => given.fileRules())\nexpect(r.status()).toBe(200)": {},
+	} {
+		if got := shapeFindings(usecaseRules, src); !equalCounts(got, want) {
+			t.Errorf("use case %q: %v, want %v", src, got, want)
+		}
+	}
+	for src, want := range map[string]string{
+		"import {\n  a,\n  b,\n} from './lib'\nimport type { Page } from '@playwright/test'\n": "./lib @playwright/test",
+		"import { api, probe } from '../helpers'":                                              "../helpers",
+		"const { execFile } = await import('node:child_process')":                              "node:child_process",
+		"import './setup'": "./setup",
+	} {
+		if got := strings.Join(importsOf(src), " "); got != want {
+			t.Errorf("imports of %q: %q, want %q", src, got, want)
 		}
 	}
 	if got := shapeFindings(goShapes, "time.Sleep(50 * time.Millisecond)"); got["sleep"] != 1 {
